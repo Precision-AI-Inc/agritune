@@ -10,8 +10,8 @@ dynamic = ["version"]
 description = "Precision AI — train and evaluate agricultural segmentation decoders on frozen remote ViT encoder features."
 readme = "README.md"
 license = { file = "LICENSE.md" }
-authors = [{ name = "Precision AI", email = "michael@precision.ai" }]
-maintainers = [{ name = "Precision AI", email = "michael@precision.ai" }]
+authors = [{ name = "Precision AI", email = "hazem@precision.ai" }]
+maintainers = [{ name = "Precision AI", email = "hazem@precision.ai" }]
 requires-python = ">=3.10"
 keywords = [
     "agriculture",
