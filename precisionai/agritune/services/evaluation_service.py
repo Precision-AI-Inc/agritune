@@ -7,8 +7,9 @@ Loads a trained decoder from a checkpoint and scores it against a dataset (or a 
 sample IDs, e.g. a held-out test split).
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -43,7 +44,11 @@ class EvaluationRunConfig:
     encoder_fingerprint : EncoderFingerprint
         Must match what the feature store was built with.
     decoder_name : str
-        ``"linear"`` or ``"token_fpn"`` — must match the checkpointed decoder's architecture.
+        ``"mlp_probe"``, ``"token_fpn"``, ``"aspp"``, ``"ppm"``, ``"segmenter"``, or
+        ``"mask_former"`` — must match the checkpointed decoder's architecture.
+    decoder_kwargs : dict[str, Any]
+        Extra keyword arguments the decoder was constructed with during training (e.g.
+        ``hidden_dims``) — must match exactly, or the checkpoint's state dict will not load.
     batch_size : int
     sample_ids : list[str] | None
         Restrict evaluation to these sample IDs (e.g. a held-out test split); ``None`` evaluates
@@ -54,7 +59,8 @@ class EvaluationRunConfig:
     checkpoint_path: str
     num_classes: int
     encoder_fingerprint: EncoderFingerprint
-    decoder_name: str = "linear"
+    decoder_name: str = "mlp_probe"
+    decoder_kwargs: dict[str, Any] = field(default_factory=dict)
     batch_size: int = 4
     sample_ids: list[str] | None = None
 
@@ -99,6 +105,7 @@ def run_evaluation(config: EvaluationRunConfig, *, store: FeatureStore) -> dict[
         cls_dim=cls_dim,
         num_classes=config.num_classes,
         output_size=output_size,
+        **config.decoder_kwargs,
     )
     checkpoint = CheckpointManager(Path(config.checkpoint_path).parent).load(config.checkpoint_path)
     decoder.load_state_dict(checkpoint.decoder_state)

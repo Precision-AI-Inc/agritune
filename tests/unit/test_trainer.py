@@ -21,7 +21,7 @@ from precisionai.agritune.optimization.schedulers import SchedulerConfig, build_
 from precisionai.agritune.schemas.features import EncoderFeatures
 from precisionai.agritune.schemas.protocols import FeatureAugmentation
 from precisionai.agritune.schemas.samples import PreparedSample
-from precisionai.agritune.tasks.segmentation.decoders.linear import LinearProbeDecoder
+from precisionai.agritune.tasks.segmentation.decoders.mlp_probe import MLPProbeDecoder
 from precisionai.agritune.tasks.segmentation.losses import SegmentationLoss, SegmentationLossConfig
 from precisionai.agritune.tasks.segmentation.metrics import SegmentationMetric
 from precisionai.agritune.tasks.segmentation.task import SegmentationTask
@@ -94,9 +94,9 @@ def _build_trainer(
     checkpoint_every_n_steps: int | None = None,
     tracker: _FakeTracker | None = None,
     feature_augmentation: FeatureAugmentation | None = None,
-) -> tuple[Trainer, LinearProbeDecoder]:
+) -> tuple[Trainer, MLPProbeDecoder]:
     set_deterministic_seed(seed)  # ensures identical decoder initialization across builds
-    decoder = LinearProbeDecoder(patch_dim=4, num_classes=2, output_size=(2, 2))
+    decoder = MLPProbeDecoder(patch_dim=4, num_classes=2, output_size=(2, 2))
     loss = SegmentationLoss(SegmentationLossConfig(name="ce"), num_classes=2)
     task = SegmentationTask(decoder, loss)
     provider = _DeterministicFeatureProvider(patch_dim=4, patch_grid=(2, 2))
@@ -232,7 +232,7 @@ def test_grad_clip_norm_bounds_gradient_magnitude() -> None:
     batch = TrainingBatch(samples=[_sample("a"), _sample("b")], targets=torch.randint(0, 2, (2, 2, 2)))
     trainer.fit([batch])
     # A tiny clip norm keeps the single optimizer step's effect on weights very small.
-    assert decoder.projection.weight.abs().max().item() < 0.5
+    assert decoder.mlp[0].weight.abs().max().item() < 0.5
 
 
 class _RecordingFeatureAugmentation:

@@ -130,7 +130,10 @@ class ScoredRunRequest(BaseModel):
     store: str
     checkpoint_path: str
     num_classes: int
-    decoder: str = Field(default="linear", description='"linear" or "token_fpn".')
+    decoder: str = Field(
+        default="mlp_probe",
+        description='"mlp_probe", "token_fpn", "aspp", "ppm", "segmenter", or "mask_former".',
+    )
     batch_size: int = 4
     sample_ids: list[str] | None = None
     encoder_fingerprint: EncoderFingerprintRequest = Field(default_factory=EncoderFingerprintRequest)

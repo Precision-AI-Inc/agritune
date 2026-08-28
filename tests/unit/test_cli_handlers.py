@@ -71,7 +71,7 @@ def test_train_runs_full_pipeline_from_yaml_config(tmp_path: Path, capsys: pytes
         "run_id": "cli-run",
         "num_classes": 2,
         "encoder_fingerprint": {"model": "fake-encoder", "revision": "fake-v1", "preprocessing": ""},
-        "decoder_name": "linear",
+        "decoder_name": "mlp_probe",
         "batch_size": 2,
         "val_fraction": 0.34,
         "optimizer": {"name": "adamw", "lr": 0.05},

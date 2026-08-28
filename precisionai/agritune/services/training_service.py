@@ -7,8 +7,8 @@ Supports every ``augmentation.mode`` x ``feature_provider`` combination the plan
 hierarchy (§23) calls for, except ``cached`` combined with ``online``/``hybrid`` augmentation —
 rejected up front, since a cached provider's key would only ever match the first epoch's
 augmentation fingerprint. This is also the module the plan's central integration test exercises:
-tiny dataset -> fake encoder -> feature precompute -> linear decoder -> train -> checkpoint ->
-resume -> evaluate.
+tiny dataset -> fake encoder -> feature precompute -> decoder -> train -> checkpoint -> resume ->
+evaluate.
 """
 
 from dataclasses import dataclass, field
@@ -110,7 +110,11 @@ class TrainingRunConfig:
         Ignored when ``encoder_base_url`` is ``None``.
     augmentation : AugmentationSelection
     decoder_name : str
-        ``"linear"`` or ``"token_fpn"``.
+        ``"mlp_probe"``, ``"token_fpn"``, ``"aspp"``, ``"ppm"``, ``"segmenter"``, or
+        ``"mask_former"`` — see :func:`~precisionai.agritune.services.segmentation_common.build_decoder`.
+    decoder_kwargs : dict[str, Any]
+        Extra keyword arguments forwarded to the decoder's constructor (e.g. ``hidden_dims`` for
+        ``"mlp_probe"``, ``atrous_rates`` for ``"aspp"``).
     batch_size : int
     val_fraction : float
         Fraction of samples held out for validation (via a random split). Validation always uses
@@ -138,7 +142,8 @@ class TrainingRunConfig:
     encoder_base_url: str | None = None
     encoder_api_key: str | None = None
     augmentation: AugmentationSelection = field(default_factory=AugmentationSelection)
-    decoder_name: str = "linear"
+    decoder_name: str = "mlp_probe"
+    decoder_kwargs: dict[str, Any] = field(default_factory=dict)
     batch_size: int = 4
     val_fraction: float = 0.2
     seed: int = 0
@@ -286,6 +291,7 @@ def run_training(config: TrainingRunConfig, *, store: DirectoryFeatureStore | Sh
         cls_dim=cls_dim,
         num_classes=config.num_classes,
         output_size=output_size,
+        **config.decoder_kwargs,
     )
     task = SegmentationTask(decoder, SegmentationLoss(config.loss, num_classes=config.num_classes))
     optimizer = build_optimizer(decoder.parameters(), config.optimizer)

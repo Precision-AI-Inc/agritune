@@ -6,7 +6,7 @@
 import torch
 
 from precisionai.agritune.schemas.samples import PreparedSample
-from precisionai.agritune.tasks.segmentation.decoders.linear import LinearProbeDecoder
+from precisionai.agritune.tasks.segmentation.decoders.mlp_probe import MLPProbeDecoder
 from precisionai.agritune.tasks.segmentation.losses import SegmentationLoss, SegmentationLossConfig
 from precisionai.agritune.tasks.segmentation.metrics import SegmentationMetric
 from precisionai.agritune.tasks.segmentation.task import SegmentationTask
@@ -19,7 +19,7 @@ def _sample(sample_id: str) -> PreparedSample:
 
 
 def _task() -> SegmentationTask:
-    decoder = LinearProbeDecoder(patch_dim=8, num_classes=3, output_size=(4, 4))
+    decoder = MLPProbeDecoder(patch_dim=8, num_classes=3, output_size=(4, 4))
     loss = SegmentationLoss(SegmentationLossConfig(name="ce"), num_classes=3)
     return SegmentationTask(decoder, loss)
 
@@ -46,9 +46,9 @@ def test_evaluate_does_not_track_gradients() -> None:
 
     evaluate(task, provider, [batch], metric)
 
-    linear_decoder = task.decoder
-    assert isinstance(linear_decoder, LinearProbeDecoder)
-    assert linear_decoder.projection.weight.grad is None
+    mlp_decoder = task.decoder
+    assert isinstance(mlp_decoder, MLPProbeDecoder)
+    assert mlp_decoder.mlp[0].weight.grad is None
 
 
 def test_training_batch_holds_samples_and_targets() -> None:

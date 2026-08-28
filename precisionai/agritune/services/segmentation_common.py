@@ -28,9 +28,21 @@ from precisionai.agritune.features.keys import EncoderFingerprint, hash_image_by
 from precisionai.agritune.features.provider import CachedFeatureProvider
 from precisionai.agritune.schemas.protocols import FeatureProvider, FeatureStore
 from precisionai.agritune.schemas.samples import PreparedSample
-from precisionai.agritune.tasks.segmentation.decoders.linear import LinearProbeDecoder
-from precisionai.agritune.tasks.segmentation.decoders.token_fpn import TokenFPNDecoder
+from precisionai.agritune.tasks.segmentation.decoders.aspp import ASPPDecoder
+from precisionai.agritune.tasks.segmentation.decoders.mask_former import MaskFormerDecoder
+from precisionai.agritune.tasks.segmentation.decoders.mlp_probe import MLPProbeDecoder
+from precisionai.agritune.tasks.segmentation.decoders.pyramid_pooling import PyramidPoolingDecoder
+from precisionai.agritune.tasks.segmentation.decoders.segmenter import SegmenterMaskTransformerDecoder
+from precisionai.agritune.tasks.segmentation.decoders.token_fpn import CLSFusion, TokenFPNDecoder
 from precisionai.agritune.training.evaluator import TrainingBatch
+
+_DECODER_BUILDERS: dict[str, Callable[..., nn.Module]] = {
+    "mlp_probe": MLPProbeDecoder,
+    "aspp": ASPPDecoder,
+    "ppm": PyramidPoolingDecoder,
+    "segmenter": SegmenterMaskTransformerDecoder,
+    "mask_former": MaskFormerDecoder,
+}
 
 
 def mask_to_target_tensor(mask: Any) -> torch.Tensor:
@@ -169,14 +181,54 @@ def build_prediction_batches(dataset: ManifestDataset, *, batch_size: int) -> li
 
 
 def build_decoder(
-    name: str, *, patch_dim: int, cls_dim: int | None, num_classes: int, output_size: tuple[int, int]
+    name: str,
+    *,
+    patch_dim: int,
+    cls_dim: int | None,
+    num_classes: int,
+    output_size: tuple[int, int],
+    **kwargs: Any,
 ) -> nn.Module:
-    """Construct the named decoder (``"linear"`` or ``"token_fpn"``)."""
-    if name == "linear":
-        return LinearProbeDecoder(patch_dim=patch_dim, num_classes=num_classes, output_size=output_size)
+    """Construct the named decoder.
+
+    Parameters
+    ----------
+    name : str
+        ``"mlp_probe"``, ``"token_fpn"``, ``"aspp"``, ``"ppm"``, ``"segmenter"``, or
+        ``"mask_former"``.
+    patch_dim : int
+        Patch embedding dimension.
+    cls_dim : int | None
+        CLS embedding dimension; only consulted by ``"token_fpn"``.
+    num_classes : int
+        Number of segmentation classes.
+    output_size : tuple[int, int]
+        ``(height, width)`` to upsample logits to.
+    **kwargs : Any
+        Forwarded to the selected decoder's constructor — e.g. ``hidden_dims`` for
+        ``"mlp_probe"``, ``atrous_rates`` for ``"aspp"``, ``pool_sizes`` for ``"ppm"``,
+        ``num_queries`` for ``"mask_former"``, or ``cls_fusion``/``hidden_dim`` for ``"token_fpn"``.
+
+    Returns
+    -------
+    torch.nn.Module
+
+    Raises
+    ------
+    ValueError
+        If ``name`` is not one of the supported decoders.
+    """
     if name == "token_fpn":
-        return TokenFPNDecoder(patch_dim=patch_dim, num_classes=num_classes, output_size=output_size, cls_dim=cls_dim)
-    raise ValueError(f"unsupported decoder: {name!r}")
+        if "cls_fusion" in kwargs:
+            kwargs = {**kwargs, "cls_fusion": CLSFusion(kwargs["cls_fusion"])}
+        return TokenFPNDecoder(
+            patch_dim=patch_dim, num_classes=num_classes, output_size=output_size, cls_dim=cls_dim, **kwargs
+        )
+
+    decoder_cls = _DECODER_BUILDERS.get(name)
+    if decoder_cls is None:
+        raise ValueError(f"unsupported decoder: {name!r}")
+    return decoder_cls(patch_dim=patch_dim, num_classes=num_classes, output_size=output_size, **kwargs)
 
 
 def probe_feature_dims(provider: FeatureProvider, sample: PreparedSample) -> tuple[int, int | None]:

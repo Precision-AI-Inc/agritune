@@ -1,0 +1,5 @@
+# ASPP: parallel dilated convolutions at several rates plus a global-context branch, fused into
+# per-pixel class logits. Multi-scale context from a single patch-grid resolution.
+name: aspp
+hidden_dim: 128
+atrous_rates: [6, 12, 18]

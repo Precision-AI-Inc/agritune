@@ -99,7 +99,12 @@ def _add_scored_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--store", required=True, help="Directory the feature store was built in.")
     parser.add_argument("--checkpoint", required=True, help="Path to a checkpoint (e.g. last.ckpt/best.ckpt).")
     parser.add_argument("--num-classes", type=int, required=True, help="Number of segmentation classes.")
-    parser.add_argument("--decoder", default="linear", choices=["linear", "token_fpn"], help="Decoder architecture.")
+    parser.add_argument(
+        "--decoder",
+        default="mlp_probe",
+        choices=["mlp_probe", "token_fpn", "aspp", "ppm", "segmenter", "mask_former"],
+        help="Decoder architecture.",
+    )
     parser.add_argument("--batch-size", type=int, default=4, help="Batch size.")
     parser.add_argument(
         "--sample-ids", nargs="*", default=None, help="Restrict to these sample IDs; omit for the whole manifest."

@@ -33,22 +33,64 @@ from precisionai.agritune.services.segmentation_common import (
     mask_to_target_tensor,
     probe_feature_dims,
 )
-from precisionai.agritune.tasks.segmentation.decoders.linear import LinearProbeDecoder
-from precisionai.agritune.tasks.segmentation.decoders.token_fpn import TokenFPNDecoder
+from precisionai.agritune.tasks.segmentation.decoders.aspp import ASPPDecoder
+from precisionai.agritune.tasks.segmentation.decoders.mask_former import MaskFormerDecoder
+from precisionai.agritune.tasks.segmentation.decoders.mlp_probe import MLPProbeDecoder
+from precisionai.agritune.tasks.segmentation.decoders.pyramid_pooling import PyramidPoolingDecoder
+from precisionai.agritune.tasks.segmentation.decoders.segmenter import SegmenterMaskTransformerDecoder
+from precisionai.agritune.tasks.segmentation.decoders.token_fpn import CLSFusion, TokenFPNDecoder
 from tests.fixtures.image_factory import make_image, make_mask
 from tests.fixtures.manifest_factory import build_manifest
 
 _FINGERPRINT = EncoderFingerprint(model="fake-encoder", revision="fake-v1", preprocessing="resize=8x8")
 
 
-def test_build_decoder_linear() -> None:
-    decoder = build_decoder("linear", patch_dim=8, cls_dim=None, num_classes=2, output_size=(4, 4))
-    assert isinstance(decoder, LinearProbeDecoder)
+def test_build_decoder_mlp_probe() -> None:
+    decoder = build_decoder("mlp_probe", patch_dim=8, cls_dim=None, num_classes=2, output_size=(4, 4))
+    assert isinstance(decoder, MLPProbeDecoder)
+
+
+def test_build_decoder_mlp_probe_forwards_kwargs() -> None:
+    decoder = build_decoder(
+        "mlp_probe", patch_dim=8, cls_dim=None, num_classes=2, output_size=(4, 4), hidden_dims=(16,)
+    )
+    assert isinstance(decoder, MLPProbeDecoder)
+    assert decoder.hidden_dims == (16,)
 
 
 def test_build_decoder_token_fpn() -> None:
     decoder = build_decoder("token_fpn", patch_dim=8, cls_dim=None, num_classes=2, output_size=(4, 4))
     assert isinstance(decoder, TokenFPNDecoder)
+
+
+def test_build_decoder_token_fpn_converts_cls_fusion_string_to_enum() -> None:
+    decoder = build_decoder("token_fpn", patch_dim=8, cls_dim=8, num_classes=2, output_size=(4, 4), cls_fusion="concat")
+    assert isinstance(decoder, TokenFPNDecoder)
+    assert decoder.cls_fusion is CLSFusion.CONCAT
+
+
+def test_build_decoder_aspp() -> None:
+    decoder = build_decoder("aspp", patch_dim=8, cls_dim=None, num_classes=2, output_size=(4, 4))
+    assert isinstance(decoder, ASPPDecoder)
+
+
+def test_build_decoder_ppm() -> None:
+    decoder = build_decoder("ppm", patch_dim=8, cls_dim=None, num_classes=2, output_size=(4, 4))
+    assert isinstance(decoder, PyramidPoolingDecoder)
+
+
+def test_build_decoder_segmenter() -> None:
+    decoder = build_decoder(
+        "segmenter", patch_dim=8, cls_dim=None, num_classes=2, output_size=(4, 4), hidden_dim=8, num_heads=2
+    )
+    assert isinstance(decoder, SegmenterMaskTransformerDecoder)
+
+
+def test_build_decoder_mask_former() -> None:
+    decoder = build_decoder(
+        "mask_former", patch_dim=8, cls_dim=None, num_classes=2, output_size=(4, 4), hidden_dim=8, num_heads=2
+    )
+    assert isinstance(decoder, MaskFormerDecoder)
 
 
 def test_build_decoder_unsupported_name_raises() -> None:

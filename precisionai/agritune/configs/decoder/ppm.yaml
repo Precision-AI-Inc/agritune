@@ -1,0 +1,5 @@
+# PSPNet-style pyramid pooling module: parallel adaptive-average-pool bins, upsampled and
+# concatenated with the original grid, then fused into per-pixel class logits.
+name: ppm
+hidden_dim: 128
+pool_sizes: [1, 2, 3, 6]

@@ -50,6 +50,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`none`/`offline`/`online`/`hybrid`), and `tracking` selection are now wired end-to-end into
   `run_training`, which rejects the `augmentation=online|hybrid` + `feature_provider=cached`
   combination before training starts.
+- Four new segmentation decoders, alongside a generalized MLP probe replacing the old
+  linear-only baseline: `ASPPDecoder` (Atrous Spatial Pyramid Pooling, DeepLabv3-style),
+  `PyramidPoolingDecoder` (PSPNet-style pyramid pooling), `SegmenterMaskTransformerDecoder`
+  (Segmenter-style joint patch/class-token transformer with a scaled dot-product mask head), and
+  `MaskFormerDecoder` (MaskFormer/Mask2Former-style query-based mask classification, combined into
+  dense per-pixel scores rather than trained with the original papers' bipartite-matching loss).
+  `LinearProbeDecoder` is replaced by `MLPProbeDecoder` (`decoder=mlp_probe`): with
+  `hidden_dims=()` (the default) it is architecturally identical to the old linear probe;
+  `hidden_dims=(256,)` etc. adds non-linear depth. `build_decoder` now accepts a generic
+  `decoder_kwargs` passthrough forwarded to any decoder's constructor (also newly closing a gap
+  for `TokenFPNDecoder`'s `cls_fusion`/`hidden_dim`, previously unconfigurable outside direct
+  Python construction) — set via each decoder's own Hydra config-group variant
+  (`configs/decoder/{mlp_probe,token_fpn,aspp,ppm,segmenter,mask_former}.yaml`).
 
 ### Changed
 

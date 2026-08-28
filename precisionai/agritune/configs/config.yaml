@@ -11,7 +11,7 @@ defaults:
   - augmentation: none
   - feature_provider: cached
   - task: segmentation
-  - decoder: linear
+  - decoder: mlp_probe
   - optimizer: adamw
   - scheduler: none
   - tracking: jsonl

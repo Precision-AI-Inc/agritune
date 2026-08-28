@@ -6,8 +6,9 @@
 Loads a trained decoder from a checkpoint and writes one per-pixel class-index PNG per sample.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
@@ -44,7 +45,11 @@ class PredictionRunConfig:
     num_classes : int
     encoder_fingerprint : EncoderFingerprint
     decoder_name : str
-        ``"linear"`` or ``"token_fpn"`` — must match the checkpointed decoder's architecture.
+        ``"mlp_probe"``, ``"token_fpn"``, ``"aspp"``, ``"ppm"``, ``"segmenter"``, or
+        ``"mask_former"`` — must match the checkpointed decoder's architecture.
+    decoder_kwargs : dict[str, Any]
+        Extra keyword arguments the decoder was constructed with during training (e.g.
+        ``hidden_dims``) — must match exactly, or the checkpoint's state dict will not load.
     batch_size : int
     sample_ids : list[str] | None
         Restrict to these sample IDs; ``None`` predicts every row in the manifest.
@@ -63,7 +68,8 @@ class PredictionRunConfig:
     output_dir: str
     num_classes: int
     encoder_fingerprint: EncoderFingerprint
-    decoder_name: str = "linear"
+    decoder_name: str = "mlp_probe"
+    decoder_kwargs: dict[str, Any] = field(default_factory=dict)
     batch_size: int = 4
     sample_ids: list[str] | None = None
     write_overlays: bool = False
@@ -107,6 +113,7 @@ def run_prediction(config: PredictionRunConfig, *, store: FeatureStore) -> list[
         cls_dim=cls_dim,
         num_classes=config.num_classes,
         output_size=output_size,
+        **config.decoder_kwargs,
     )
     checkpoint = CheckpointManager(Path(config.checkpoint_path).parent).load(config.checkpoint_path)
     decoder.load_state_dict(checkpoint.decoder_state)

@@ -21,7 +21,7 @@ body:
       label: Steps to reproduce
       description: Minimal config, CLI command, or code to reproduce the issue.
       placeholder: |
-        agritune train dataset=... encoder=fake decoder=linear
+        agritune train dataset=... encoder=fake decoder=mlp_probe
         ...
     validations:
       required: true

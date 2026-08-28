@@ -58,7 +58,7 @@ runs instead of repeating an entire flat config file per experiment.
 | `augmentation` | `none`, `offline`, `online`, `hybrid` | `AugmentationSelection` (mode, geometric/photometric transforms) |
 | `feature_provider` | `cached`, `online`, `hybrid` | which `FeatureProvider` `run_training` builds |
 | `task` | `segmentation` | loss config, `val_metric_name`, `higher_is_better` |
-| `decoder` | `linear`, `token_fpn` | `decoder_name` |
+| `decoder` | `mlp_probe`, `token_fpn`, `aspp`, `ppm`, `segmenter`, `mask_former` | `decoder_name` + `decoder_kwargs` |
 | `optimizer` | `adamw`, `adam`, `sgd` | `OptimizerConfig` |
 | `scheduler` | `none`, `cosine`, `cosine_warmup`, `linear_warmup`, `polynomial`, `plateau` | `SchedulerConfig`, or no scheduler |
 | `tracking` | `null`, `jsonl`, `tensorboard`, `local` (jsonl+tensorboard), `mlflow`, `wandb`, `neptune`, `comet` | `TrackingSelection` |

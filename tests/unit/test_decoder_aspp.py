@@ -1,13 +1,13 @@
 # Copyright 2026 Precision AI
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for precisionai.agritune.tasks.segmentation.decoders.linear.LinearProbeDecoder."""
+"""Unit tests for precisionai.agritune.tasks.segmentation.decoders.aspp.ASPPDecoder."""
 
 import pytest
 import torch
 
 from precisionai.agritune.schemas.features import EncoderFeatures
-from precisionai.agritune.tasks.segmentation.decoders.linear import LinearProbeDecoder
+from precisionai.agritune.tasks.segmentation.decoders.aspp import ASPPDecoder
 
 
 def _features(*, batch_size: int = 2, grid: tuple[int, int] = (4, 4), patch_dim: int = 8) -> EncoderFeatures:
@@ -24,13 +24,25 @@ def _features(*, batch_size: int = 2, grid: tuple[int, int] = (4, 4), patch_dim:
 
 
 def test_output_shape_matches_output_size_and_num_classes() -> None:
-    decoder = LinearProbeDecoder(patch_dim=8, num_classes=5, output_size=(64, 64))
+    decoder = ASPPDecoder(patch_dim=8, num_classes=5, output_size=(64, 64), hidden_dim=16)
     logits = decoder(_features(batch_size=3, grid=(4, 4), patch_dim=8))
     assert logits.shape == (3, 5, 64, 64)
 
 
+def test_custom_atrous_rates_are_stored_and_produce_one_branch_each() -> None:
+    decoder = ASPPDecoder(patch_dim=8, num_classes=4, output_size=(8, 8), hidden_dim=8, atrous_rates=(2, 4))
+    assert decoder.atrous_rates == (2, 4)
+    assert len(decoder.branches) == 3  # 1x1 branch + two dilated branches
+
+
+def test_tiny_patch_grid_does_not_raise() -> None:
+    decoder = ASPPDecoder(patch_dim=8, num_classes=2, output_size=(4, 4), hidden_dim=8)
+    logits = decoder(_features(grid=(1, 1), patch_dim=8))
+    assert logits.shape == (2, 2, 4, 4)
+
+
 def test_non_uniform_patch_grid_raises() -> None:
-    decoder = LinearProbeDecoder(patch_dim=8, num_classes=5, output_size=(32, 32))
+    decoder = ASPPDecoder(patch_dim=8, num_classes=5, output_size=(32, 32))
     features = EncoderFeatures(
         patch_tokens=torch.randn(2, 16, 8),
         cls_tokens=None,
@@ -44,15 +56,15 @@ def test_non_uniform_patch_grid_raises() -> None:
         decoder(features)
 
 
-def test_gradients_flow_to_projection_weight() -> None:
-    decoder = LinearProbeDecoder(patch_dim=8, num_classes=3, output_size=(16, 16))
+def test_gradients_flow_to_classifier_weight() -> None:
+    decoder = ASPPDecoder(patch_dim=8, num_classes=3, output_size=(16, 16), hidden_dim=8)
     logits = decoder(_features(grid=(2, 2), patch_dim=8))
     logits.sum().backward()
-    assert decoder.projection.weight.grad is not None
-    assert torch.any(decoder.projection.weight.grad != 0)
+    assert decoder.classifier.weight.grad is not None
+    assert torch.any(decoder.classifier.weight.grad != 0)
 
 
 def test_rectangular_output_size() -> None:
-    decoder = LinearProbeDecoder(patch_dim=8, num_classes=2, output_size=(30, 50))
+    decoder = ASPPDecoder(patch_dim=8, num_classes=2, output_size=(30, 50), hidden_dim=8)
     logits = decoder(_features(grid=(3, 5), patch_dim=8))
     assert logits.shape == (2, 2, 30, 50)

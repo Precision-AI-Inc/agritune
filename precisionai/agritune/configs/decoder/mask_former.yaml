@@ -1,0 +1,9 @@
+# MaskFormer/Mask2Former-style mask classification: learnable object queries cross-attend to
+# patch tokens, then per-query class + mask predictions combine into per-pixel class scores.
+name: mask_former
+hidden_dim: 128
+num_queries: 32
+num_layers: 2
+num_heads: 4
+mlp_ratio: 4
+dropout: 0.0

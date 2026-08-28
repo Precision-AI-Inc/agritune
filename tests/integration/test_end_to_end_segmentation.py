@@ -3,7 +3,7 @@
 
 """The main end-to-end integration test (``agritune_implementation_plan.md`` §22):
 
-tiny dataset -> fake encoder -> feature precompute -> linear segmentation decoder -> train ->
+tiny dataset -> fake encoder -> feature precompute -> segmentation decoder -> train ->
 checkpoint -> resume -> evaluate.
 
 No external resources are used (only ``FakeEncoderBackend``), so this runs in default CI — it is
@@ -49,7 +49,7 @@ async def test_full_pipeline_train_checkpoint_resume_evaluate(tmp_path: Path) ->
         run_id="e2e-run",
         num_classes=2,
         encoder_fingerprint=_FINGERPRINT,
-        decoder_name="linear",
+        decoder_name="mlp_probe",
         batch_size=2,
         val_fraction=0.34,
         seed=0,
@@ -77,7 +77,7 @@ async def test_full_pipeline_train_checkpoint_resume_evaluate(tmp_path: Path) ->
         run_id=base_config.run_id,
         num_classes=2,
         encoder_fingerprint=_FINGERPRINT,
-        decoder_name="linear",
+        decoder_name="mlp_probe",
         batch_size=2,
         val_fraction=0.34,
         seed=0,

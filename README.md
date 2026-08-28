@@ -102,7 +102,7 @@ precisionai/agritune/
   optimization/   # optimizer/scheduler registries
   schemas/        # EncoderFeatures, Sample, PreparedSample, and core protocols
   services/       # orchestration used by both the CLI and the API
-  tasks/segmentation/decoders/   # linear probe, TokenFPN
+  tasks/segmentation/decoders/   # MLP probe, TokenFPN, ASPP, pyramid pooling, Segmenter, MaskFormer
   tracking/       # Tracker protocol + JSONL/TensorBoard/MLflow/W&B/Neptune/Comet backends
   training/       # Trainer, evaluator, checkpointing, distributed
   utils/

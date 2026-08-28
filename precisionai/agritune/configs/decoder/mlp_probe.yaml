@@ -1,0 +1,5 @@
+# The diagnostic baseline: patch tokens -> per-patch MLP -> per-patch logits -> upsample.
+# hidden_dims: [] (the default) collapses to a single linear projection — the original
+# linear-probe behavior. Set e.g. hidden_dims: [256] for a deeper, non-linear probe.
+name: mlp_probe
+hidden_dims: []

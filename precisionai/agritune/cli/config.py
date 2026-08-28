@@ -96,7 +96,8 @@ def _flatten_composed_groups(composed: dict[str, Any]) -> dict[str, Any]:
     }
     flat["encoder_base_url"] = encoder.get("base_url")
     flat["encoder_api_key"] = encoder.get("api_key")
-    flat["decoder_name"] = decoder.get("name", "linear")
+    flat["decoder_name"] = decoder.get("name", "mlp_probe")
+    flat["decoder_kwargs"] = {key: value for key, value in decoder.items() if key != "name"}
     flat["loss"] = task.get("loss", {})
     flat["val_metric_name"] = task.get("val_metric_name", "mean_iou")
     flat["higher_is_better"] = task.get("higher_is_better", True)
@@ -172,7 +173,8 @@ def _config_from_dict(data: dict[str, Any]) -> TrainingRunConfig:
         encoder_base_url=data.get("encoder_base_url"),
         encoder_api_key=data.get("encoder_api_key"),
         augmentation=_augmentation_from_dict(dict(data.get("augmentation") or {})),
-        decoder_name=data.get("decoder_name", "linear"),
+        decoder_name=data.get("decoder_name", "mlp_probe"),
+        decoder_kwargs=dict(data.get("decoder_kwargs") or {}),
         batch_size=data.get("batch_size", 4),
         val_fraction=data.get("val_fraction", 0.2),
         seed=seed,

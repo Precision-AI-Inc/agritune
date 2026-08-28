@@ -40,7 +40,7 @@ def test_default_group_selections_resolve(tmp_path: Path) -> None:
 
     assert config.feature_provider == "cached"
     assert config.augmentation.mode is AugmentationMode.NONE
-    assert config.decoder_name == "linear"
+    assert config.decoder_name == "mlp_probe"
     assert config.optimizer.name == "adamw"
     assert config.scheduler is None
     assert config.tracking.backends == ["jsonl"]
@@ -68,6 +68,18 @@ def test_group_variant_overrides_swap_the_selection(tmp_path: Path) -> None:
     assert config.scheduler is not None
     assert config.scheduler.name == "cosine"
     assert config.scheduler.total_steps == 100
+
+
+def test_decoder_kwargs_are_plumbed_through_from_the_group_config(tmp_path: Path) -> None:
+    config = load_training_run_config(str(_CONFIG_PATH), _overrides(tmp_path))
+    assert config.decoder_kwargs == {"hidden_dims": []}
+
+
+def test_decoder_group_variant_overrides_carry_their_own_kwargs(tmp_path: Path) -> None:
+    config = load_training_run_config(str(_CONFIG_PATH), _overrides(tmp_path, "decoder=aspp", "decoder.hidden_dim=64"))
+    assert config.decoder_name == "aspp"
+    assert config.decoder_kwargs["hidden_dim"] == 64
+    assert config.decoder_kwargs["atrous_rates"] == [6, 12, 18]
 
 
 def test_augmentation_offline_group_populates_geometric_and_photometric(tmp_path: Path) -> None:

@@ -16,9 +16,10 @@ class SegmentationTask:
     Parameters
     ----------
     decoder : torch.nn.Module
-        A :class:`~precisionai.agritune.tasks.segmentation.decoders.linear.LinearProbeDecoder`,
-        :class:`~precisionai.agritune.tasks.segmentation.decoders.token_fpn.TokenFPNDecoder`, or
-        any module satisfying :class:`~precisionai.agritune.schemas.protocols.Decoder`.
+        Any of the decoders in :mod:`precisionai.agritune.tasks.segmentation.decoders`
+        (:class:`~precisionai.agritune.tasks.segmentation.decoders.mlp_probe.MLPProbeDecoder`,
+        :class:`~precisionai.agritune.tasks.segmentation.decoders.token_fpn.TokenFPNDecoder`,
+        etc.), or any module satisfying :class:`~precisionai.agritune.schemas.protocols.Decoder`.
     loss : SegmentationLoss
         The configured loss to train against.
     """
