@@ -26,7 +26,7 @@ Coding standards, naming conventions, and tooling configuration are governed by 
 
 ## Status
 
-This repository is under active build-out following the phased plan in [agritune_implementation_plan.md](agritune_implementation_plan.md). The `v0.1.0` target ("first usable release") is: offline/no augmentation → remote encoder precomputation → local feature store → linear + TokenFPN decoders → AdamW + cosine schedule → AMP + gradient accumulation → checkpoint/resume → mIoU/Dice metrics → JSONL + TensorBoard tracking → a fully reproducible run directory. Online (rate-limited) training and distributed training land in `v0.2`/`v0.3`.
+This repository is under active build-out following the phased plan in [agritune_implementation_plan.md](agritune_implementation_plan.md). The `v0.1.0` target ("first usable release") — offline/no augmentation → remote encoder precomputation → local feature store → linear + TokenFPN decoders → AdamW + cosine schedule → AMP + gradient accumulation → checkpoint/resume → mIoU/Dice metrics → JSONL + TensorBoard tracking → a fully reproducible run directory — is complete. Most of `v0.2` has landed too: `OnlineFeatureProvider`/`HybridFeatureProvider`, a background-thread prefetch queue that overlaps encoding with training, `augmentation.mode: hybrid`, feature-space augmentation, an albumentations-based augmentation engine with agricultural domain-specific transforms, and a thin FastAPI layer alongside the CLI. Distributed (multi-GPU) training remains `v0.3`.
 
 ---
 
@@ -44,7 +44,7 @@ pip install -e ".[dev]"
 pre-commit install
 ```
 
-Optional tracking backends (TensorBoard/MLflow/W&B) are not required for training and are installed separately:
+Optional tracking backends (TensorBoard/MLflow/W&B/Neptune/Comet) are not required for training and are installed separately:
 
 ```bash
 pip install -e ".[tracking]"
@@ -58,25 +58,23 @@ pip install -e ".[tracking]"
 agritune --help
 ```
 
-Planned command surface (implemented incrementally — see the plan's milestone table):
-
 ```bash
-agritune dataset validate      # missing files, duplicate IDs, split leakage, class distribution
+agritune dataset validate      # missing files, duplicate IDs, invalid labels, dimension mismatch
 agritune dataset inspect       # dataset statistics
 
 agritune encoder benchmark     # empirical batch size / concurrency recommendations
 
 agritune features build        # resumable offline feature precomputation
-agritune features verify
-agritune features inspect
-agritune features clean
+agritune features verify       # checksum verification
+agritune features inspect      # store statistics
+agritune features clean        # remove orphaned tensor/meta files
 
 agritune train
 agritune evaluate
-agritune predict
+agritune predict                # --overlays writes a colorized prediction overlay per sample
 ```
 
-The CLI, a thin API layer, and direct Python usage all call the same `precisionai.agritune.services.*` layer — no logic is duplicated between entry points.
+The CLI, the FastAPI layer (`precisionai.agritune.api.create_app()`, one route per command above), and direct Python usage all call the same `precisionai.agritune.services.*` functions — no logic is duplicated between entry points.
 
 ---
 
@@ -98,14 +96,14 @@ precisionai/agritune/
   configs/        # Hydra config groups (dataset, encoder, augmentation, feature_provider, task, decoder, ...)
   data/           # dataset adapters, manifests, split strategies
   encoder/        # EncoderBackend protocol, FakeEncoderBackend, RemoteEncoderBackend, gateway, rate limiter
-  features/       # FeatureProvider, FeatureStore, cache keys, resumable precomputation
+  features/       # FeatureProvider (cached/online/hybrid/prefetching), FeatureStore, cache keys, resumable precomputation
   logging/        # structured logging setup
   metrics/        # pure computation (segmentation metrics, etc.)
   optimization/   # optimizer/scheduler registries
   schemas/        # EncoderFeatures, Sample, PreparedSample, and core protocols
   services/       # orchestration used by both the CLI and the API
   tasks/segmentation/decoders/   # linear probe, TokenFPN
-  tracking/       # Tracker protocol + JSONL/TensorBoard/MLflow/W&B backends
+  tracking/       # Tracker protocol + JSONL/TensorBoard/MLflow/W&B/Neptune/Comet backends
   training/       # Trainer, evaluator, checkpointing, distributed
   utils/
 docs/             # Sphinx (HTML + LaTeX/PDF) plus architecture/config/dataset/etc. guides

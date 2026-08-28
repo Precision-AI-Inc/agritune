@@ -43,8 +43,9 @@ precisionai/agritune/
   data/              # dataset adapters (ManifestDataset, SegmentationDataset), split strategies
   encoder/           # EncoderBackend protocol, FakeEncoderBackend, RemoteEncoderBackend,
                      # EncoderGateway, batching, retry, rate_limiter, response validation
-  features/          # FeatureProvider, FeatureStore (Directory/Sharded), cache keys/fingerprints,
-                     # manifest, resumable precompute
+  features/          # FeatureProvider (Cached/Online/Hybrid/Prefetching), FeatureStore
+                     # (Directory/Sharded), cache keys/fingerprints, manifest, resumable precompute,
+                     # integrity (verify/clean)
   logging/           # structured logging setup (stdlib logging, JSON-capable)
   metrics/           # pure computation (segmentation metrics — no I/O)
   optimization/      # optimizer/scheduler registries
@@ -53,7 +54,8 @@ precisionai/agritune/
                      # both the CLI and the API call these, never duplicate logic
   tasks/segmentation/
     decoders/         # linear probe, TokenFPN
-  tracking/          # Tracker protocol + Null/JSONL/TensorBoard/MLflow/WandB + MultiTracker
+    visualization.py   # colorized prediction overlays
+  tracking/          # Tracker protocol + Null/JSONL/TensorBoard/MLflow/WandB/Neptune/Comet + MultiTracker
   training/          # Trainer, evaluator, checkpointing, distributed, precision, state
   utils/
 docs/                # Sphinx (HTML + LaTeX/PDF) + architecture/config/dataset/encoder/... guides

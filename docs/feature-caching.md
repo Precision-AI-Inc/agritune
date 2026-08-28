@@ -1,10 +1,29 @@
 # Feature caching
 
-_Placeholder — expands as Phase 6/7 (feature store, feature providers) land._
-
 Feature cache keys fingerprint sample ID, image hash, augmentation configuration/seed, encoder
 model, encoder revision, encoder preprocessing, and feature schema version — see
 [encoder.md](encoder.md) for why the encoder revision component is best-effort rather than
 authoritative. `DirectoryFeatureStore` is the development-scale store; `ShardedFeatureStore` is the
-production store. Precomputation (`agritune features build`) is resumable — restarting after a
-partial run only encodes the missing samples. See `agritune_implementation_plan.md` §9–10.
+production store (buffered writes, auto-flushed by shard size). Both support `verify()` (checksum
+comparison against `agritune features verify`) and `clean()` (orphaned tensor/meta file removal,
+`agritune features clean`). Precomputation (`agritune features build`) is resumable — restarting
+after a partial run only encodes the missing samples. See `agritune_implementation_plan.md` §9–10.
+
+## Feature providers
+
+Three `FeatureProvider` implementations (`precisionai.agritune.features.provider`), matching
+`features.provider: cached / online / hybrid`:
+
+- `CachedFeatureProvider` — reads precomputed features from a store; raises
+  `FeatureNotCachedError` on a miss rather than silently falling back to the network.
+- `OnlineFeatureProvider` — encodes every batch fresh through an `EncoderGateway`, bridging its
+  `async` `encode()` to the synchronous `FeatureProvider` interface via `asyncio.run`.
+- `HybridFeatureProvider` — reads a store first; on a miss, encodes through the gateway and writes
+  the result back (write-through), so a hybrid run against a partially-precomputed store only
+  ever encodes what it has not already seen.
+
+`PrefetchingFeatureProvider` (`precisionai.agritune.features.prefetch`) wraps an online/hybrid
+provider with a bounded background-thread queue, so the encoder's network latency is hidden behind
+the GPU training step instead of blocking it (per `agritune_implementation_plan.md` §19) — it must
+be given the full, ordered sequence of upcoming batches up front, and `close()` cancels cleanly
+even if consumption stopped early (e.g. early stopping).

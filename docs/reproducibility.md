@@ -39,7 +39,9 @@ A checkpoint saves decoder state, optimizer state, scheduler state, gradient sca
 step, global optimizer step, best metric, and full RNG state (Python, NumPy, PyTorch CPU, CUDA) —
 so training resumes bit-for-bit, not just "close enough." Resume warns or fails when critical
 configuration differs (encoder revision changed, class count changed, decoder architecture
-changed) — see `agritune_implementation_plan.md` §14.
+changed) — see `agritune_implementation_plan.md` §14. `last.ckpt`/`best.ckpt` are always written;
+periodic checkpoints ranked by the validation metric are also kept, up to a configurable
+`checkpoint_top_k` (`0` keeps every one).
 
 ## Feature cache fingerprint
 
