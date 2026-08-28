@@ -3,6 +3,7 @@
 """FeatureProvider, FeatureStore, cache keys, and resumable precomputation."""
 
 from precisionai.agritune.features.errors import FeatureNotCachedError
+from precisionai.agritune.features.integrity import VerificationReport, verify_store
 from precisionai.agritune.features.keys import (
     FEATURE_SCHEMA_VERSION,
     EncoderFingerprint,
@@ -25,8 +26,10 @@ __all__ = [
     "FeatureSummary",
     "PrecomputeStats",
     "ShardedFeatureStore",
+    "VerificationReport",
     "compute_feature_key",
     "hash_augmentation",
     "hash_image_bytes",
     "precompute_features",
+    "verify_store",
 ]

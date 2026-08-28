@@ -11,31 +11,29 @@ checkpoint -> resume -> evaluate.
 """
 
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 import numpy as np
-import torch
-from torch import nn
 
 from precisionai.agritune.data.dataset import ManifestDataset
-from precisionai.agritune.data.manifest import load_manifest
 from precisionai.agritune.data.split import SplitAssignment, random_split
-from precisionai.agritune.features.keys import EncoderFingerprint, hash_image_bytes
-from precisionai.agritune.features.provider import CachedFeatureProvider
+from precisionai.agritune.features.keys import EncoderFingerprint
 from precisionai.agritune.logging import RunDirectory
 from precisionai.agritune.optimization.optimizers import OptimizerConfig, build_optimizer
 from precisionai.agritune.optimization.schedulers import SchedulerConfig, build_scheduler
 from precisionai.agritune.schemas.protocols import FeatureStore
 from precisionai.agritune.schemas.samples import PreparedSample
-from precisionai.agritune.tasks.segmentation.decoders.linear import LinearProbeDecoder
-from precisionai.agritune.tasks.segmentation.decoders.token_fpn import TokenFPNDecoder
+from precisionai.agritune.services.segmentation_common import (
+    build_cached_feature_provider,
+    build_decoder,
+    build_training_batches,
+    probe_feature_dims,
+)
 from precisionai.agritune.tasks.segmentation.losses import SegmentationLoss, SegmentationLossConfig
 from precisionai.agritune.tasks.segmentation.metrics import SegmentationMetric
 from precisionai.agritune.tasks.segmentation.task import SegmentationTask
 from precisionai.agritune.tracking.jsonl import JSONLTracker
 from precisionai.agritune.training.checkpointing import CheckpointManager
-from precisionai.agritune.training.evaluator import TrainingBatch
 from precisionai.agritune.training.trainer import Trainer, TrainerConfig
 
 
@@ -109,37 +107,6 @@ class TrainingRunResult:
     val_metrics: dict[str, float]
 
 
-def _mask_to_target_tensor(mask: Any) -> torch.Tensor:
-    return torch.from_numpy(np.array(mask)).long()
-
-
-def _build_batches(dataset: ManifestDataset, *, batch_size: int) -> list[TrainingBatch]:
-    batches = []
-    for start in range(0, len(dataset), batch_size):
-        chunk = [dataset[i] for i in range(start, min(start + batch_size, len(dataset)))]
-        samples = [PreparedSample(sample_id=sample.sample_id, image=sample.image, target=None) for sample in chunk]
-        targets = torch.stack([_mask_to_target_tensor(sample.target) for sample in chunk])
-        batches.append(TrainingBatch(samples=samples, targets=targets))
-    return batches
-
-
-def _build_decoder(
-    name: str, *, patch_dim: int, cls_dim: int | None, num_classes: int, output_size: tuple[int, int]
-) -> nn.Module:
-    if name == "linear":
-        return LinearProbeDecoder(patch_dim=patch_dim, num_classes=num_classes, output_size=output_size)
-    if name == "token_fpn":
-        return TokenFPNDecoder(patch_dim=patch_dim, num_classes=num_classes, output_size=output_size, cls_dim=cls_dim)
-    raise ValueError(f"unsupported decoder: {name!r}")
-
-
-def _probe_feature_dims(provider: CachedFeatureProvider, sample: PreparedSample) -> tuple[int, int | None]:
-    features = provider.get_features([sample])
-    patch_dim = features.patch_tokens.shape[-1]
-    cls_dim = features.cls_tokens.shape[-1] if features.cls_tokens is not None else None
-    return patch_dim, cls_dim
-
-
 def run_training(config: TrainingRunConfig, *, store: FeatureStore) -> TrainingRunResult:
     """Run one full offline training job: split -> cached features -> task -> trainer.
 
@@ -154,7 +121,10 @@ def run_training(config: TrainingRunConfig, *, store: FeatureStore) -> TrainingR
     -------
     TrainingRunResult
     """
-    rows = load_manifest(config.manifest_path)
+    provider, rows = build_cached_feature_provider(
+        config.manifest_path, store=store, encoder_fingerprint=config.encoder_fingerprint
+    )
+
     # random_split is a three-way (train/val/test) split; a tiny epsilon is reserved for "test"
     # (unused here) so train_fraction + val_fraction stays strictly below 1, as it requires.
     train_fraction = max(1e-6, 1.0 - config.val_fraction - 1e-6)
@@ -165,26 +135,15 @@ def run_training(config: TrainingRunConfig, *, store: FeatureStore) -> TrainingR
     train_dataset = ManifestDataset(config.manifest_path, sample_ids=split.train)
     val_dataset = ManifestDataset(config.manifest_path, sample_ids=split.val or split.train)
 
-    base_dir = Path(config.manifest_path).parent
-    rows_by_sample_id = {row.sample_id: row for row in rows}
-
-    def image_hash_fn(sample: PreparedSample) -> str:
-        # The feature store was built by feature_service.build_features using file-content
-        # hashes; CachedFeatureProvider must derive the identical key here to find them.
-        row = rows_by_sample_id[sample.sample_id]
-        return hash_image_bytes((base_dir / row.image_path).read_bytes())
-
-    provider = CachedFeatureProvider(store, encoder_fingerprint=config.encoder_fingerprint, image_hash_fn=image_hash_fn)
-
-    train_batches = _build_batches(train_dataset, batch_size=config.batch_size)
-    val_batches = _build_batches(val_dataset, batch_size=config.batch_size)
+    train_batches = build_training_batches(train_dataset, batch_size=config.batch_size)
+    val_batches = build_training_batches(val_dataset, batch_size=config.batch_size)
 
     first_train_sample = train_dataset[0]
     probe_sample = PreparedSample(sample_id=first_train_sample.sample_id, image=None, target=None)
-    patch_dim, cls_dim = _probe_feature_dims(provider, probe_sample)
+    patch_dim, cls_dim = probe_feature_dims(provider, probe_sample)
     output_size = tuple(np.array(first_train_sample.target).shape)
 
-    decoder = _build_decoder(
+    decoder = build_decoder(
         config.decoder_name,
         patch_dim=patch_dim,
         cls_dim=cls_dim,

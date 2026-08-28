@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 287 265" role="img" aria-labelledby="title desc">
+  <title id="title">Precision logo — AgriTune fine-tuning variant</title>
+  <desc id="desc">The original Precision mark is preserved exactly. A small three-slider tuning glyph is added only within the existing right-side negative space.</desc>
+  <path fill="#29cca5" d="M274.251 9.89711L156.236 65.1647V10.7929L132.378 0L132.182 167.806L66.2336 139.278C40.4905 128.002 23.8572 102.547 23.8572 74.4227V41.2808L104.897 78.3607V52.1027L11.7478 9.48418C6.25204 6.96967 0 10.99 0 17.0385V74.4227C0 112.035 22.2447 146.081 56.6702 161.156L132.378 194.308V265L157.492 252.692L156.236 114.71C156.236 100.565 164.414 87.6978 177.214 81.7036L263.142 41.4631V74.4227C263.142 102.547 246.087 127.113 220.767 139.276L183.053 157.414V183.169L229.157 161.732L230.33 161.156C264.755 146.079 287 112.035 287 74.4227V18.0151C287 11.4541 280.189 7.11669 274.251 9.89711Z"/>
+  <g id="finetune-cue" fill="none" stroke="#29cca5" stroke-width="3" stroke-linecap="round">
+    <path d="M191 102H226"/>
+    <circle cx="200" cy="102" r="4" fill="white"/>
+    <path d="M194 118H229"/>
+    <circle cx="218" cy="118" r="4" fill="white"/>
+    <path d="M198 134H233"/>
+    <circle cx="208" cy="134" r="4" fill="white"/>
+  </g>
+</svg>

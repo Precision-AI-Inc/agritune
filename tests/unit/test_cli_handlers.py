@@ -10,6 +10,7 @@ import pytest
 import yaml
 
 from precisionai.agritune.cli.main import main
+from precisionai.agritune.features.store import DirectoryFeatureStore
 from tests.fixtures.manifest_factory import build_manifest
 
 _ROWS = [
@@ -112,3 +113,154 @@ def test_train_applies_dotlist_overrides(tmp_path: Path, capsys: pytest.CaptureF
 
     assert exit_code == 0
     assert "final epoch: 3" in capsys.readouterr().out
+
+
+def _build_features_and_train_via_cli(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> tuple[Path, Path, Path]:
+    """Run `features build` then `train` via the real CLI; return (manifest, store, checkpoint)."""
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    store_path = tmp_path / "features"
+    main(["features", "build", "--manifest", str(manifest_path), "--store", str(store_path)])
+    capsys.readouterr()
+
+    config = {
+        "manifest_path": str(manifest_path),
+        "feature_store_dir": str(store_path),
+        "run_root": str(tmp_path / "runs"),
+        "run_id": "cli-fixture-run",
+        "num_classes": 2,
+        "encoder_fingerprint": {"model": "fake-encoder", "revision": "fake-v1", "preprocessing": ""},
+        "batch_size": 2,
+        "val_fraction": 0.34,
+        "optimizer": {"name": "adamw", "lr": 0.05},
+        "trainer": {"max_epochs": 1},
+    }
+    config_path = tmp_path / "train.yaml"
+    config_path.write_text(yaml.safe_dump(config))
+    main(["train", "--config", str(config_path)])
+    capsys.readouterr()
+
+    checkpoint_path = tmp_path / "runs" / "cli-fixture-run" / "checkpoints" / "last.ckpt"
+    return manifest_path, store_path, checkpoint_path
+
+
+def test_features_verify_reports_ok_for_clean_store(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    manifest_path = build_manifest(tmp_path)
+    store_path = tmp_path / "features"
+    main(["features", "build", "--manifest", str(manifest_path), "--store", str(store_path)])
+    capsys.readouterr()
+
+    exit_code = main(["features", "verify", "--store", str(store_path)])
+
+    assert exit_code == 0
+    assert "OK" in capsys.readouterr().out
+
+
+def test_features_verify_detects_corruption(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    manifest_path = build_manifest(tmp_path)
+    store_path = tmp_path / "features"
+    main(["features", "build", "--manifest", str(manifest_path), "--store", str(store_path)])
+    capsys.readouterr()
+
+    store = DirectoryFeatureStore(store_path)
+    corrupted_key = store.list_keys()[0]
+    with (store_path / f"{corrupted_key}.safetensors").open("r+b") as handle:
+        handle.seek(0)
+        handle.write(b"\x00" * 16)
+
+    exit_code = main(["features", "verify", "--store", str(store_path)])
+
+    assert exit_code == 1
+    assert "CORRUPTED" in capsys.readouterr().err
+
+
+def test_features_inspect_reports_summary(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    manifest_path = build_manifest(tmp_path)
+    store_path = tmp_path / "features"
+    main(["features", "build", "--manifest", str(manifest_path), "--store", str(store_path)])
+    capsys.readouterr()
+
+    exit_code = main(["features", "inspect", "--store", str(store_path)])
+
+    assert exit_code == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["total_entries"] == 4
+
+
+def test_features_clean_reports_no_removals_for_a_clean_store(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    manifest_path = build_manifest(tmp_path)
+    store_path = tmp_path / "features"
+    main(["features", "build", "--manifest", str(manifest_path), "--store", str(store_path)])
+    capsys.readouterr()
+
+    exit_code = main(["features", "clean", "--store", str(store_path)])
+
+    assert exit_code == 0
+    assert "removed 0 file(s)" in capsys.readouterr().out
+
+
+def test_evaluate_reports_metrics(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    manifest_path, store_path, checkpoint_path = _build_features_and_train_via_cli(tmp_path, capsys)
+
+    exit_code = main(
+        [
+            "evaluate",
+            "--manifest",
+            str(manifest_path),
+            "--store",
+            str(store_path),
+            "--checkpoint",
+            str(checkpoint_path),
+            "--num-classes",
+            "2",
+        ]
+    )
+
+    assert exit_code == 0
+    result = json.loads(capsys.readouterr().out)
+    assert "mean_iou" in result
+
+
+def test_predict_writes_prediction_files(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    manifest_path, store_path, checkpoint_path = _build_features_and_train_via_cli(tmp_path, capsys)
+    output_dir = tmp_path / "predictions"
+
+    exit_code = main(
+        [
+            "predict",
+            "--manifest",
+            str(manifest_path),
+            "--store",
+            str(store_path),
+            "--checkpoint",
+            str(checkpoint_path),
+            "--num-classes",
+            "2",
+            "--output",
+            str(output_dir),
+        ]
+    )
+
+    assert exit_code == 0
+    assert "wrote 6 prediction(s)" in capsys.readouterr().out
+    assert len(list(output_dir.glob("*.png"))) == 6
+
+
+def test_encoder_benchmark_reports_recommended_settings(capsys: pytest.CaptureFixture[str]) -> None:
+    exit_code = main(
+        [
+            "encoder",
+            "benchmark",
+            "--batch-sizes",
+            "1",
+            "2",
+            "--concurrencies",
+            "1",
+            "--num-requests",
+            "2",
+        ]
+    )
+
+    assert exit_code == 0
+    assert "Recommended settings" in capsys.readouterr().out

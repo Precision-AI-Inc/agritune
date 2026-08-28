@@ -31,35 +31,20 @@ def test_help_lists_all_top_level_commands(capsys: pytest.CaptureFixture[str]) -
 @pytest.mark.parametrize(
     "argv",
     [
-        ["encoder", "benchmark"],
+        ["dataset", "validate"],
+        ["dataset", "inspect"],
+        ["features", "build"],
         ["features", "verify"],
         ["features", "inspect"],
         ["features", "clean"],
+        ["train"],
         ["evaluate"],
         ["predict"],
     ],
 )
-def test_unimplemented_commands_exit_nonzero(argv: list[str], capsys: pytest.CaptureFixture[str]) -> None:
-    exit_code = main(argv)
-    assert exit_code == 1
-    assert "not implemented yet" in capsys.readouterr().err
-
-
-def test_dataset_subcommand_requires_manifest() -> None:
+def test_commands_require_their_arguments(argv: list[str]) -> None:
     with pytest.raises(SystemExit) as exc_info:
-        main(["dataset", "validate"])
-    assert exc_info.value.code == 2
-
-
-def test_features_build_requires_manifest_and_store() -> None:
-    with pytest.raises(SystemExit) as exc_info:
-        main(["features", "build"])
-    assert exc_info.value.code == 2
-
-
-def test_train_requires_config() -> None:
-    with pytest.raises(SystemExit) as exc_info:
-        main(["train"])
+        main(argv)
     assert exc_info.value.code == 2
 
 

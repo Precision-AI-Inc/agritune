@@ -162,6 +162,33 @@ class DirectoryFeatureStore:
         """Return every key currently stored, in no particular order."""
         return [path.stem for path in self._root.glob("*.safetensors")]
 
+    def verify(self, key: str) -> bool:
+        """Return whether ``key``'s stored checksum matches its tensor file's actual contents."""
+        if not self.has(key):
+            raise KeyError(key)
+        summary = self.read_summary(key)
+        actual = hashlib.sha256(self._tensor_path(key).read_bytes()).hexdigest()
+        return actual == summary.checksum
+
+    def clean(self) -> list[str]:
+        """Remove any tensor/meta file whose pair is missing (e.g. from an interrupted write).
+
+        Returns
+        -------
+        list[str]
+            Filenames removed.
+        """
+        tensor_stems = {path.stem for path in self._root.glob("*.safetensors")}
+        meta_stems = {path.stem for path in self._root.glob("*.json")}
+        removed = []
+        for stem in sorted(tensor_stems - meta_stems):
+            self._tensor_path(stem).unlink()
+            removed.append(f"{stem}.safetensors")
+        for stem in sorted(meta_stems - tensor_stems):
+            self._meta_path(stem).unlink()
+            removed.append(f"{stem}.json")
+        return removed
+
     def _tensor_path(self, key: str) -> Path:
         return self._root / f"{key}.safetensors"
 
@@ -263,6 +290,40 @@ class ShardedFeatureStore:
     def list_keys(self) -> list[str]:
         """Return every flushed key currently stored, in no particular order."""
         return list(self._index.keys())
+
+    def verify(self, key: str) -> bool:
+        """Return whether ``key``'s stored checksum matches its shard file's actual contents.
+
+        Raises
+        ------
+        KeyError
+            If ``key`` is not present at all.
+        ValueError
+            If ``key`` is only buffered (not yet flushed) and so has no checksum yet.
+        """
+        if key in self._pending:
+            raise ValueError(f"'{key}' has not been flushed yet — no checksum to verify against")
+        if key not in self._index:
+            raise KeyError(key)
+        entry = self._index[key]
+        actual = hashlib.sha256((self._root / entry["shard"]).read_bytes()).hexdigest()
+        return actual == entry["summary"]["checksum"]
+
+    def clean(self) -> list[str]:
+        """Remove shard files not referenced by the index (e.g. from an interrupted write).
+
+        Returns
+        -------
+        list[str]
+            Filenames removed.
+        """
+        referenced = self._known_shards()
+        removed = []
+        for shard_path in sorted(self._root.glob("shard_*.safetensors")):
+            if shard_path.name not in referenced:
+                shard_path.unlink()
+                removed.append(shard_path.name)
+        return removed
 
     def _known_shards(self) -> set[str]:
         return {entry["shard"] for entry in self._index.values()}

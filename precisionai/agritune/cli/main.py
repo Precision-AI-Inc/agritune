@@ -5,10 +5,8 @@
 
 Run ``agritune --help`` to see available commands.
 
-Subcommands are registered here even before their underlying service exists; an unimplemented
-subcommand exits with status 1 and a clear message rather than a stack trace. As each phase of
-``agritune_implementation_plan.md`` lands, its handler is wired to the corresponding
-``precisionai.agritune.services`` call.
+Every subcommand's handler calls into ``precisionai.agritune.services`` — the API layer calls the
+same services, so logic is never duplicated between entry points.
 """
 
 import argparse
@@ -21,14 +19,6 @@ from precisionai.agritune.logging import configure_logging, get_logger
 logger = get_logger(__name__)
 
 _CommandHandler = Callable[[argparse.Namespace], int]
-
-
-def _not_implemented(command: str) -> _CommandHandler:
-    def handler(_args: argparse.Namespace) -> int:
-        print(f"agritune {command}: not implemented yet.", file=sys.stderr)
-        return 1
-
-    return handler
 
 
 def _build_dataset_parser(subparsers: argparse._SubParsersAction) -> None:
@@ -46,16 +36,6 @@ def _build_dataset_parser(subparsers: argparse._SubParsersAction) -> None:
     inspect.set_defaults(handler=handlers.dataset_inspect)
 
 
-def _build_encoder_parser(subparsers: argparse._SubParsersAction) -> None:
-    parser = subparsers.add_parser("encoder", help="Benchmark the remote encoder API.")
-    encoder_subparsers = parser.add_subparsers(dest="subcommand", required=True)
-
-    benchmark = encoder_subparsers.add_parser(
-        "benchmark", help="Measure throughput/latency and recommend batch size and concurrency."
-    )
-    benchmark.set_defaults(handler=_not_implemented("encoder benchmark"))
-
-
 def _add_encoder_selection_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--base-url", default=None, help="Hosted encoder API base URL; omit to use the fake encoder.")
     parser.add_argument("--api-key", default=None, help="Encoder API key (or set via your shell environment).")
@@ -63,6 +43,25 @@ def _add_encoder_selection_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--preprocessing", default="", help="A stable label for preprocessing params, for cache invalidation."
     )
+
+
+def _build_encoder_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser("encoder", help="Benchmark the remote encoder API.")
+    encoder_subparsers = parser.add_subparsers(dest="subcommand", required=True)
+
+    benchmark = encoder_subparsers.add_parser(
+        "benchmark", help="Measure throughput/latency and recommend batch size and concurrency."
+    )
+    _add_encoder_selection_arguments(benchmark)
+    benchmark.add_argument("--batch-sizes", type=int, nargs="+", default=[1, 4, 8, 16], help="Batch sizes to test.")
+    benchmark.add_argument(
+        "--concurrencies", type=int, nargs="+", default=[1, 2, 4, 8], help="Concurrency levels to test."
+    )
+    benchmark.add_argument(
+        "--num-requests", type=int, default=10, help="Requests issued per (batch size, concurrency) combination."
+    )
+    benchmark.add_argument("--image-size", type=int, default=64, help="Side length of the dummy square test image.")
+    benchmark.set_defaults(handler=handlers.encoder_benchmark)
 
 
 def _build_features_parser(subparsers: argparse._SubParsersAction) -> None:
@@ -76,13 +75,16 @@ def _build_features_parser(subparsers: argparse._SubParsersAction) -> None:
     build.set_defaults(handler=handlers.features_build)
 
     verify = features_subparsers.add_parser("verify", help="Verify feature store integrity.")
-    verify.set_defaults(handler=_not_implemented("features verify"))
+    verify.add_argument("--store", required=True, help="Directory the feature store was built in.")
+    verify.set_defaults(handler=handlers.features_verify)
 
     inspect = features_subparsers.add_parser("inspect", help="Report feature store statistics.")
-    inspect.set_defaults(handler=_not_implemented("features inspect"))
+    inspect.add_argument("--store", required=True, help="Directory the feature store was built in.")
+    inspect.set_defaults(handler=handlers.features_inspect)
 
     clean = features_subparsers.add_parser("clean", help="Remove stale or orphaned feature shards.")
-    clean.set_defaults(handler=_not_implemented("features clean"))
+    clean.add_argument("--store", required=True, help="Directory the feature store was built in.")
+    clean.set_defaults(handler=handlers.features_clean)
 
 
 def _build_train_parser(subparsers: argparse._SubParsersAction) -> None:
@@ -92,14 +94,40 @@ def _build_train_parser(subparsers: argparse._SubParsersAction) -> None:
     parser.set_defaults(handler=handlers.train)
 
 
+def _add_scored_run_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--manifest", required=True, help="Path to the dataset manifest file.")
+    parser.add_argument("--store", required=True, help="Directory the feature store was built in.")
+    parser.add_argument("--checkpoint", required=True, help="Path to a checkpoint (e.g. last.ckpt/best.ckpt).")
+    parser.add_argument("--num-classes", type=int, required=True, help="Number of segmentation classes.")
+    parser.add_argument("--decoder", default="linear", choices=["linear", "token_fpn"], help="Decoder architecture.")
+    parser.add_argument("--batch-size", type=int, default=4, help="Batch size.")
+    parser.add_argument(
+        "--sample-ids", nargs="*", default=None, help="Restrict to these sample IDs; omit for the whole manifest."
+    )
+    parser.add_argument(
+        "--encoder-model",
+        default="fake-encoder",
+        help="Encoder model alias the feature store was built with (default: the fake encoder's).",
+    )
+    parser.add_argument(
+        "--encoder-revision",
+        default="fake-v1",
+        help="Encoder revision the feature store was built with (default: the fake encoder's).",
+    )
+    parser.add_argument("--preprocessing", default="", help="Preprocessing label used when the store was built.")
+
+
 def _build_evaluate_parser(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser("evaluate", help="Evaluate a trained checkpoint.")
-    parser.set_defaults(handler=_not_implemented("evaluate"))
+    _add_scored_run_arguments(parser)
+    parser.set_defaults(handler=handlers.evaluate)
 
 
 def _build_predict_parser(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser("predict", help="Run inference and write predictions/visualizations.")
-    parser.set_defaults(handler=_not_implemented("predict"))
+    _add_scored_run_arguments(parser)
+    parser.add_argument("--output", required=True, help="Directory to write prediction PNGs into.")
+    parser.set_defaults(handler=handlers.predict)
 
 
 def build_parser() -> argparse.ArgumentParser:

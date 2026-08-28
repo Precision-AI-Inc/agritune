@@ -109,6 +109,46 @@ class TestDirectoryFeatureStore:
         store = DirectoryFeatureStore(tmp_path)
         store.flush()  # should not raise
 
+    def test_verify_passes_for_an_untouched_entry(self, tmp_path: Path) -> None:
+        store = DirectoryFeatureStore(tmp_path)
+        store.write("key1", _single_sample_features())
+        assert store.verify("key1") is True
+
+    def test_verify_detects_corruption(self, tmp_path: Path) -> None:
+        store = DirectoryFeatureStore(tmp_path)
+        store.write("key1", _single_sample_features())
+        with (tmp_path / "key1.safetensors").open("r+b") as handle:
+            handle.seek(0)
+            handle.write(b"\x00" * 16)
+        assert store.verify("key1") is False
+
+    def test_verify_missing_key_raises(self, tmp_path: Path) -> None:
+        store = DirectoryFeatureStore(tmp_path)
+        with pytest.raises(KeyError):
+            store.verify("missing")
+
+    def test_clean_removes_orphaned_tensor_file(self, tmp_path: Path) -> None:
+        store = DirectoryFeatureStore(tmp_path)
+        store.write("key1", _single_sample_features())
+        (tmp_path / "key1.json").unlink()  # simulate an interrupted write
+        removed = store.clean()
+        assert removed == ["key1.safetensors"]
+        assert not (tmp_path / "key1.safetensors").exists()
+
+    def test_clean_removes_orphaned_meta_file(self, tmp_path: Path) -> None:
+        store = DirectoryFeatureStore(tmp_path)
+        store.write("key1", _single_sample_features())
+        (tmp_path / "key1.safetensors").unlink()  # simulate an interrupted write
+        removed = store.clean()
+        assert removed == ["key1.json"]
+        assert not (tmp_path / "key1.json").exists()
+
+    def test_clean_leaves_intact_pairs_alone(self, tmp_path: Path) -> None:
+        store = DirectoryFeatureStore(tmp_path)
+        store.write("key1", _single_sample_features())
+        assert store.clean() == []
+        assert store.has("key1")
+
 
 class TestShardedFeatureStore:
     def test_rejects_non_positive_entries_per_shard(self, tmp_path: Path) -> None:
@@ -209,3 +249,43 @@ class TestShardedFeatureStore:
         store.write("key1", features)
         read_back = store.read("key1")
         assert read_back.cls_tokens is None
+
+    def test_verify_passes_for_an_untouched_flushed_entry(self, tmp_path: Path) -> None:
+        store = ShardedFeatureStore(tmp_path, entries_per_shard=1)
+        store.write("key1", _single_sample_features())
+        assert store.verify("key1") is True
+
+    def test_verify_detects_corruption(self, tmp_path: Path) -> None:
+        store = ShardedFeatureStore(tmp_path, entries_per_shard=1)
+        store.write("key1", _single_sample_features())
+        shard_path = tmp_path / "shard_00000.safetensors"
+        with shard_path.open("r+b") as handle:
+            handle.seek(0)
+            handle.write(b"\x00" * 16)
+        assert store.verify("key1") is False
+
+    def test_verify_pending_entry_raises_value_error(self, tmp_path: Path) -> None:
+        store = ShardedFeatureStore(tmp_path, entries_per_shard=10)
+        store.write("key1", _single_sample_features())
+        with pytest.raises(ValueError, match="not been flushed"):
+            store.verify("key1")
+
+    def test_verify_missing_key_raises_key_error(self, tmp_path: Path) -> None:
+        store = ShardedFeatureStore(tmp_path)
+        with pytest.raises(KeyError):
+            store.verify("missing")
+
+    def test_clean_removes_unreferenced_shard(self, tmp_path: Path) -> None:
+        store = ShardedFeatureStore(tmp_path, entries_per_shard=1)
+        store.write("key1", _single_sample_features())
+        (tmp_path / "shard_00099.safetensors").write_bytes(b"orphan")  # simulate a stray shard
+        removed = store.clean()
+        assert removed == ["shard_00099.safetensors"]
+        assert not (tmp_path / "shard_00099.safetensors").exists()
+        assert store.has("key1")
+
+    def test_clean_leaves_referenced_shards_alone(self, tmp_path: Path) -> None:
+        store = ShardedFeatureStore(tmp_path, entries_per_shard=1)
+        store.write("key1", _single_sample_features())
+        assert store.clean() == []
+        assert (tmp_path / "shard_00000.safetensors").exists()
