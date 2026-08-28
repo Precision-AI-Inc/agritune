@@ -16,6 +16,8 @@ def test_perfect_predictions_give_perfect_scores() -> None:
     result = metric.compute()
     assert result["mean_iou"] == 1.0
     assert result["mean_dice"] == 1.0
+    assert result["mean_precision"] == 1.0
+    assert result["mean_recall"] == 1.0
     assert result["pixel_accuracy"] == 1.0
 
 
@@ -84,6 +86,27 @@ def test_per_class_keys_present_for_every_class() -> None:
     for class_index in range(3):
         assert f"iou_class_{class_index}" in result
         assert f"dice_class_{class_index}" in result
+        assert f"precision_class_{class_index}" in result
+        assert f"recall_class_{class_index}" in result
+
+
+def test_precision_and_recall_distinguish_false_positives_from_false_negatives() -> None:
+    metric = SegmentationMetric(num_classes=2)
+    # class 1: 1 true positive, 1 false positive (predicted 1 but was 0), 1 false negative
+    targets = torch.tensor([[[1, 0, 1]]])
+    predictions = torch.tensor([[[1, 1, 0]]])
+    metric.update(predictions, targets)
+    result = metric.compute()
+    assert result["precision_class_1"] == 0.5  # 1 true positive / 2 predicted positive
+    assert result["recall_class_1"] == 0.5  # 1 true positive / 2 actual positive
+
+
+def test_absent_class_reports_zero_precision_and_recall_not_nan() -> None:
+    metric = SegmentationMetric(num_classes=3)  # class 2 never appears
+    metric.update(torch.tensor([[[0, 1]]]), torch.tensor([[[0, 1]]]))
+    result = metric.compute()
+    assert result["precision_class_2"] == 0.0
+    assert result["recall_class_2"] == 0.0
 
 
 def test_confusion_matrix_matches_expected_counts() -> None:

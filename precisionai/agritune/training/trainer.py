@@ -30,7 +30,7 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler, ReduceLROnPlateau
 
 from precisionai.agritune.logging import get_logger
-from precisionai.agritune.schemas.protocols import FeatureProvider, Metric, Task, Tracker
+from precisionai.agritune.schemas.protocols import FeatureAugmentation, FeatureProvider, Metric, Task, Tracker
 from precisionai.agritune.training.checkpointing import Checkpoint, CheckpointManager
 from precisionai.agritune.training.distributed import DistributedContext
 from precisionai.agritune.training.evaluator import TrainingBatch, evaluate
@@ -115,6 +115,10 @@ class Trainer:
     distributed : DistributedContext | None, optional
         Defaults to a single-process context; only the main process checkpoints or logs to the
         tracker.
+    feature_augmentation : FeatureAugmentation | None, optional
+        When given, applied to every training batch's features right after
+        ``feature_provider.get_features`` and before ``task.forward`` — never during validation,
+        matching the usual train-only role of augmentation. ``None`` disables it entirely.
     """
 
     def __init__(
@@ -129,6 +133,7 @@ class Trainer:
         checkpoint_manager: CheckpointManager | None = None,
         tracker: Tracker | None = None,
         distributed: DistributedContext | None = None,
+        feature_augmentation: FeatureAugmentation | None = None,
     ) -> None:
         self.task = task
         self.decoder = decoder
@@ -139,6 +144,7 @@ class Trainer:
         self.checkpoint_manager = checkpoint_manager
         self.tracker = tracker
         self.distributed = distributed or DistributedContext()
+        self.feature_augmentation = feature_augmentation
         self.precision = PrecisionContext(config.precision, device_type=self._device_type())
         self.state = TrainingState()
         self._epochs_without_improvement = 0
@@ -196,6 +202,8 @@ class Trainer:
         for batch in batches:
             with self.precision.autocast():
                 features = self.feature_provider.get_features(batch.samples)
+                if self.feature_augmentation is not None:
+                    features = self.feature_augmentation.apply(features)
                 outputs = self.task.forward(features)
                 loss = self.task.compute_loss(outputs, batch.targets)
                 scaled_loss = loss / self.config.accumulation_steps
@@ -251,7 +259,10 @@ class Trainer:
                 {f"val_{name}": val for name, val in metrics.items()}, step=self.state.global_optimizer_step
             )
 
-        self._checkpoint(periodic=False, is_best=is_best, metric_value=value)
+        # CheckpointManager's top-k pruning ranks "lower is better"; negate a higher-is-better
+        # metric so the best-performing validated epochs are the ones top-k retains.
+        ranking_value = -value if higher_is_better else value
+        self._checkpoint(periodic=True, is_best=is_best, metric_value=ranking_value)
 
     def _is_new_best(self, value: float, higher_is_better: bool) -> bool:
         if self.state.best_metric is None:

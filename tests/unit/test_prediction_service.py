@@ -106,6 +106,47 @@ async def test_run_prediction_restricts_to_sample_ids(tmp_path: Path) -> None:
     assert len(written) == 2
 
 
+async def test_run_prediction_writes_overlays_when_requested(tmp_path: Path) -> None:
+    manifest_path, checkpoint_path = await _train_a_checkpoint(tmp_path)
+    store = DirectoryFeatureStore(tmp_path / "features")
+    output_dir = tmp_path / "predictions"
+
+    config = PredictionRunConfig(
+        manifest_path=str(manifest_path),
+        checkpoint_path=str(checkpoint_path),
+        output_dir=str(output_dir),
+        num_classes=2,
+        encoder_fingerprint=_FINGERPRINT,
+        sample_ids=["sample-0"],
+        write_overlays=True,
+    )
+    written = run_prediction(config, store=store)
+
+    assert written == [str(output_dir / "sample-0.png"), str(output_dir / "sample-0_overlay.png")]
+    overlay = Image.open(output_dir / "sample-0_overlay.png")
+    assert overlay.mode == "RGB"
+    assert overlay.size == (8, 8)
+
+
+async def test_run_prediction_omits_overlays_by_default(tmp_path: Path) -> None:
+    manifest_path, checkpoint_path = await _train_a_checkpoint(tmp_path)
+    store = DirectoryFeatureStore(tmp_path / "features")
+    output_dir = tmp_path / "predictions"
+
+    config = PredictionRunConfig(
+        manifest_path=str(manifest_path),
+        checkpoint_path=str(checkpoint_path),
+        output_dir=str(output_dir),
+        num_classes=2,
+        encoder_fingerprint=_FINGERPRINT,
+        sample_ids=["sample-0"],
+    )
+    written = run_prediction(config, store=store)
+
+    assert written == [str(output_dir / "sample-0.png")]
+    assert not (output_dir / "sample-0_overlay.png").exists()
+
+
 async def test_run_prediction_empty_sample_set_raises(tmp_path: Path) -> None:
     manifest_path, checkpoint_path = await _train_a_checkpoint(tmp_path)
     store = DirectoryFeatureStore(tmp_path / "features")

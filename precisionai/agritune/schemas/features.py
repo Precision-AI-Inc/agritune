@@ -226,6 +226,40 @@ def concatenate_encoder_features(features_list: Sequence[EncoderFeatures]) -> En
     )
 
 
+def select_one(features: EncoderFeatures, index: int) -> EncoderFeatures:
+    """Slice one sample out of a batched :class:`EncoderFeatures`, trimmed to its own patch count.
+
+    Used by :class:`~precisionai.agritune.features.provider.HybridFeatureProvider` to write a
+    single sample's features to a :class:`~precisionai.agritune.schemas.protocols.FeatureStore`
+    after encoding a whole batch of cache misses in one gateway call. The returned entry has no
+    padding: ``valid_patch_mask`` is ``None`` because a length-1 batch has nothing to pad against.
+
+    Parameters
+    ----------
+    features : EncoderFeatures
+        A batch to slice from.
+    index : int
+        Position of the sample to extract.
+
+    Returns
+    -------
+    EncoderFeatures
+        A length-1 batch containing only that sample.
+    """
+    height, width = features.patch_grid_hw(index)
+    num_patches = height * width
+    return EncoderFeatures(
+        patch_tokens=features.patch_tokens[index : index + 1, :num_patches, :],
+        cls_tokens=features.cls_tokens[index : index + 1] if features.cls_tokens is not None else None,
+        patch_grid=features.patch_grid[index : index + 1],
+        valid_patch_mask=None,
+        image_sizes=[features.image_sizes[index]],
+        encoder_model=features.encoder_model,
+        encoder_revision=features.encoder_revision,
+        metadata=dict(features.metadata),
+    )
+
+
 def _validate_concatenation_inputs(
     features_list: Sequence[EncoderFeatures], *, patch_dim: int, has_cls: bool, first: EncoderFeatures
 ) -> None:

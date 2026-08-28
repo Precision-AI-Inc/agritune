@@ -247,6 +247,32 @@ def test_predict_writes_prediction_files(tmp_path: Path, capsys: pytest.CaptureF
     assert len(list(output_dir.glob("*.png"))) == 6
 
 
+def test_predict_with_overlays_writes_overlay_files(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    manifest_path, store_path, checkpoint_path = _build_features_and_train_via_cli(tmp_path, capsys)
+    output_dir = tmp_path / "predictions"
+
+    exit_code = main(
+        [
+            "predict",
+            "--manifest",
+            str(manifest_path),
+            "--store",
+            str(store_path),
+            "--checkpoint",
+            str(checkpoint_path),
+            "--num-classes",
+            "2",
+            "--output",
+            str(output_dir),
+            "--overlays",
+        ]
+    )
+
+    assert exit_code == 0
+    assert "wrote 12 prediction(s)" in capsys.readouterr().out
+    assert len(list(output_dir.glob("*_overlay.png"))) == 6
+
+
 def test_encoder_benchmark_reports_recommended_settings(capsys: pytest.CaptureFixture[str]) -> None:
     exit_code = main(
         [

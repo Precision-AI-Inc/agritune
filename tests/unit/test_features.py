@@ -6,7 +6,7 @@
 import pytest
 import torch
 
-from precisionai.agritune.schemas.features import EncoderFeatures, concatenate_encoder_features
+from precisionai.agritune.schemas.features import EncoderFeatures, concatenate_encoder_features, select_one
 
 
 def _make_features(
@@ -235,3 +235,37 @@ def test_concatenate_rejects_mismatched_encoder_identity() -> None:
     )
     with pytest.raises(ValueError, match="encoder_model/encoder_revision"):
         concatenate_encoder_features([first, second])
+
+
+def test_select_one_returns_a_length_one_batch() -> None:
+    batch = _make_features(batch_size=3, num_patches=6, patch_grid=[(2, 3), (2, 3), (2, 3)])
+    one = select_one(batch, 1)
+    assert one.batch_size == 1
+    assert torch.equal(one.patch_tokens[0], batch.patch_tokens[1])
+    assert one.image_sizes == [batch.image_sizes[1]]
+
+
+def test_select_one_trims_padding_to_the_samples_own_patch_count() -> None:
+    small = _make_features(batch_size=1, num_patches=4, patch_grid=[(2, 2)])
+    large = _make_features(batch_size=1, num_patches=6, patch_grid=[(2, 3)])
+    padded_batch = concatenate_encoder_features([small, large])  # small is padded to 6 patches
+
+    selected = select_one(padded_batch, 0)
+
+    assert selected.patch_tokens.shape == (1, 4, small.patch_tokens.shape[-1])
+    assert selected.valid_patch_mask is None
+    assert torch.equal(selected.patch_tokens[0], small.patch_tokens[0])
+
+
+def test_select_one_preserves_cls_tokens_when_present() -> None:
+    batch = _make_features(batch_size=2, cls_dim=5)
+    assert batch.cls_tokens is not None
+    selected = select_one(batch, 1)
+    assert selected.cls_tokens is not None
+    assert torch.equal(selected.cls_tokens[0], batch.cls_tokens[1])
+
+
+def test_select_one_handles_no_cls_tokens() -> None:
+    batch = _make_features(batch_size=2, cls_dim=None)
+    selected = select_one(batch, 0)
+    assert selected.cls_tokens is None

@@ -47,6 +47,7 @@ dependencies = [
     "rich>=13.0",
     "openai>=1.0",
     "httpx>=0.28",
+    "albumentations>=2.0",
 ]
 
 [project.optional-dependencies]
@@ -54,6 +55,11 @@ tracking = [
     "tensorboard>=2.16",
     "mlflow>=2.10",
     "wandb>=0.16",
+    "neptune>=1.9",
+    "comet_ml>=3.39",
+]
+api = [
+    "fastapi>=0.110",
 ]
 test = [
     "pytest>=7.0",
@@ -61,6 +67,7 @@ test = [
     "pytest-asyncio>=0.23",
     "httpx>=0.28",
     "httpx2>=2.0",
+    "fastapi>=0.110",
 ]
 dev = [
     "pytest>=7.0",
@@ -68,6 +75,7 @@ dev = [
     "pytest-asyncio>=0.23",
     "httpx>=0.28",
     "httpx2>=2.0",
+    "fastapi>=0.110",
     "pre-commit>=3.7",
     "pyright>=1.1",
     "genbadge[coverage]>=1.1",

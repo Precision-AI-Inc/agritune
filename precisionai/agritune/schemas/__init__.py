@@ -3,10 +3,11 @@
 """Core dataclasses and protocols: EncoderFeatures, Sample, PreparedSample, and interfaces."""
 
 from precisionai.agritune.schemas.augmentation import AugmentationRecord, TransformRecord
-from precisionai.agritune.schemas.features import EncoderFeatures, concatenate_encoder_features
+from precisionai.agritune.schemas.features import EncoderFeatures, concatenate_encoder_features, select_one
 from precisionai.agritune.schemas.protocols import (
     Decoder,
     EncoderBackend,
+    FeatureAugmentation,
     FeatureProvider,
     FeatureStore,
     Metric,
@@ -20,6 +21,7 @@ __all__ = [
     "Decoder",
     "EncoderBackend",
     "EncoderFeatures",
+    "FeatureAugmentation",
     "FeatureProvider",
     "FeatureStore",
     "Metric",
@@ -29,4 +31,5 @@ __all__ = [
     "Tracker",
     "TransformRecord",
     "concatenate_encoder_features",
+    "select_one",
 ]

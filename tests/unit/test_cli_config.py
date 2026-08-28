@@ -51,3 +51,15 @@ def test_dotlist_overrides_are_applied(tmp_path: Path) -> None:
     config = load_training_run_config(str(path), ["num_classes=5", "batch_size=8"])
     assert config.num_classes == 5
     assert config.batch_size == 8
+
+
+def test_checkpoint_top_k_defaults_to_three(tmp_path: Path) -> None:
+    path = _write_config(tmp_path, {})
+    config = load_training_run_config(str(path))
+    assert config.checkpoint_top_k == 3
+
+
+def test_checkpoint_top_k_is_configurable(tmp_path: Path) -> None:
+    path = _write_config(tmp_path, {"checkpoint_top_k": 1})
+    config = load_training_run_config(str(path))
+    assert config.checkpoint_top_k == 1

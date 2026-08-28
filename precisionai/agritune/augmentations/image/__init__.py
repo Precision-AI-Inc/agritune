@@ -10,7 +10,11 @@ from precisionai.agritune.augmentations.image.pipeline import (
     PhotometricConfig,
     prepare_sample,
 )
-from precisionai.agritune.augmentations.image.seeding import derive_offline_seed, derive_online_seed
+from precisionai.agritune.augmentations.image.seeding import (
+    derive_hybrid_seed,
+    derive_offline_seed,
+    derive_online_seed,
+)
 
 __all__ = [
     "AugmentationMode",
@@ -18,6 +22,7 @@ __all__ = [
     "GeometricConfig",
     "ImageAugmentationPipeline",
     "PhotometricConfig",
+    "derive_hybrid_seed",
     "derive_offline_seed",
     "derive_online_seed",
     "prepare_sample",

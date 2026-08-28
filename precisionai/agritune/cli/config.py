@@ -85,4 +85,5 @@ def _config_from_dict(data: dict[str, Any]) -> TrainingRunConfig:
         loss=SegmentationLossConfig(**loss_data),
         val_metric_name=data.get("val_metric_name", "mean_iou"),
         higher_is_better=data.get("higher_is_better", True),
+        checkpoint_top_k=data.get("checkpoint_top_k", 3),
     )

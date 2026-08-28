@@ -6,7 +6,10 @@
 ``random_split`` assigns each sample independently; ``grouped_split`` keeps every sample sharing
 a metadata key (e.g. ``field_id``) in the same split. Grouped splits matter for agricultural data:
 nearby frames/images of the same field can be nearly identical, and a random split would leak
-near-duplicates between train and eval. See ``docs/datasets.md``.
+near-duplicates between train and eval. ``temporal_split`` orders samples by a date metadata key
+and assigns the earliest to train and the latest to test, so evaluation reflects performance on
+future, unseen capture dates rather than a random sample of the same season. See
+``docs/datasets.md``.
 """
 
 import hashlib
@@ -140,6 +143,58 @@ def grouped_split(
         else:
             test.extend(sample_ids)
     return SplitAssignment(train=train, val=val, test=test)
+
+
+def temporal_split(
+    rows: list[ManifestRow],
+    *,
+    date_field: str = "capture_date",
+    train_fraction: float = 0.8,
+    val_fraction: float = 0.1,
+) -> SplitAssignment:
+    """Assign samples chronologically: earliest ``date_field`` values to train, latest to test.
+
+    Unlike :func:`random_split`/:func:`grouped_split`, this strategy is not seeded — sample order
+    is fully determined by ``date_field``, with ties broken by each row's original manifest order.
+
+    Parameters
+    ----------
+    rows : list[ManifestRow]
+        Manifest rows to split.
+    date_field : str, optional
+        Metadata key holding a lexicographically-sortable date (e.g. an ISO 8601 string, so
+        chronological order matches string order). Every row must carry this key.
+    train_fraction : float, optional
+        Target fraction of the earliest samples assigned to train.
+    val_fraction : float, optional
+        Target fraction of the samples immediately after train assigned to val. The remainder
+        (the latest samples) goes to test.
+
+    Returns
+    -------
+    SplitAssignment
+        Sample IDs assigned to each subset, in chronological order within each subset.
+
+    Raises
+    ------
+    ValueError
+        If any row is missing the ``date_field`` metadata key.
+    """
+    _validate_fractions(train_fraction, val_fraction)
+
+    missing = [row.sample_id for row in rows if not row.metadata.get(date_field)]
+    if missing:
+        raise ValueError(f"rows missing '{date_field}' metadata: {missing}")
+
+    ordered = sorted(rows, key=lambda row: row.metadata[date_field])
+    train_end = round(len(ordered) * train_fraction)
+    val_end = train_end + round(len(ordered) * val_fraction)
+
+    return SplitAssignment(
+        train=[row.sample_id for row in ordered[:train_end]],
+        val=[row.sample_id for row in ordered[train_end:val_end]],
+        test=[row.sample_id for row in ordered[val_end:]],
+    )
 
 
 def detect_group_leakage(rows: list[ManifestRow], split: SplitAssignment, *, group_by: str) -> list[str]:

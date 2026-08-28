@@ -69,6 +69,9 @@ class TrainingRunConfig:
     loss : SegmentationLossConfig
     val_metric_name : str
     higher_is_better : bool
+    checkpoint_top_k : int
+        Maximum number of best-by-validation-metric periodic checkpoints to retain; ``0`` keeps
+        every one — see :class:`~precisionai.agritune.training.checkpointing.CheckpointManager`.
     """
 
     manifest_path: str
@@ -87,6 +90,7 @@ class TrainingRunConfig:
     loss: SegmentationLossConfig = field(default_factory=SegmentationLossConfig)
     val_metric_name: str = "mean_iou"
     higher_is_better: bool = True
+    checkpoint_top_k: int = 3
 
 
 @dataclass
@@ -155,7 +159,7 @@ def run_training(config: TrainingRunConfig, *, store: FeatureStore) -> TrainingR
     scheduler = build_scheduler(optimizer, config.scheduler) if config.scheduler is not None else None
 
     run_dir = RunDirectory(config.run_root, config.run_id)
-    checkpoint_manager = CheckpointManager(run_dir.checkpoints_dir)
+    checkpoint_manager = CheckpointManager(run_dir.checkpoints_dir, top_k=config.checkpoint_top_k)
     tracker = JSONLTracker(run_dir.metrics_path)
 
     trainer = Trainer(

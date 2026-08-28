@@ -4,7 +4,10 @@
 """Unit tests for precisionai.agritune.augmentations.image.pipeline.
 
 Phase 3 definition of done: applying the same augmentation seed must generate exactly the same
-transformed image and mask.
+transformed image and mask. The pipeline is built on albumentations; these tests exercise the
+public ``ImageAugmentationPipeline``/``prepare_sample`` API rather than any internal transform
+function, since the engine swap means there is no longer a per-transform function to call
+directly.
 """
 
 import numpy as np
@@ -44,6 +47,13 @@ def test_geometric_resize_resizes_both_image_and_mask() -> None:
     assert prepared.target.size == (4, 3)
 
 
+def test_resize_mask_uses_nearest_and_preserves_label_values() -> None:
+    sample = Sample(sample_id="s1", image=make_image((8, 6)), target=make_mask((8, 6), fill_value=3))
+    config = AugmentationPipelineConfig(geometric=GeometricConfig(resize=(4, 3)))
+    prepared = ImageAugmentationPipeline(config).apply(sample, seed=0)
+    assert set(np.array(prepared.target).ravel().tolist()) == {3}
+
+
 def test_same_seed_produces_identical_output() -> None:
     sample = _sample()
     config = AugmentationPipelineConfig(
@@ -80,17 +90,25 @@ def test_every_configured_transform_is_applied() -> None:
     prepared = ImageAugmentationPipeline(config).apply(sample, seed=0)
     assert prepared.augmentation_metadata is not None
     applied_names = {record.name for record in prepared.augmentation_metadata.transforms}
+    # saturation + hue are fused into one ColorJitter step by the albumentations engine.
     assert applied_names == {
-        "random_crop",
-        "vertical_flip",
-        "rotation",
-        "saturation",
-        "hue",
-        "blur",
-        "noise",
+        "RandomCrop",
+        "VerticalFlip",
+        "Rotate",
+        "ColorJitter",
+        "GaussianBlur",
+        "GaussNoise",
     }
     assert prepared.image.size == (4, 3)
     assert prepared.target.size == (4, 3)
+
+
+def test_random_crop_larger_than_the_image_pads_instead_of_raising() -> None:
+    sample = _sample()  # 8x6
+    config = AugmentationPipelineConfig(geometric=GeometricConfig(random_crop=(10, 8)))
+    prepared = ImageAugmentationPipeline(config).apply(sample, seed=0)
+    assert prepared.image.size == (10, 8)
+    assert prepared.target.size == (10, 8)
 
 
 def test_different_seed_can_produce_different_output() -> None:
@@ -116,6 +134,53 @@ def test_mask_never_receives_photometric_transforms() -> None:
     assert not np.array_equal(np.array(prepared.image), np.array(sample.image))
 
 
+def test_channel_dropout_zeros_one_channel_and_never_touches_the_mask() -> None:
+    sample = _sample()
+    config = AugmentationPipelineConfig(photometric=PhotometricConfig(channel_dropout_probability=1.0))
+    prepared = ImageAugmentationPipeline(config).apply(sample, seed=0)
+
+    array = np.array(prepared.image)
+    zeroed_channels = [channel for channel in range(3) if np.all(array[:, :, channel] == 0)]
+    assert len(zeroed_channels) == 1
+    assert np.array_equal(np.array(prepared.target), np.array(sample.target))
+
+
+def test_gsd_jitter_degrades_resolution_while_preserving_size() -> None:
+    sample = _sample()
+    config = AugmentationPipelineConfig(photometric=PhotometricConfig(gsd_jitter_probability=1.0))
+    prepared = ImageAugmentationPipeline(config).apply(sample, seed=0)
+
+    assert prepared.image.size == sample.image.size
+    assert not np.array_equal(np.array(prepared.image), np.array(sample.image))
+
+
+def test_vegetation_index_jitter_shifts_red_and_green_but_not_blue() -> None:
+    sample = _sample()
+    config = AugmentationPipelineConfig(
+        photometric=PhotometricConfig(
+            vegetation_index_jitter_probability=1.0, vegetation_index_jitter_range=(20.0, 20.0)
+        )
+    )
+    prepared = ImageAugmentationPipeline(config).apply(sample, seed=0)
+
+    original, augmented = np.array(sample.image), np.array(prepared.image)
+    assert not np.array_equal(original[:, :, 0], augmented[:, :, 0])
+    assert not np.array_equal(original[:, :, 1], augmented[:, :, 1])
+    assert np.array_equal(original[:, :, 2], augmented[:, :, 2])
+
+
+def test_seasonal_color_shift_changes_hue_but_not_geometry() -> None:
+    sample = _sample()
+    config = AugmentationPipelineConfig(
+        photometric=PhotometricConfig(seasonal_color_shift_probability=1.0, seasonal_hue_shift_degrees=30.0)
+    )
+    prepared = ImageAugmentationPipeline(config).apply(sample, seed=0)
+
+    assert prepared.image.size == sample.image.size
+    assert not np.array_equal(np.array(prepared.image), np.array(sample.image))
+    assert np.array_equal(np.array(prepared.target), np.array(sample.target))
+
+
 def test_prepare_sample_none_mode_passes_through_unchanged() -> None:
     sample = _sample()
     pipeline = ImageAugmentationPipeline(AugmentationPipelineConfig(geometric=GeometricConfig(rotation_max_degrees=30)))
@@ -137,6 +202,47 @@ def test_prepare_sample_offline_mode_matches_pipeline_with_derived_seed() -> Non
     assert np.array_equal(np.array(prepared.image), np.array(expected.image))
     assert prepared.augmentation_metadata is not None
     assert prepared.augmentation_metadata.seed == expected_seed
+
+
+def test_prepare_sample_hybrid_mode_matches_offline_when_probability_is_zero() -> None:
+    sample = _sample()
+    config = AugmentationPipelineConfig(geometric=GeometricConfig(rotation_max_degrees=30))
+    pipeline = ImageAugmentationPipeline(config)
+
+    hybrid = prepare_sample(
+        sample,
+        mode=AugmentationMode.HYBRID,
+        pipeline=pipeline,
+        global_seed=5,
+        variant=2,
+        epoch=3,
+        hybrid_online_probability=0.0,
+    )
+    offline = prepare_sample(sample, mode=AugmentationMode.OFFLINE, pipeline=pipeline, global_seed=5, variant=2)
+
+    assert hybrid.augmentation_metadata is not None
+    assert offline.augmentation_metadata is not None
+    assert hybrid.augmentation_metadata.seed == offline.augmentation_metadata.seed
+
+
+def test_prepare_sample_hybrid_mode_matches_online_when_probability_is_one() -> None:
+    sample = _sample()
+    config = AugmentationPipelineConfig(geometric=GeometricConfig(rotation_max_degrees=30))
+    pipeline = ImageAugmentationPipeline(config)
+
+    hybrid = prepare_sample(
+        sample,
+        mode=AugmentationMode.HYBRID,
+        pipeline=pipeline,
+        global_seed=5,
+        epoch=3,
+        hybrid_online_probability=1.0,
+    )
+    online = prepare_sample(sample, mode=AugmentationMode.ONLINE, pipeline=pipeline, global_seed=5, epoch=3)
+
+    assert hybrid.augmentation_metadata is not None
+    assert online.augmentation_metadata is not None
+    assert hybrid.augmentation_metadata.seed == online.augmentation_metadata.seed
 
 
 def test_prepare_sample_online_mode_varies_by_epoch() -> None:

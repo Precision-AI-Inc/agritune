@@ -3,20 +3,38 @@
 
 """The deterministic image augmentation pipeline: config, orchestration, and mode dispatch.
 
+Built on `albumentations <https://albumentations.ai/>`_'s ``Compose`` as the composition engine.
+Geometric transforms (resize/crop/flip/rotate) receive both ``image`` and ``mask`` targets —
+images with bilinear/bicubic interpolation, masks always with nearest-neighbor, since resizing or
+rotating a label mask with anything else invents fractional class values that do not exist in the
+label space. Photometric and domain-specific spectral transforms only ever touch ``image`` —
+albumentations' color/noise/blur/channel transforms never declare a ``mask`` target, so this is
+enforced by the library itself rather than by manual gating here.
+
+Determinism is driven by ``Compose.set_random_seed(seed)`` before every ``apply()`` call, on a
+``Compose`` built once from the configured transform list — the same seed on the same sample and
+config always produces byte-identical output. ``TransformRecord.name``/``params`` come straight
+from ``Compose(..., save_applied_params=True)``'s ``applied_transforms`` — only transforms that
+actually fired (e.g. a flip whose probability didn't trigger is omitted, not recorded as
+"not applied") are present, one entry per underlying albumentations transform class.
+
 Supported modes: ``none`` (pass the sample through unchanged), ``offline`` (a fixed number of
-precomputed variants per sample, seeded by sample + variant), and ``online`` (re-augmented every
-epoch, seeded by sample + epoch + occurrence). ``hybrid`` is deferred — see
-``agritune_implementation_plan.md`` §6.
+precomputed variants per sample, seeded by sample + variant), ``online`` (re-augmented every
+epoch, seeded by sample + epoch + occurrence), and ``hybrid`` (mostly reuses an offline variant,
+occasionally derives a fresh online seed — see ``agritune_implementation_plan.md`` §6 and
+:func:`~precisionai.agritune.augmentations.image.seeding.derive_hybrid_seed`).
 """
 
-import random
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any
 
+import albumentations as alb
+import cv2
+import numpy as np
 from PIL import Image
 
-from precisionai.agritune.augmentations.image import transforms
-from precisionai.agritune.augmentations.image.seeding import derive_offline_seed, derive_online_seed
+from precisionai.agritune.augmentations.image.seeding import derive_hybrid_seed, derive_offline_seed, derive_online_seed
 from precisionai.agritune.schemas.augmentation import AugmentationRecord, TransformRecord
 from precisionai.agritune.schemas.samples import PreparedSample, Sample
 
@@ -27,6 +45,7 @@ class AugmentationMode(str, Enum):
     NONE = "none"
     OFFLINE = "offline"
     ONLINE = "online"
+    HYBRID = "hybrid"
 
 
 @dataclass
@@ -38,7 +57,8 @@ class GeometricConfig:
     resize : tuple[int, int] | None
         Target ``(width, height)``, applied first if set.
     random_crop : tuple[int, int] | None
-        ``(width, height)`` crop size, applied after resize if set.
+        ``(width, height)`` crop size, applied after resize if set. May exceed the image's own
+        size — the crop is padded (constant fill) rather than raising.
     horizontal_flip_probability : float
         Probability in ``[0, 1]``.
     vertical_flip_probability : float
@@ -56,7 +76,13 @@ class GeometricConfig:
 
 @dataclass
 class PhotometricConfig:
-    """Photometric transform configuration (image only). A ``None``/``0`` value disables it.
+    """Photometric and spectral transform configuration (image only). A ``None``/``0`` disables it.
+
+    ``channel_dropout``/``gsd_jitter``/``vegetation_index_jitter``/``seasonal_color_shift`` are
+    agricultural-domain-specific additions: simulating a failed/missing sensor band, variable
+    ground-sample-distance across flights, red/green channel-balance variability a true NDVI
+    computation would be sensitive to (this RGB-only pipeline has no NIR band, so it is a proxy,
+    not literal NDVI), and a seasonal/growth-stage hue shift, respectively.
 
     Attributes
     ----------
@@ -71,11 +97,25 @@ class PhotometricConfig:
     blur_probability : float
         Probability in ``[0, 1]`` of applying Gaussian blur.
     blur_radius_range : tuple[float, float]
-        Radius range sampled when blur is applied.
+        Radius (Gaussian sigma) range sampled when blur is applied.
     noise_probability : float
         Probability in ``[0, 1]`` of applying Gaussian pixel noise.
     noise_std_range : tuple[float, float]
         Normalized-``[0, 1]``-scale standard deviation range sampled when noise is applied.
+    channel_dropout_probability : float
+        Probability in ``[0, 1]`` of zeroing one RGB channel entirely.
+    gsd_jitter_probability : float
+        Probability in ``[0, 1]`` of a downscale-then-upscale resolution-degrading pass.
+    gsd_jitter_scale_range : tuple[float, float]
+        Downscale factor range sampled when GSD jitter is applied (smaller = coarser).
+    vegetation_index_jitter_probability : float
+        Probability in ``[0, 1]`` of an independent red/green channel-value jitter.
+    vegetation_index_jitter_range : tuple[float, float]
+        ``(min, max)`` additive shift (0-255 scale) sampled independently for red and green.
+    seasonal_color_shift_probability : float
+        Probability in ``[0, 1]`` of a seasonal/growth-stage hue shift.
+    seasonal_hue_shift_degrees : float
+        Maximum absolute hue shift, in OpenCV's 0-179 hue-circle units; ``0`` disables it.
     """
 
     brightness_range: tuple[float, float] | None = None
@@ -86,6 +126,13 @@ class PhotometricConfig:
     blur_radius_range: tuple[float, float] = (0.1, 2.0)
     noise_probability: float = 0.0
     noise_std_range: tuple[float, float] = (0.01, 0.05)
+    channel_dropout_probability: float = 0.0
+    gsd_jitter_probability: float = 0.0
+    gsd_jitter_scale_range: tuple[float, float] = (0.5, 0.9)
+    vegetation_index_jitter_probability: float = 0.0
+    vegetation_index_jitter_range: tuple[float, float] = (-15.0, 15.0)
+    seasonal_color_shift_probability: float = 0.0
+    seasonal_hue_shift_degrees: float = 0.0
 
 
 @dataclass
@@ -94,6 +141,102 @@ class AugmentationPipelineConfig:
 
     geometric: GeometricConfig = field(default_factory=GeometricConfig)
     photometric: PhotometricConfig = field(default_factory=PhotometricConfig)
+
+
+def _geometric_transforms(config: GeometricConfig) -> list[alb.BasicTransform]:
+    transforms: list[alb.BasicTransform] = []
+
+    if config.resize is not None:
+        width, height = config.resize
+        transforms.append(
+            alb.Resize(height=height, width=width, interpolation=cv2.INTER_LINEAR, mask_interpolation=cv2.INTER_NEAREST)
+        )
+    if config.random_crop is not None:
+        width, height = config.random_crop
+        transforms.append(alb.RandomCrop(height=height, width=width, pad_if_needed=True, p=1.0))
+    if config.horizontal_flip_probability > 0:
+        transforms.append(alb.HorizontalFlip(p=config.horizontal_flip_probability))
+    if config.vertical_flip_probability > 0:
+        transforms.append(alb.VerticalFlip(p=config.vertical_flip_probability))
+    if config.rotation_max_degrees > 0:
+        transforms.append(
+            alb.Rotate(
+                limit=config.rotation_max_degrees,
+                interpolation=cv2.INTER_CUBIC,
+                mask_interpolation=cv2.INTER_NEAREST,
+                border_mode=cv2.BORDER_CONSTANT,
+                p=1.0,
+            )
+        )
+    return transforms
+
+
+def _photometric_transforms(config: PhotometricConfig) -> list[alb.BasicTransform]:
+    transforms: list[alb.BasicTransform] = []
+
+    color_jitter_enabled = (
+        config.brightness_range is not None
+        or config.contrast_range is not None
+        or config.saturation_range is not None
+        or config.hue_max_degrees > 0
+    )
+    if color_jitter_enabled:
+        hue_fraction = config.hue_max_degrees / 360.0
+        transforms.append(
+            alb.ColorJitter(
+                brightness=config.brightness_range or (1.0, 1.0),
+                contrast=config.contrast_range or (1.0, 1.0),
+                saturation=config.saturation_range or (1.0, 1.0),
+                hue=(-hue_fraction, hue_fraction),
+                p=1.0,
+            )
+        )
+    if config.blur_probability > 0:
+        transforms.append(
+            alb.GaussianBlur(blur_limit=0, sigma_limit=config.blur_radius_range, p=config.blur_probability)
+        )
+    if config.noise_probability > 0:
+        transforms.append(
+            alb.GaussNoise(std_range=config.noise_std_range, mean_range=(0.0, 0.0), p=config.noise_probability)
+        )
+    if config.channel_dropout_probability > 0:
+        transforms.append(alb.ChannelDropout(channel_drop_range=(1, 1), fill=0.0, p=config.channel_dropout_probability))
+    if config.gsd_jitter_probability > 0:
+        transforms.append(alb.Downscale(scale_range=config.gsd_jitter_scale_range, p=config.gsd_jitter_probability))
+    if config.vegetation_index_jitter_probability > 0:
+        jitter_range = config.vegetation_index_jitter_range
+        transforms.append(
+            alb.RGBShift(
+                r_shift_limit=jitter_range,
+                g_shift_limit=jitter_range,
+                b_shift_limit=(0.0, 0.0),
+                p=config.vegetation_index_jitter_probability,
+            )
+        )
+    if config.seasonal_color_shift_probability > 0:
+        shift = config.seasonal_hue_shift_degrees
+        transforms.append(
+            alb.HueSaturationValue(
+                hue_shift_limit=(-shift, shift),
+                sat_shift_limit=(0.0, 0.0),
+                val_shift_limit=(0.0, 0.0),
+                p=config.seasonal_color_shift_probability,
+            )
+        )
+    return transforms
+
+
+def _build_transforms(config: AugmentationPipelineConfig) -> list[alb.BasicTransform]:
+    return _geometric_transforms(config.geometric) + _photometric_transforms(config.photometric)
+
+
+def _sanitize_params(params: dict[str, Any]) -> dict[str, Any]:
+    """Convert numpy arrays in ``params`` (e.g. ``Rotate``'s affine matrix) to plain lists.
+
+    Kept JSON-serializable and directly ``==``-comparable — a raw ``numpy.ndarray`` value makes
+    the whole ``dict``'s equality ambiguous, which breaks comparing two ``TransformRecord``s.
+    """
+    return {key: value.tolist() if isinstance(value, np.ndarray) else value for key, value in params.items()}
 
 
 class ImageAugmentationPipeline:
@@ -107,6 +250,7 @@ class ImageAugmentationPipeline:
 
     def __init__(self, config: AugmentationPipelineConfig | None = None) -> None:
         self._config = config or AugmentationPipelineConfig()
+        self._compose = alb.Compose(_build_transforms(self._config), seed=0, save_applied_params=True, strict=True)
 
     def apply(self, sample: Sample, *, seed: int) -> PreparedSample:
         """Apply this pipeline's configured transforms to one sample, deterministically.
@@ -125,68 +269,20 @@ class ImageAugmentationPipeline:
             The augmented sample, with an :class:`AugmentationRecord` capturing exactly what was
             applied.
         """
-        rng = random.Random(seed)
-        image, mask = sample.image, sample.target
-        records: list[TransformRecord] = []
+        self._compose.set_random_seed(seed)
+        result = self._compose(image=np.array(sample.image), mask=np.array(sample.target))
 
-        image, mask, records = self._apply_geometric(image, mask, rng, records)
-        image, records = self._apply_photometric(image, rng, records)
+        records = [
+            TransformRecord(name=name, params=_sanitize_params(params))
+            for name, params in result.get("applied_transforms", [])
+        ]
 
         return PreparedSample(
             sample_id=sample.sample_id,
-            image=image,
-            target=mask,
+            image=Image.fromarray(result["image"]),
+            target=Image.fromarray(result["mask"]),
             augmentation_metadata=AugmentationRecord(seed=seed, transforms=records),
         )
-
-    def _apply_geometric(
-        self, image: Image.Image, mask: Image.Image, rng: random.Random, records: list[TransformRecord]
-    ) -> tuple[Image.Image, Image.Image, list[TransformRecord]]:
-        config = self._config.geometric
-        if config.resize is not None:
-            image, mask, record = transforms.resize(image, mask, config.resize)
-            records.append(record)
-        if config.random_crop is not None:
-            image, mask, record = transforms.random_crop(image, mask, config.random_crop, rng)
-            records.append(record)
-        if config.horizontal_flip_probability > 0:
-            image, mask, record = transforms.horizontal_flip(
-                image, mask, rng, probability=config.horizontal_flip_probability
-            )
-            records.append(record)
-        if config.vertical_flip_probability > 0:
-            image, mask, record = transforms.vertical_flip(
-                image, mask, rng, probability=config.vertical_flip_probability
-            )
-            records.append(record)
-        if config.rotation_max_degrees > 0:
-            image, mask, record = transforms.rotation(image, mask, config.rotation_max_degrees, rng)
-            records.append(record)
-        return image, mask, records
-
-    def _apply_photometric(
-        self, image: Image.Image, rng: random.Random, records: list[TransformRecord]
-    ) -> tuple[Image.Image, list[TransformRecord]]:
-        config = self._config.photometric
-        if config.brightness_range is not None:
-            image, record = transforms.brightness(image, config.brightness_range, rng)
-            records.append(record)
-        if config.contrast_range is not None:
-            image, record = transforms.contrast(image, config.contrast_range, rng)
-            records.append(record)
-        if config.saturation_range is not None:
-            image, record = transforms.saturation(image, config.saturation_range, rng)
-            records.append(record)
-        if config.hue_max_degrees > 0:
-            image, record = transforms.hue(image, config.hue_max_degrees, rng)
-            records.append(record)
-        if config.blur_probability > 0 and rng.random() < config.blur_probability:
-            image, record = transforms.blur(image, config.blur_radius_range, rng)
-            records.append(record)
-        if config.noise_probability > 0 and rng.random() < config.noise_probability:
-            image, record = transforms.noise(image, config.noise_std_range, rng)
-            records.append(record)
-        return image, records
 
 
 def prepare_sample(
@@ -198,6 +294,7 @@ def prepare_sample(
     variant: int = 0,
     epoch: int = 0,
     occurrence: int = 0,
+    hybrid_online_probability: float = 0.3,
 ) -> PreparedSample:
     """Dispatch a sample to the right seed derivation for ``mode`` and apply the pipeline.
 
@@ -208,17 +305,23 @@ def prepare_sample(
     mode : AugmentationMode
         ``NONE`` passes the sample through with no augmentation and no seed. ``OFFLINE`` derives
         a seed from ``global_seed``/``sample_id``/``variant``. ``ONLINE`` derives a seed from
-        ``global_seed``/``epoch``/``sample_id``/``occurrence``.
+        ``global_seed``/``epoch``/``sample_id``/``occurrence``. ``HYBRID`` deterministically
+        reuses an offline variant most of the time, and derives a fresh online seed for a
+        ``hybrid_online_probability`` fraction of ``(sample, epoch, occurrence)`` combinations —
+        see :func:`~precisionai.agritune.augmentations.image.seeding.derive_hybrid_seed`.
     pipeline : ImageAugmentationPipeline
         The configured pipeline to apply (ignored when ``mode is AugmentationMode.NONE``).
     global_seed : int
         The run-level seed.
     variant : int, optional
-        Offline variant index; ignored outside ``OFFLINE`` mode.
+        Offline variant index; ignored outside ``OFFLINE``/``HYBRID`` mode.
     epoch : int, optional
-        Current training epoch; ignored outside ``ONLINE`` mode.
+        Current training epoch; ignored outside ``ONLINE``/``HYBRID`` mode.
     occurrence : int, optional
-        Occurrence-within-epoch counter; ignored outside ``ONLINE`` mode.
+        Occurrence-within-epoch counter; ignored outside ``ONLINE``/``HYBRID`` mode.
+    hybrid_online_probability : float, optional
+        Probability in ``[0, 1]`` that a given ``(sample, epoch, occurrence)`` takes the fresh
+        online branch under ``HYBRID`` mode; ignored outside it.
 
     Returns
     -------
@@ -233,6 +336,15 @@ def prepare_sample(
     elif mode is AugmentationMode.ONLINE:
         seed = derive_online_seed(
             global_seed=global_seed, epoch=epoch, sample_id=sample.sample_id, occurrence=occurrence
+        )
+    elif mode is AugmentationMode.HYBRID:
+        seed = derive_hybrid_seed(
+            global_seed=global_seed,
+            sample_id=sample.sample_id,
+            variant=variant,
+            epoch=epoch,
+            occurrence=occurrence,
+            online_probability=hybrid_online_probability,
         )
     else:  # pragma: no cover — exhaustive over AugmentationMode
         raise ValueError(f"unsupported augmentation mode: {mode}")

@@ -14,9 +14,6 @@ import sys
 from PIL import Image
 
 from precisionai.agritune.cli.config import load_training_run_config
-from precisionai.agritune.encoder.fake import FakeEncoderBackend
-from precisionai.agritune.encoder.gateway import EncoderGateway
-from precisionai.agritune.encoder.remote import RemoteEncoderBackend, RemoteEncoderConfig
 from precisionai.agritune.features.integrity import verify_store
 from precisionai.agritune.features.keys import EncoderFingerprint
 from precisionai.agritune.features.manifest import FeatureManifest
@@ -26,6 +23,7 @@ from precisionai.agritune.logging import get_logger
 from precisionai.agritune.schemas.protocols import EncoderBackend
 from precisionai.agritune.services.benchmark_service import run_benchmark
 from precisionai.agritune.services.dataset_service import inspect_dataset, validate_dataset
+from precisionai.agritune.services.encoder_selection import build_encoder, build_raw_encoder
 from precisionai.agritune.services.evaluation_service import EvaluationRunConfig, run_evaluation
 from precisionai.agritune.services.feature_service import build_features
 from precisionai.agritune.services.prediction_service import PredictionRunConfig, run_prediction
@@ -53,20 +51,15 @@ def dataset_inspect(args: argparse.Namespace) -> int:
 
 
 def _build_raw_encoder(args: argparse.Namespace) -> tuple[EncoderBackend, EncoderFingerprint]:
-    if args.base_url:
-        backend: EncoderBackend = RemoteEncoderBackend(
-            RemoteEncoderConfig(base_url=args.base_url, api_key=args.api_key or "", model=args.model)
-        )
-        fingerprint = EncoderFingerprint(model=args.model, revision=None, preprocessing=args.preprocessing)
-    else:
-        backend = FakeEncoderBackend()
-        fingerprint = EncoderFingerprint(model="fake-encoder", revision="fake-v1", preprocessing=args.preprocessing)
-    return backend, fingerprint
+    return build_raw_encoder(
+        base_url=args.base_url, api_key=args.api_key, model=args.model, preprocessing=args.preprocessing
+    )
 
 
 def _build_encoder(args: argparse.Namespace) -> tuple[EncoderBackend, EncoderFingerprint]:
-    backend, fingerprint = _build_raw_encoder(args)
-    return EncoderGateway(backend), fingerprint
+    return build_encoder(
+        base_url=args.base_url, api_key=args.api_key, model=args.model, preprocessing=args.preprocessing
+    )
 
 
 def features_build(args: argparse.Namespace) -> int:
@@ -175,6 +168,8 @@ def predict(args: argparse.Namespace) -> int:
         decoder_name=args.decoder,
         batch_size=args.batch_size,
         sample_ids=args.sample_ids or None,
+        write_overlays=args.overlays,
+        overlay_alpha=args.overlay_alpha,
     )
     written = run_prediction(config, store=store)
     print(f"wrote {len(written)} prediction(s) to {args.output}")

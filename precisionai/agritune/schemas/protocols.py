@@ -49,6 +49,32 @@ class EncoderBackend(Protocol):
 
 
 @runtime_checkable
+class FeatureAugmentation(Protocol):
+    """A feature-space perturbation applied to a batch of :class:`EncoderFeatures` during training.
+
+    Implementations: ``FeatureAugmentationPipeline``. Kept as a protocol (rather than
+    :class:`Trainer` importing the concrete pipeline) so ``precisionai.agritune.training`` depends
+    only on this shape, matching every other subsystem boundary in this codebase.
+    """
+
+    def apply(self, features: EncoderFeatures, *, generator: torch.Generator | None = None) -> EncoderFeatures:
+        """Return a (possibly) perturbed copy of ``features``.
+
+        Parameters
+        ----------
+        features : EncoderFeatures
+            Features to augment.
+        generator : torch.Generator | None, optional
+            RNG source; ``None`` uses PyTorch's global RNG.
+
+        Returns
+        -------
+        EncoderFeatures
+        """
+        ...
+
+
+@runtime_checkable
 class FeatureProvider(Protocol):
     """The only thing the trainer and decoders are allowed to obtain features through.
 

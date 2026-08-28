@@ -24,6 +24,7 @@ from precisionai.agritune.services.segmentation_common import (
     probe_feature_dims,
 )
 from precisionai.agritune.tasks.segmentation.postprocessing import logits_to_predictions
+from precisionai.agritune.tasks.segmentation.visualization import overlay_predictions_on_image
 from precisionai.agritune.training.checkpointing import CheckpointManager
 
 
@@ -47,6 +48,14 @@ class PredictionRunConfig:
     batch_size : int
     sample_ids : list[str] | None
         Restrict to these sample IDs; ``None`` predicts every row in the manifest.
+    write_overlays : bool
+        Also write ``{sample_id}_overlay.png``: the original image with the predicted mask
+        alpha-blended on top, for quick visual review — see
+        :mod:`~precisionai.agritune.tasks.segmentation.visualization`.
+    overlay_alpha : float
+        Overlay opacity in ``[0, 1]``, passed to
+        :func:`~precisionai.agritune.tasks.segmentation.visualization.overlay_predictions_on_image`.
+        Ignored unless ``write_overlays`` is set.
     """
 
     manifest_path: str
@@ -57,6 +66,8 @@ class PredictionRunConfig:
     decoder_name: str = "linear"
     batch_size: int = 4
     sample_ids: list[str] | None = None
+    write_overlays: bool = False
+    overlay_alpha: float = 0.5
 
 
 def run_prediction(config: PredictionRunConfig, *, store: FeatureStore) -> list[str]:
@@ -113,5 +124,13 @@ def run_prediction(config: PredictionRunConfig, *, store: FeatureStore) -> list[
                 path = output_dir / f"{sample.sample_id}.png"
                 Image.fromarray(prediction.numpy().astype(np.uint8)).save(path)
                 written_paths.append(str(path))
+
+                if config.write_overlays:
+                    overlay_path = output_dir / f"{sample.sample_id}_overlay.png"
+                    overlay = overlay_predictions_on_image(
+                        sample.image, prediction, num_classes=config.num_classes, alpha=config.overlay_alpha
+                    )
+                    overlay.save(overlay_path)
+                    written_paths.append(str(overlay_path))
 
     return written_paths

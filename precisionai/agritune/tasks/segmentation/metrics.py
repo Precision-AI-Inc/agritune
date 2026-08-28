@@ -1,7 +1,7 @@
 # Copyright 2026 Precision AI
 # SPDX-License-Identifier: Apache-2.0
 
-"""Segmentation metrics: mean IoU, per-class IoU, Dice/F1, pixel accuracy, confusion matrix.
+"""Segmentation metrics: mean IoU, per-class IoU/precision/recall, Dice/F1, pixel accuracy, confusion matrix.
 
 :class:`SegmentationMetric` accumulates a confusion matrix across batches and derives every
 statistic from it at :meth:`~SegmentationMetric.compute` time — satisfies
@@ -12,7 +12,7 @@ import torch
 
 
 class SegmentationMetric:
-    """Accumulates a confusion matrix and computes mIoU, per-class IoU, Dice/F1, pixel accuracy.
+    """Accumulates a confusion matrix and computes mIoU, per-class IoU/precision/recall, Dice/F1, pixel accuracy.
 
     Parameters
     ----------
@@ -61,9 +61,10 @@ class SegmentationMetric:
         Returns
         -------
         dict[str, float]
-            ``mean_iou``, ``mean_dice``, ``pixel_accuracy``, plus ``iou_class_{i}`` and
-            ``dice_class_{i}`` for every class ``i``. A class that never appears in either
-            predictions or targets reports an IoU/Dice of ``0.0`` rather than ``NaN``.
+            ``mean_iou``, ``mean_dice``, ``mean_precision``, ``mean_recall``, ``pixel_accuracy``,
+            plus ``iou_class_{i}``, ``dice_class_{i}``, ``precision_class_{i}``, and
+            ``recall_class_{i}`` for every class ``i``. A class that never appears in either
+            predictions or targets reports ``0.0`` rather than ``NaN`` for every per-class stat.
         """
         confusion = self._confusion.float()
         true_positive = confusion.diag()
@@ -73,16 +74,22 @@ class SegmentationMetric:
 
         iou_per_class = true_positive / union.clamp(min=1)
         dice_per_class = 2 * true_positive / (predicted_totals + actual_totals).clamp(min=1)
+        precision_per_class = true_positive / predicted_totals.clamp(min=1)
+        recall_per_class = true_positive / actual_totals.clamp(min=1)
         pixel_accuracy = true_positive.sum() / confusion.sum().clamp(min=1)
 
         result = {
             "mean_iou": iou_per_class.mean().item(),
             "mean_dice": dice_per_class.mean().item(),
+            "mean_precision": precision_per_class.mean().item(),
+            "mean_recall": recall_per_class.mean().item(),
             "pixel_accuracy": pixel_accuracy.item(),
         }
         for class_index in range(self.num_classes):
             result[f"iou_class_{class_index}"] = iou_per_class[class_index].item()
             result[f"dice_class_{class_index}"] = dice_per_class[class_index].item()
+            result[f"precision_class_{class_index}"] = precision_per_class[class_index].item()
+            result[f"recall_class_{class_index}"] = recall_per_class[class_index].item()
         return result
 
     def confusion_matrix(self) -> torch.Tensor:

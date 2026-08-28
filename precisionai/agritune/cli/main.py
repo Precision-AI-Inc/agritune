@@ -127,6 +127,10 @@ def _build_predict_parser(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser("predict", help="Run inference and write predictions/visualizations.")
     _add_scored_run_arguments(parser)
     parser.add_argument("--output", required=True, help="Directory to write prediction PNGs into.")
+    parser.add_argument(
+        "--overlays", action="store_true", help="Also write a {sample_id}_overlay.png visualization per sample."
+    )
+    parser.add_argument("--overlay-alpha", type=float, default=0.5, help="Overlay opacity in [0, 1] (default: 0.5).")
     parser.set_defaults(handler=handlers.predict)
 
 

@@ -19,6 +19,7 @@ from torch.optim import SGD
 
 from precisionai.agritune.optimization.schedulers import SchedulerConfig, build_scheduler
 from precisionai.agritune.schemas.features import EncoderFeatures
+from precisionai.agritune.schemas.protocols import FeatureAugmentation
 from precisionai.agritune.schemas.samples import PreparedSample
 from precisionai.agritune.tasks.segmentation.decoders.linear import LinearProbeDecoder
 from precisionai.agritune.tasks.segmentation.losses import SegmentationLoss, SegmentationLossConfig
@@ -92,6 +93,7 @@ def _build_trainer(
     grad_clip_norm: float | None = None,
     checkpoint_every_n_steps: int | None = None,
     tracker: _FakeTracker | None = None,
+    feature_augmentation: FeatureAugmentation | None = None,
 ) -> tuple[Trainer, LinearProbeDecoder]:
     set_deterministic_seed(seed)  # ensures identical decoder initialization across builds
     decoder = LinearProbeDecoder(patch_dim=4, num_classes=2, output_size=(2, 2))
@@ -118,6 +120,7 @@ def _build_trainer(
         config=config,
         checkpoint_manager=checkpoint_manager,
         tracker=tracker,
+        feature_augmentation=feature_augmentation,
     )
     return trainer, decoder
 
@@ -232,6 +235,43 @@ def test_grad_clip_norm_bounds_gradient_magnitude() -> None:
     assert decoder.projection.weight.abs().max().item() < 0.5
 
 
+class _RecordingFeatureAugmentation:
+    """A minimal feature-augmentation stand-in that records how many times it was called."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def apply(self, features: EncoderFeatures, *, generator: object | None = None) -> EncoderFeatures:
+        self.calls += 1
+        return features
+
+
+def test_feature_augmentation_is_applied_once_per_training_batch() -> None:
+    augmentation = _RecordingFeatureAugmentation()
+    trainer, _ = _build_trainer(max_epochs=2, feature_augmentation=augmentation)
+    batch = TrainingBatch(samples=[_sample("a"), _sample("b")], targets=torch.randint(0, 2, (2, 2, 2)))
+
+    trainer.fit([batch])
+
+    assert augmentation.calls == 2  # one training batch per epoch, 2 epochs
+
+
+def test_feature_augmentation_is_not_applied_during_validation() -> None:
+    augmentation = _RecordingFeatureAugmentation()
+    trainer, _ = _build_trainer(max_epochs=1, feature_augmentation=augmentation)
+    train_batch = TrainingBatch(samples=[_sample("a"), _sample("b")], targets=torch.randint(0, 2, (2, 2, 2)))
+    val_batch = TrainingBatch(samples=[_sample("a"), _sample("b")], targets=torch.randint(0, 2, (2, 2, 2)))
+
+    trainer.fit([train_batch], [val_batch], val_metric=SegmentationMetric(num_classes=2))
+
+    assert augmentation.calls == 1  # only the training batch, never validation
+
+
+def test_no_feature_augmentation_by_default() -> None:
+    trainer, _ = _build_trainer()
+    assert trainer.feature_augmentation is None
+
+
 def test_tracker_receives_train_and_val_metrics() -> None:
     tracker = _FakeTracker()
     trainer, _ = _build_trainer(tracker=tracker)
@@ -254,6 +294,19 @@ def test_checkpoint_every_n_steps_writes_periodic_checkpoint(tmp_path: Path) -> 
     trainer.fit([batch])
 
     assert (tmp_path / "step_00000001.ckpt").is_file()
+
+
+def test_validation_writes_ranked_periodic_checkpoint_for_top_k_pruning(tmp_path: Path) -> None:
+    manager = CheckpointManager(tmp_path, top_k=1)
+    trainer, _ = _build_trainer(max_epochs=3, checkpoint_manager=manager)
+    train_batch = TrainingBatch(samples=[_sample("a"), _sample("b")], targets=torch.randint(0, 2, (2, 2, 2)))
+    val_batch = TrainingBatch(samples=[_sample("a"), _sample("b")], targets=torch.randint(0, 2, (2, 2, 2)))
+
+    trainer.fit([train_batch], [val_batch], val_metric=SegmentationMetric(num_classes=2), val_metric_name="mean_iou")
+
+    # top_k=1 over 3 validated epochs must prune down to exactly one ranked periodic checkpoint.
+    step_checkpoints = list(tmp_path.glob("step_*.ckpt"))
+    assert len(step_checkpoints) == 1
 
 
 def test_reduce_on_plateau_scheduler_is_stepped_on_validation() -> None:

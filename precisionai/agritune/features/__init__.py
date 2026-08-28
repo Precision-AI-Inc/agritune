@@ -13,7 +13,8 @@ from precisionai.agritune.features.keys import (
 )
 from precisionai.agritune.features.manifest import FeatureManifest
 from precisionai.agritune.features.precompute import PrecomputeStats, precompute_features
-from precisionai.agritune.features.provider import CachedFeatureProvider
+from precisionai.agritune.features.prefetch import PrefetchingFeatureProvider
+from precisionai.agritune.features.provider import CachedFeatureProvider, HybridFeatureProvider, OnlineFeatureProvider
 from precisionai.agritune.features.store import DirectoryFeatureStore, FeatureSummary, ShardedFeatureStore
 
 __all__ = [
@@ -24,7 +25,10 @@ __all__ = [
     "FeatureManifest",
     "FeatureNotCachedError",
     "FeatureSummary",
+    "HybridFeatureProvider",
+    "OnlineFeatureProvider",
     "PrecomputeStats",
+    "PrefetchingFeatureProvider",
     "ShardedFeatureStore",
     "VerificationReport",
     "compute_feature_key",
