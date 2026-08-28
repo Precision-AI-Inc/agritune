@@ -1,0 +1,2 @@
+# No scheduler at all — a fixed learning rate for the whole run.
+enabled: false

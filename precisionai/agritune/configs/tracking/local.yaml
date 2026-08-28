@@ -1,0 +1,2 @@
+# The plan's own §23 example: both a plain-text local log and a TensorBoard run, no SaaS service.
+backends: [jsonl, tensorboard]

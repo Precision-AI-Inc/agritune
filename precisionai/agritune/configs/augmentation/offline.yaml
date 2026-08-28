@@ -1,0 +1,11 @@
+# A single fixed augmented variant per sample, reused every epoch — compatible with every
+# feature_provider, including cached (the cache key already incorporates the augmentation
+# fingerprint, so it stays valid across a whole run).
+mode: offline
+variant: 0
+geometric:
+  horizontal_flip_probability: 0.5
+  rotation_max_degrees: 10.0
+photometric:
+  brightness_range: [0.8, 1.2]
+  contrast_range: [0.8, 1.2]

@@ -1,0 +1,3 @@
+# Requires the comet_ml extra: pip install pai-agritune[tracking]
+backends: [comet]
+comet_project_name: agritune

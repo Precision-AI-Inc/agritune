@@ -1,0 +1,7 @@
+loss:
+  name: ce
+  ignore_index: -100
+  ce_weight: 1.0
+  dice_weight: 1.0
+val_metric_name: mean_iou
+higher_is_better: true

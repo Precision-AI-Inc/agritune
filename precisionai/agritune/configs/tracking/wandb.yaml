@@ -1,0 +1,3 @@
+# Requires the wandb extra: pip install pai-agritune[tracking]
+backends: [wandb]
+wandb_project: agritune

@@ -1,0 +1,3 @@
+# Requires the neptune extra: pip install pai-agritune[tracking]
+backends: [neptune]
+neptune_project: ???  # "workspace/project"

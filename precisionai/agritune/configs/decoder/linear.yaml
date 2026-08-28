@@ -1,0 +1,2 @@
+# The diagnostic baseline: patch tokens -> linear projection -> per-patch logits -> upsample.
+name: linear

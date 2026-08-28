@@ -1,25 +1,31 @@
 # Copyright 2026 Precision AI
 # SPDX-License-Identifier: Apache-2.0
 
-"""Loads ``agritune train`` configuration via OmegaConf.
+"""Loads ``agritune train`` configuration via OmegaConf, with two supported shapes.
 
-A YAML file plus ``key=value`` CLI overrides — the same override syntax Hydra uses (see
-``agritune_implementation_plan.md`` §23).
-
-Config-group composition (``defaults:`` lists selecting among named ``dataset``/``encoder``/
-``decoder``/... variants) is future work — see ``docs/configuration.md``. For now, one YAML file
-plus dotlist overrides is resolved directly into a
-:class:`~precisionai.agritune.services.training_service.TrainingRunConfig`.
+A plain YAML file (no ``defaults:`` key) is loaded and merged with ``key=value`` CLI overrides
+directly — the original, flat shape every example and test in this repository predates this
+module's Hydra support with. A YAML file that *does* have a ``defaults:`` key (like the packaged
+``precisionai/agritune/configs/config.yaml``) is instead resolved as a genuine Hydra config-group
+composition: ``compose()`` selects one variant per group (``dataset``/``encoder``/``augmentation``/
+``feature_provider``/``task``/``decoder``/``optimizer``/``scheduler``/``tracking``), and the same
+``overrides`` list can both override plain fields (``trainer.max_epochs=3``) and swap group
+variants (``decoder=token_fpn``, ``augmentation=online``) — see ``agritune_implementation_plan.md``
+§23 and ``docs/configuration.md``.
 """
 
+from pathlib import Path
 from typing import Any
 
-from omegaconf import OmegaConf
+from hydra import compose, initialize_config_dir
+from omegaconf import DictConfig, OmegaConf
 
+from precisionai.agritune.augmentations.image.pipeline import AugmentationMode, GeometricConfig, PhotometricConfig
 from precisionai.agritune.features.keys import EncoderFingerprint
 from precisionai.agritune.optimization.optimizers import OptimizerConfig
 from precisionai.agritune.optimization.schedulers import SchedulerConfig
-from precisionai.agritune.services.training_service import TrainingRunConfig
+from precisionai.agritune.services.tracking_selection import TrackingSelection
+from precisionai.agritune.services.training_service import AugmentationSelection, TrainingRunConfig
 from precisionai.agritune.tasks.segmentation.losses import SegmentationLossConfig
 from precisionai.agritune.training.precision import PrecisionConfig
 from precisionai.agritune.training.trainer import TrainerConfig
@@ -31,19 +37,111 @@ def load_training_run_config(config_path: str, overrides: list[str] | None = Non
     Parameters
     ----------
     config_path : str
-        Path to a YAML config file (see ``examples/segmentation/`` for the expected shape).
+        Path to a YAML config file. A file with a ``defaults:`` key is resolved via Hydra
+        config-group composition (see ``precisionai/agritune/configs/``); any other file is loaded
+        and merged with ``overrides`` directly.
     overrides : list[str] | None, optional
-        ``key=value`` / ``key.nested=value`` override strings, e.g. ``["trainer.max_epochs=10"]``.
+        ``key=value`` / ``key.nested=value`` override strings, e.g. ``["trainer.max_epochs=10"]``
+        — or, for a Hydra-composed config, a group-variant swap like ``["decoder=token_fpn"]``.
 
     Returns
     -------
     TrainingRunConfig
     """
-    merged = OmegaConf.load(config_path)
-    if overrides:
-        merged = OmegaConf.merge(merged, OmegaConf.from_dotlist(overrides))
-    resolved: dict[str, Any] = OmegaConf.to_container(merged, resolve=True)  # type: ignore[assignment]
+    overrides = overrides or []
+    path = Path(config_path)
+    raw = OmegaConf.load(path)
+
+    if isinstance(raw, DictConfig) and "defaults" in raw:
+        resolved = _compose_config_groups(path, overrides)
+    else:
+        merged = OmegaConf.merge(raw, OmegaConf.from_dotlist(overrides)) if overrides else raw
+        resolved = OmegaConf.to_container(merged, resolve=True)  # type: ignore[assignment]
+
     return _config_from_dict(resolved)
+
+
+def _compose_config_groups(config_path: Path, overrides: list[str]) -> dict[str, Any]:
+    config_dir = str(config_path.parent.resolve())
+    config_name = config_path.stem
+    with initialize_config_dir(config_dir=config_dir, version_base=None):
+        cfg = compose(config_name=config_name, overrides=overrides)
+    # throw_on_missing surfaces a forgotten `???` (e.g. dataset.manifest_path) as a clear
+    # MissingMandatoryValue naming the exact key, instead of a literal "???" string silently
+    # flowing into TrainingRunConfig and failing confusingly much later.
+    composed: dict[str, Any] = OmegaConf.to_container(cfg, resolve=True, throw_on_missing=True)  # type: ignore[assignment]
+    return _flatten_composed_groups(composed)
+
+
+def _flatten_composed_groups(composed: dict[str, Any]) -> dict[str, Any]:
+    """Fold group-namespaced Hydra output into the flat shape :func:`_config_from_dict` expects.
+
+    ``optimizer``/``scheduler``/``augmentation``/``tracking`` are already nested dicts in that flat
+    shape, so those four groups pass through unchanged; ``dataset``/``encoder``/``decoder``/
+    ``task``/``feature_provider`` do not have a flat-shape equivalent and are unpacked here.
+    """
+    flat = dict(composed)
+    dataset = flat.pop("dataset", {}) or {}
+    encoder = flat.pop("encoder", {}) or {}
+    decoder = flat.pop("decoder", {}) or {}
+    task = flat.pop("task", {}) or {}
+    feature_provider = flat.pop("feature_provider", {}) or {}
+
+    flat["manifest_path"] = dataset.get("manifest_path")
+    flat["num_classes"] = dataset.get("num_classes")
+    flat["encoder_fingerprint"] = {
+        "model": encoder.get("model"),
+        "revision": encoder.get("revision"),
+        "preprocessing": encoder.get("preprocessing", ""),
+    }
+    flat["encoder_base_url"] = encoder.get("base_url")
+    flat["encoder_api_key"] = encoder.get("api_key")
+    flat["decoder_name"] = decoder.get("name", "linear")
+    flat["loss"] = task.get("loss", {})
+    flat["val_metric_name"] = task.get("val_metric_name", "mean_iou")
+    flat["higher_is_better"] = task.get("higher_is_better", True)
+    flat["feature_provider"] = feature_provider.get("name", "cached")
+    return flat
+
+
+def _tupleize(data: dict[str, Any], *keys: str) -> dict[str, Any]:
+    result = dict(data)
+    for key in keys:
+        if result.get(key) is not None:
+            result[key] = tuple(result[key])
+    return result
+
+
+def _augmentation_from_dict(data: dict[str, Any]) -> AugmentationSelection:
+    geometric_data = _tupleize(dict(data.get("geometric") or {}), "resize", "random_crop")
+    photometric_data = _tupleize(
+        dict(data.get("photometric") or {}),
+        "brightness_range",
+        "contrast_range",
+        "saturation_range",
+        "blur_radius_range",
+        "noise_std_range",
+        "gsd_jitter_scale_range",
+        "vegetation_index_jitter_range",
+    )
+    return AugmentationSelection(
+        mode=AugmentationMode(data.get("mode", "none")),
+        variant=data.get("variant", 0),
+        hybrid_online_probability=data.get("hybrid_online_probability", 0.3),
+        geometric=GeometricConfig(**geometric_data),
+        photometric=PhotometricConfig(**photometric_data),
+    )
+
+
+def _tracking_from_dict(data: dict[str, Any]) -> TrackingSelection:
+    return TrackingSelection(
+        backends=list(data.get("backends", ["jsonl"])),
+        mlflow_experiment_name=data.get("mlflow_experiment_name"),
+        mlflow_tracking_uri=data.get("mlflow_tracking_uri"),
+        wandb_project=data.get("wandb_project", "agritune"),
+        neptune_project=data.get("neptune_project"),
+        comet_project_name=data.get("comet_project_name", "agritune"),
+    )
 
 
 def _config_from_dict(data: dict[str, Any]) -> TrainingRunConfig:
@@ -51,7 +149,10 @@ def _config_from_dict(data: dict[str, Any]) -> TrainingRunConfig:
     optimizer_data = dict(data.get("optimizer") or {})
     if "betas" in optimizer_data:
         optimizer_data["betas"] = tuple(optimizer_data["betas"])
-    scheduler_data = data.get("scheduler")
+
+    scheduler_data = dict(data.get("scheduler") or {})
+    scheduler_enabled = scheduler_data.pop("enabled", True)
+
     trainer_data = dict(data.get("trainer") or {})
     loss_data = dict(data.get("loss") or {})
     seed = data.get("seed", 0)
@@ -67,12 +168,16 @@ def _config_from_dict(data: dict[str, Any]) -> TrainingRunConfig:
             revision=encoder_data.get("revision"),
             preprocessing=encoder_data.get("preprocessing", ""),
         ),
+        feature_provider=data.get("feature_provider", "cached"),
+        encoder_base_url=data.get("encoder_base_url"),
+        encoder_api_key=data.get("encoder_api_key"),
+        augmentation=_augmentation_from_dict(dict(data.get("augmentation") or {})),
         decoder_name=data.get("decoder_name", "linear"),
         batch_size=data.get("batch_size", 4),
         val_fraction=data.get("val_fraction", 0.2),
         seed=seed,
         optimizer=OptimizerConfig(**optimizer_data),
-        scheduler=SchedulerConfig(**scheduler_data) if scheduler_data else None,
+        scheduler=SchedulerConfig(**scheduler_data) if scheduler_data and scheduler_enabled else None,
         trainer=TrainerConfig(
             max_epochs=trainer_data.get("max_epochs", 1),
             accumulation_steps=trainer_data.get("accumulation_steps", 1),
@@ -86,4 +191,5 @@ def _config_from_dict(data: dict[str, Any]) -> TrainingRunConfig:
         val_metric_name=data.get("val_metric_name", "mean_iou"),
         higher_is_better=data.get("higher_is_better", True),
         checkpoint_top_k=data.get("checkpoint_top_k", 3),
+        tracking=_tracking_from_dict(dict(data.get("tracking") or {})),
     )

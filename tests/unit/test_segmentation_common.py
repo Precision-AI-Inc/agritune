@@ -5,9 +5,17 @@
 
 from pathlib import Path
 
+import numpy as np
 import pytest
 import torch
+from PIL import Image
 
+from precisionai.agritune.augmentations.image.pipeline import (
+    AugmentationMode,
+    AugmentationPipelineConfig,
+    GeometricConfig,
+    ImageAugmentationPipeline,
+)
 from precisionai.agritune.data.dataset import ManifestDataset
 from precisionai.agritune.encoder.fake import FakeEncoderBackend
 from precisionai.agritune.features.keys import EncoderFingerprint
@@ -15,15 +23,19 @@ from precisionai.agritune.features.store import DirectoryFeatureStore
 from precisionai.agritune.schemas.samples import PreparedSample
 from precisionai.agritune.services.feature_service import build_features
 from precisionai.agritune.services.segmentation_common import (
+    OnlineAugmentedBatches,
     build_cached_feature_provider,
     build_decoder,
+    build_image_hash_fn,
     build_prediction_batches,
+    build_static_augmented_batches,
     build_training_batches,
     mask_to_target_tensor,
     probe_feature_dims,
 )
 from precisionai.agritune.tasks.segmentation.decoders.linear import LinearProbeDecoder
 from precisionai.agritune.tasks.segmentation.decoders.token_fpn import TokenFPNDecoder
+from tests.fixtures.image_factory import make_image, make_mask
 from tests.fixtures.manifest_factory import build_manifest
 
 _FINGERPRINT = EncoderFingerprint(model="fake-encoder", revision="fake-v1", preprocessing="resize=8x8")
@@ -91,3 +103,138 @@ async def test_probe_feature_dims_reports_patch_and_cls_dims(tmp_path: Path) -> 
 
     assert patch_dim == 384  # FakeEncoderBackend's default patch_dim
     assert cls_dim == 384  # FakeEncoderBackend's default cls_dim
+
+
+def test_build_image_hash_fn_is_deterministic_and_content_sensitive(tmp_path: Path) -> None:
+    # manifest_factory's images are all identical (flat black) by design, so build two manifest
+    # rows pointing at genuinely different image content directly, to prove the hash is sensitive
+    # to it (not just to the sample_id or manifest row).
+    Image.new("RGB", (4, 4), color=(10, 20, 30)).save(tmp_path / "s0.png")
+    Image.new("RGB", (4, 4), color=(200, 100, 50)).save(tmp_path / "s1.png")
+    manifest_path = tmp_path / "manifest.csv"
+    manifest_path.write_text("sample_id,image_path,mask_path\ns0,s0.png,s0.png\ns1,s1.png,s1.png\n")
+
+    hash_fn = build_image_hash_fn(str(manifest_path))
+    sample_0 = PreparedSample(sample_id="s0", image=None, target=None)
+    sample_1 = PreparedSample(sample_id="s1", image=None, target=None)
+
+    assert hash_fn(sample_0) == hash_fn(sample_0)
+    assert hash_fn(sample_0) != hash_fn(sample_1)  # different images -> different hashes
+
+
+def _build_gradient_manifest(tmp_path: Path, *, size: tuple[int, int] = (8, 6)) -> Path:
+    """A manifest with real (non-flat) images, so geometric/photometric augmentation is visible."""
+    for sample_id in ("s0", "s1"):
+        make_image(size).save(tmp_path / f"{sample_id}_image.png")
+        make_mask(size, fill_value=1).save(tmp_path / f"{sample_id}_mask.png")
+    manifest_path = tmp_path / "manifest.csv"
+    manifest_path.write_text(
+        "sample_id,image_path,mask_path\ns0,s0_image.png,s0_mask.png\ns1,s1_image.png,s1_mask.png\n"
+    )
+    return manifest_path
+
+
+def test_build_static_augmented_batches_none_mode_matches_build_training_batches(tmp_path: Path) -> None:
+    manifest_path = _build_gradient_manifest(tmp_path)
+    dataset = ManifestDataset(manifest_path)
+    pipeline = ImageAugmentationPipeline()
+
+    plain = build_training_batches(dataset, batch_size=2)
+    augmented = build_static_augmented_batches(
+        dataset, pipeline=pipeline, mode=AugmentationMode.NONE, global_seed=0, batch_size=2
+    )
+
+    assert torch.equal(plain[0].targets, augmented[0].targets)
+    for plain_sample, augmented_sample in zip(plain[0].samples, augmented[0].samples, strict=True):
+        assert np.array_equal(np.array(plain_sample.image), np.array(augmented_sample.image))
+
+
+def test_build_static_augmented_batches_offline_applies_augmentation(tmp_path: Path) -> None:
+    manifest_path = _build_gradient_manifest(tmp_path)
+    dataset = ManifestDataset(manifest_path)
+    pipeline = ImageAugmentationPipeline(
+        AugmentationPipelineConfig(geometric=GeometricConfig(horizontal_flip_probability=1.0))
+    )
+
+    batches = build_static_augmented_batches(
+        dataset, pipeline=pipeline, mode=AugmentationMode.OFFLINE, global_seed=0, batch_size=2, variant=0
+    )
+
+    original = dataset[0].image
+    flipped = batches[0].samples[0].image
+    assert not np.array_equal(np.array(original), np.array(flipped))
+
+
+def test_build_static_augmented_batches_offline_is_deterministic(tmp_path: Path) -> None:
+    manifest_path = _build_gradient_manifest(tmp_path)
+    dataset = ManifestDataset(manifest_path)
+    pipeline = ImageAugmentationPipeline(
+        AugmentationPipelineConfig(geometric=GeometricConfig(rotation_max_degrees=30.0))
+    )
+
+    first = build_static_augmented_batches(
+        dataset, pipeline=pipeline, mode=AugmentationMode.OFFLINE, global_seed=7, batch_size=2, variant=0
+    )
+    second = build_static_augmented_batches(
+        dataset, pipeline=pipeline, mode=AugmentationMode.OFFLINE, global_seed=7, batch_size=2, variant=0
+    )
+
+    for first_sample, second_sample in zip(first[0].samples, second[0].samples, strict=True):
+        assert np.array_equal(np.array(first_sample.image), np.array(second_sample.image))
+
+
+def test_online_augmented_batches_reaugments_on_each_iteration(tmp_path: Path) -> None:
+    manifest_path = _build_gradient_manifest(tmp_path)
+    dataset = ManifestDataset(manifest_path)
+    pipeline = ImageAugmentationPipeline(
+        AugmentationPipelineConfig(geometric=GeometricConfig(rotation_max_degrees=45.0))
+    )
+    batches = OnlineAugmentedBatches(
+        dataset, pipeline=pipeline, mode=AugmentationMode.ONLINE, global_seed=0, batch_size=2
+    )
+
+    first_epoch = list(batches)
+    second_epoch = list(batches)
+
+    first_image = first_epoch[0].samples[0].image
+    second_image = second_epoch[0].samples[0].image
+    assert not np.array_equal(np.array(first_image), np.array(second_image))
+
+
+def test_online_augmented_batches_advances_its_epoch_counter(tmp_path: Path) -> None:
+    manifest_path = _build_gradient_manifest(tmp_path)
+    dataset = ManifestDataset(manifest_path)
+    pipeline = ImageAugmentationPipeline()
+    batches = OnlineAugmentedBatches(
+        dataset, pipeline=pipeline, mode=AugmentationMode.ONLINE, global_seed=0, batch_size=2
+    )
+
+    assert batches._epoch == 0
+    list(batches)
+    assert batches._epoch == 1
+    list(batches)
+    assert batches._epoch == 2
+
+
+def test_online_augmented_batches_hybrid_mode_is_deterministic_per_epoch(tmp_path: Path) -> None:
+    manifest_path = _build_gradient_manifest(tmp_path)
+    dataset = ManifestDataset(manifest_path)
+    pipeline = ImageAugmentationPipeline(
+        AugmentationPipelineConfig(geometric=GeometricConfig(rotation_max_degrees=30.0))
+    )
+
+    def _run() -> list:
+        batches = OnlineAugmentedBatches(
+            dataset,
+            pipeline=pipeline,
+            mode=AugmentationMode.HYBRID,
+            global_seed=3,
+            batch_size=2,
+            hybrid_online_probability=0.5,
+        )
+        return [np.array(sample.image) for batch in batches for sample in batch.samples]
+
+    first_run = _run()
+    second_run = _run()
+    for first_image, second_image in zip(first_run, second_run, strict=True):
+        assert np.array_equal(first_image, second_image)  # epoch 0 is deterministic across runs

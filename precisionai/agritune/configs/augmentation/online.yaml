@@ -1,0 +1,10 @@
+# Re-augmented fresh every epoch — requires feature_provider: online or hybrid (a cached
+# provider's key would only ever match the first epoch's augmentation fingerprint).
+mode: online
+geometric:
+  horizontal_flip_probability: 0.5
+  rotation_max_degrees: 15.0
+photometric:
+  brightness_range: [0.7, 1.3]
+  contrast_range: [0.7, 1.3]
+  noise_probability: 0.2

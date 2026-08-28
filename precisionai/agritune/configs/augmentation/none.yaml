@@ -1,0 +1,2 @@
+# No augmentation — samples pass through unchanged. Compatible with every feature_provider.
+mode: none

@@ -1,0 +1,6 @@
+# FakeEncoderBackend — no network access, the default so `agritune train` works out of the box.
+base_url: null
+api_key: null
+model: fake-encoder
+revision: fake-v1
+preprocessing: ""

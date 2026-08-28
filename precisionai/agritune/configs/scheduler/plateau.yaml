@@ -1,0 +1,4 @@
+enabled: true
+name: plateau
+plateau_factor: 0.5
+plateau_patience: 10

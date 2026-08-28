@@ -1,0 +1,3 @@
+# A CSV manifest: sample_id,image_path,mask_path,field_id,farm_id,capture_date,... — see docs/datasets.md.
+manifest_path: ???
+num_classes: ???

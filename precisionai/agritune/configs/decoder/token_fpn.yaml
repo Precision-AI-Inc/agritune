@@ -1,0 +1,4 @@
+# The stronger decoder: channel projection -> spatial reshape -> pseudo feature pyramid ->
+# convolutional refinement -> upsampling. Should beat the linear baseline, or something upstream
+# is wrong.
+name: token_fpn

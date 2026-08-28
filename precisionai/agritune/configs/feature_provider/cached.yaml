@@ -1,0 +1,3 @@
+# Reads precomputed features from the store built by `agritune features build`. Requires
+# augmentation: none or offline (a fixed cache key per sample/variant).
+name: cached

@@ -1,0 +1,7 @@
+# RemoteEncoderBackend — the hosted OpenAI-SDK-compatible embeddings API. See docs/encoder.md.
+# api_key defaults from the AGRITUNE_ENCODER_API_KEY environment variable — never hardcode it here.
+base_url: ???
+api_key: ${oc.env:AGRITUNE_ENCODER_API_KEY,null}
+model: pai-embedding
+revision: null
+preprocessing: ""

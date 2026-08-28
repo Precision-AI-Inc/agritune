@@ -40,6 +40,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   400/404/404/409 respectively; everything else surfaces as a 500, same as an uncaught CLI
   traceback. Encoder-backend selection was extracted into `services.encoder_selection`, shared by
   both entry points.
+- Real Hydra config-group composition (`precisionai/agritune/configs/`): named YAML variants under
+  `dataset/`, `encoder/`, `augmentation/`, `feature_provider/`, `task/`, `decoder/`, `optimizer/`,
+  `scheduler/`, and `tracking/`, composed via a `defaults:` list in the packaged `config.yaml`.
+  `cli.config.load_training_run_config` resolves either shape: a plain flat YAML file (unchanged,
+  original behavior) or a `defaults:`-bearing file resolved through `hydra.compose()`, with the
+  same `key=value` override list also able to swap group variants (`decoder=token_fpn`,
+  `augmentation=online`). `feature_provider` (`cached`/`online`/`hybrid`), `augmentation`
+  (`none`/`offline`/`online`/`hybrid`), and `tracking` selection are now wired end-to-end into
+  `run_training`, which rejects the `augmentation=online|hybrid` + `feature_provider=cached`
+  combination before training starts.
 
 ### Changed
 

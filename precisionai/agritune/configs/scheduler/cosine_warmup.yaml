@@ -1,0 +1,4 @@
+enabled: true
+name: cosine
+warmup_steps: 1000
+total_steps: ???

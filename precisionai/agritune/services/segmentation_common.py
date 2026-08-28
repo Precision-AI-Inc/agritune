@@ -9,6 +9,7 @@ building batches, decoders, and a
 what ``agritune features build`` wrote.
 """
 
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -16,11 +17,16 @@ import numpy as np
 import torch
 from torch import nn
 
+from precisionai.agritune.augmentations.image.pipeline import (
+    AugmentationMode,
+    ImageAugmentationPipeline,
+    prepare_sample,
+)
 from precisionai.agritune.data.dataset import ManifestDataset
 from precisionai.agritune.data.manifest import ManifestRow, load_manifest
 from precisionai.agritune.features.keys import EncoderFingerprint, hash_image_bytes
 from precisionai.agritune.features.provider import CachedFeatureProvider
-from precisionai.agritune.schemas.protocols import FeatureStore
+from precisionai.agritune.schemas.protocols import FeatureProvider, FeatureStore
 from precisionai.agritune.schemas.samples import PreparedSample
 from precisionai.agritune.tasks.segmentation.decoders.linear import LinearProbeDecoder
 from precisionai.agritune.tasks.segmentation.decoders.token_fpn import TokenFPNDecoder
@@ -41,6 +47,114 @@ def build_training_batches(dataset: ManifestDataset, *, batch_size: int) -> list
         targets = torch.stack([mask_to_target_tensor(sample.target) for sample in chunk])
         batches.append(TrainingBatch(samples=samples, targets=targets))
     return batches
+
+
+def build_static_augmented_batches(
+    dataset: ManifestDataset,
+    *,
+    pipeline: ImageAugmentationPipeline,
+    mode: AugmentationMode,
+    global_seed: int,
+    batch_size: int,
+    variant: int = 0,
+) -> list[TrainingBatch]:
+    """Chunk a dataset into batches, applying a fixed (non-epoch-varying) augmentation pass.
+
+    Suitable for ``AugmentationMode.NONE`` (a no-op passthrough) and ``AugmentationMode.OFFLINE``
+    (one fixed ``variant`` per sample) — every batch is computed once and reused every epoch, same
+    as :func:`build_training_batches`. Use :class:`OnlineAugmentedBatches` instead for
+    ``ONLINE``/``HYBRID``, which must re-augment every epoch.
+
+    Parameters
+    ----------
+    dataset : ManifestDataset
+    pipeline : ImageAugmentationPipeline
+        Ignored when ``mode is AugmentationMode.NONE``.
+    mode : AugmentationMode
+        Must be ``NONE`` or ``OFFLINE``.
+    global_seed : int
+    batch_size : int
+    variant : int, optional
+        Offline variant index; ignored under ``NONE``.
+
+    Returns
+    -------
+    list[TrainingBatch]
+    """
+    batches = []
+    for start in range(0, len(dataset), batch_size):
+        chunk = [dataset[i] for i in range(start, min(start + batch_size, len(dataset)))]
+        prepared = [
+            prepare_sample(sample, mode=mode, pipeline=pipeline, global_seed=global_seed, variant=variant)
+            for sample in chunk
+        ]
+        samples = [PreparedSample(sample_id=p.sample_id, image=p.image, target=None) for p in prepared]
+        targets = torch.stack([mask_to_target_tensor(p.target) for p in prepared])
+        batches.append(TrainingBatch(samples=samples, targets=targets))
+    return batches
+
+
+class OnlineAugmentedBatches:
+    """A batches iterable that re-augments its samples fresh every time it is iterated.
+
+    ``Trainer.fit()`` iterates its ``train_batches`` argument once per epoch via a plain ``for
+    batch in batches`` loop — passing an instance of this class as that argument makes each of
+    those per-epoch iterations produce newly re-augmented ``ONLINE``/``HYBRID`` batches, with no
+    change to ``Trainer`` itself. Not re-iterable concurrently: each ``__iter__`` call consumes and
+    advances the shared epoch counter.
+
+    Parameters
+    ----------
+    dataset : ManifestDataset
+    pipeline : ImageAugmentationPipeline
+    mode : AugmentationMode
+        Must be ``ONLINE`` or ``HYBRID``.
+    global_seed : int
+    batch_size : int
+    hybrid_online_probability : float, optional
+        Forwarded to :func:`~precisionai.agritune.augmentations.image.pipeline.prepare_sample`;
+        ignored under ``ONLINE``.
+    """
+
+    def __init__(
+        self,
+        dataset: ManifestDataset,
+        *,
+        pipeline: ImageAugmentationPipeline,
+        mode: AugmentationMode,
+        global_seed: int,
+        batch_size: int,
+        hybrid_online_probability: float = 0.3,
+    ) -> None:
+        self._dataset = dataset
+        self._pipeline = pipeline
+        self._mode = mode
+        self._global_seed = global_seed
+        self._batch_size = batch_size
+        self._hybrid_online_probability = hybrid_online_probability
+        self._epoch = 0
+
+    def __iter__(self) -> Iterator[TrainingBatch]:
+        """Yield one freshly re-augmented pass over the dataset, advancing the epoch counter."""
+        epoch = self._epoch
+        self._epoch += 1
+        for start in range(0, len(self._dataset), self._batch_size):
+            chunk = [self._dataset[i] for i in range(start, min(start + self._batch_size, len(self._dataset)))]
+            prepared = [
+                prepare_sample(
+                    sample,
+                    mode=self._mode,
+                    pipeline=self._pipeline,
+                    global_seed=self._global_seed,
+                    epoch=epoch,
+                    occurrence=0,
+                    hybrid_online_probability=self._hybrid_online_probability,
+                )
+                for sample in chunk
+            ]
+            samples = [PreparedSample(sample_id=p.sample_id, image=p.image, target=None) for p in prepared]
+            targets = torch.stack([mask_to_target_tensor(p.target) for p in prepared])
+            yield TrainingBatch(samples=samples, targets=targets)
 
 
 def build_prediction_batches(dataset: ManifestDataset, *, batch_size: int) -> list[list[PreparedSample]]:
@@ -65,12 +179,40 @@ def build_decoder(
     raise ValueError(f"unsupported decoder: {name!r}")
 
 
-def probe_feature_dims(provider: CachedFeatureProvider, sample: PreparedSample) -> tuple[int, int | None]:
+def probe_feature_dims(provider: FeatureProvider, sample: PreparedSample) -> tuple[int, int | None]:
     """Return ``(patch_dim, cls_dim)`` observed from one sample's cached features."""
     features = provider.get_features([sample])
     patch_dim = features.patch_tokens.shape[-1]
     cls_dim = features.cls_tokens.shape[-1] if features.cls_tokens is not None else None
     return patch_dim, cls_dim
+
+
+def build_image_hash_fn(manifest_path: str) -> Callable[[PreparedSample], str]:
+    """Return a function computing a sample's image-content hash, keyed by manifest row.
+
+    The feature store is built by ``feature_service.build_features`` using file-content hashes;
+    any provider reading or writing that same store must derive keys identically — shared here so
+    :class:`~precisionai.agritune.features.provider.CachedFeatureProvider` and
+    :class:`~precisionai.agritune.features.provider.HybridFeatureProvider` never duplicate it.
+
+    Parameters
+    ----------
+    manifest_path : str
+        Path to the dataset manifest CSV.
+
+    Returns
+    -------
+    Callable[[PreparedSample], str]
+    """
+    rows = load_manifest(manifest_path)
+    base_dir = Path(manifest_path).parent
+    rows_by_sample_id = {row.sample_id: row for row in rows}
+
+    def image_hash_fn(sample: PreparedSample) -> str:
+        row = rows_by_sample_id[sample.sample_id]
+        return hash_image_bytes((base_dir / row.image_path).read_bytes())
+
+    return image_hash_fn
 
 
 def build_cached_feature_provider(
@@ -84,14 +226,7 @@ def build_cached_feature_provider(
         The provider, plus the parsed manifest rows (callers typically need these for splitting).
     """
     rows = load_manifest(manifest_path)
-    base_dir = Path(manifest_path).parent
-    rows_by_sample_id = {row.sample_id: row for row in rows}
-
-    def image_hash_fn(sample: PreparedSample) -> str:
-        # The feature store was built by feature_service.build_features using file-content
-        # hashes; the provider must derive the identical key here to find them.
-        row = rows_by_sample_id[sample.sample_id]
-        return hash_image_bytes((base_dir / row.image_path).read_bytes())
-
-    provider = CachedFeatureProvider(store, encoder_fingerprint=encoder_fingerprint, image_hash_fn=image_hash_fn)
+    provider = CachedFeatureProvider(
+        store, encoder_fingerprint=encoder_fingerprint, image_hash_fn=build_image_hash_fn(manifest_path)
+    )
     return provider, rows

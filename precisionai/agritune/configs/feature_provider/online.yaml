@@ -1,0 +1,3 @@
+# Encodes every batch fresh through the encoder gateway — no disk cache. Works with any
+# augmentation mode; required for augmentation: online/hybrid.
+name: online
