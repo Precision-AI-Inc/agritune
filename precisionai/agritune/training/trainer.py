@@ -1,0 +1,302 @@
+# Copyright 2026 Precision AI
+# SPDX-License-Identifier: Apache-2.0
+
+"""``Trainer`` — orchestrates training; contains no task-specific logic.
+
+Pseudo-flow (see ``agritune_implementation_plan.md`` §12)::
+
+    for batch in loader:
+        features = feature_provider.get_features(batch.samples)
+        outputs = task.forward(features)
+        loss = task.compute_loss(outputs, batch.targets)
+        loss /= accumulation_steps
+        backward(loss)
+        if optimizer_step:
+            clip_gradients()
+            optimizer.step()
+            scheduler.step()
+
+``batches`` must be a true re-iterable (a ``torch.utils.data.DataLoader`` or a list, not a
+one-shot generator) — the trainer iterates it once per epoch, calling ``iter()`` on it fresh
+each time via a plain ``for`` loop.
+"""
+
+from collections.abc import Iterable
+from dataclasses import dataclass, field
+
+import torch
+from torch import nn
+from torch.optim import Optimizer
+from torch.optim.lr_scheduler import LRScheduler, ReduceLROnPlateau
+
+from precisionai.agritune.logging import get_logger
+from precisionai.agritune.schemas.protocols import FeatureProvider, Metric, Task, Tracker
+from precisionai.agritune.training.checkpointing import Checkpoint, CheckpointManager
+from precisionai.agritune.training.distributed import DistributedContext
+from precisionai.agritune.training.evaluator import TrainingBatch, evaluate
+from precisionai.agritune.training.precision import PrecisionConfig, PrecisionContext
+from precisionai.agritune.training.state import (
+    TrainingState,
+    capture_rng_state,
+    restore_rng_state,
+    set_deterministic_seed,
+)
+
+logger = get_logger(__name__)
+
+
+@dataclass
+class TrainerConfig:
+    """Configuration for :class:`Trainer`.
+
+    Attributes
+    ----------
+    max_epochs : int
+        Number of epochs to train for.
+    accumulation_steps : int
+        Micro-batches accumulated before each optimizer step.
+    grad_clip_norm : float | None
+        Max gradient norm for clipping; ``None`` disables clipping.
+    precision : PrecisionConfig
+        Mixed-precision configuration.
+    seed : int
+        Deterministic seed applied at the start of :meth:`Trainer.fit`.
+    early_stopping_patience : int | None
+        Stop after this many validation passes with no improvement; ``None`` disables early
+        stopping.
+    checkpoint_every_n_steps : int | None
+        Also write a periodic checkpoint every this many optimizer steps; ``None`` disables it
+        (only end-of-epoch/best checkpoints are written).
+    fingerprints : dict[str, str]
+        Identifies this run's configuration/dataset/encoder, stored in every checkpoint and
+        checked on resume — see :class:`~precisionai.agritune.training.checkpointing.CheckpointManager`.
+    """
+
+    max_epochs: int
+    accumulation_steps: int = 1
+    grad_clip_norm: float | None = None
+    precision: PrecisionConfig = field(default_factory=PrecisionConfig)
+    seed: int = 0
+    early_stopping_patience: int | None = None
+    checkpoint_every_n_steps: int | None = None
+    fingerprints: dict[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """Validate ``accumulation_steps``."""
+        if self.accumulation_steps < 1:
+            raise ValueError(f"accumulation_steps must be >= 1; got {self.accumulation_steps}")
+
+
+class Trainer:
+    """Orchestrates training over a :class:`Task`, via a :class:`FeatureProvider`.
+
+    Never imports or calls anything in ``precisionai.agritune.encoder`` — see CLAUDE.md's
+    architectural rule.
+
+    Parameters
+    ----------
+    task : Task
+        The task being trained (binds a decoder to a loss).
+    decoder : torch.nn.Module
+        The trainable module — also ``task``'s decoder; passed separately since ``Task`` is a
+        protocol and does not guarantee ``.parameters()``/``.train()``/``.eval()``.
+    feature_provider : FeatureProvider
+        Supplies features for each batch.
+    optimizer : torch.optim.Optimizer
+    scheduler : LRScheduler | ReduceLROnPlateau | None
+        Stepped once per optimizer step (``LRScheduler``) or once per validation with the
+        monitored metric (``ReduceLROnPlateau``).
+    config : TrainerConfig
+    checkpoint_manager : CheckpointManager | None, optional
+        When given, resumes from ``last.ckpt`` if present, and checkpoints during
+        :meth:`fit`.
+    tracker : Tracker | None, optional
+        Receives per-step and per-epoch metrics.
+    distributed : DistributedContext | None, optional
+        Defaults to a single-process context; only the main process checkpoints or logs to the
+        tracker.
+    """
+
+    def __init__(
+        self,
+        *,
+        task: Task,
+        decoder: nn.Module,
+        feature_provider: FeatureProvider,
+        optimizer: Optimizer,
+        scheduler: LRScheduler | ReduceLROnPlateau | None,
+        config: TrainerConfig,
+        checkpoint_manager: CheckpointManager | None = None,
+        tracker: Tracker | None = None,
+        distributed: DistributedContext | None = None,
+    ) -> None:
+        self.task = task
+        self.decoder = decoder
+        self.feature_provider = feature_provider
+        self.optimizer = optimizer
+        self.scheduler = scheduler
+        self.config = config
+        self.checkpoint_manager = checkpoint_manager
+        self.tracker = tracker
+        self.distributed = distributed or DistributedContext()
+        self.precision = PrecisionContext(config.precision, device_type=self._device_type())
+        self.state = TrainingState()
+        self._epochs_without_improvement = 0
+        self._resumed = False
+
+        if self.checkpoint_manager is not None and self.checkpoint_manager.has_last():
+            self._resume()
+            self._resumed = True
+
+    def fit(
+        self,
+        train_batches: Iterable[TrainingBatch],
+        val_batches: Iterable[TrainingBatch] | None = None,
+        *,
+        val_metric: Metric | None = None,
+        val_metric_name: str = "mean_iou",
+        higher_is_better: bool = True,
+    ) -> None:
+        """Train for ``config.max_epochs`` (remaining) epochs, optionally validating each epoch.
+
+        Parameters
+        ----------
+        train_batches : Iterable[TrainingBatch]
+            Re-iterated once per epoch.
+        val_batches : Iterable[TrainingBatch] | None, optional
+            Re-iterated once per epoch for validation, if given together with ``val_metric``.
+        val_metric : Metric | None, optional
+            Accumulates validation statistics; reset at the start of each validation pass.
+        val_metric_name : str, optional
+            Key into ``val_metric.compute()`` used for best-checkpoint tracking, the scheduler
+            (if ``ReduceLROnPlateau``), and early stopping.
+        higher_is_better : bool, optional
+            Whether a larger ``val_metric_name`` value is better (true for mIoU/Dice/accuracy;
+            set ``False`` for a loss-like metric).
+        """
+        if not self._resumed:
+            set_deterministic_seed(self.config.seed)
+        for epoch in range(self.state.epoch, self.config.max_epochs):
+            self._train_one_epoch(train_batches)
+
+            if val_batches is not None and val_metric is not None:
+                val_metric.reset()
+                metrics = evaluate(self.task, self.feature_provider, val_batches, val_metric)
+                self._after_validation(metrics, val_metric_name, higher_is_better)
+
+            self.state.epoch = epoch + 1
+            self._checkpoint(periodic=False, is_best=False, metric_value=None)
+
+            if self._should_stop_early():
+                logger.info("early stopping after epoch %d", epoch)
+                break
+
+    def _train_one_epoch(self, batches: Iterable[TrainingBatch]) -> None:
+        self.decoder.train()
+        for batch in batches:
+            with self.precision.autocast():
+                features = self.feature_provider.get_features(batch.samples)
+                outputs = self.task.forward(features)
+                loss = self.task.compute_loss(outputs, batch.targets)
+                scaled_loss = loss / self.config.accumulation_steps
+
+            self.precision.backward(scaled_loss)
+            self.state.micro_step += 1
+
+            if self.state.micro_step % self.config.accumulation_steps == 0:
+                self._optimizer_step(loss.item())
+
+    def _optimizer_step(self, last_loss_value: float) -> None:
+        if self.config.grad_clip_norm is not None:
+            self.precision.unscale_(self.optimizer)
+            torch.nn.utils.clip_grad_norm_(self.decoder.parameters(), self.config.grad_clip_norm)
+
+        self.precision.step(self.optimizer)
+        self.optimizer.zero_grad()
+        scheduler = self.scheduler
+        if scheduler is not None and not isinstance(scheduler, ReduceLROnPlateau):
+            scheduler.step()
+        self.state.global_optimizer_step += 1
+
+        if self.tracker is not None and self.distributed.is_main_process:
+            self.tracker.log_metrics(
+                {"train_loss": last_loss_value, "lr": self.optimizer.param_groups[0]["lr"]},
+                step=self.state.global_optimizer_step,
+            )
+
+        if (
+            self.config.checkpoint_every_n_steps is not None
+            and self.state.global_optimizer_step % self.config.checkpoint_every_n_steps == 0
+        ):
+            self._checkpoint(periodic=True, is_best=False, metric_value=None)
+
+    def _after_validation(self, metrics: dict[str, float], metric_name: str, higher_is_better: bool) -> None:
+        value = metrics[metric_name]
+        is_best = self._is_new_best(value, higher_is_better)
+        if is_best:
+            self.state.best_metric = value
+            self.state.best_metric_name = metric_name
+            self._epochs_without_improvement = 0
+        else:
+            self._epochs_without_improvement += 1
+
+        scheduler = self.scheduler
+        if scheduler is not None and isinstance(scheduler, ReduceLROnPlateau):
+            # ReduceLROnPlateau is always built with mode="min" (schedulers.py) — negate a
+            # higher-is-better metric so "improvement" means the same thing to the scheduler.
+            scheduler.step(-value if higher_is_better else value)
+
+        if self.tracker is not None and self.distributed.is_main_process:
+            self.tracker.log_metrics(
+                {f"val_{name}": val for name, val in metrics.items()}, step=self.state.global_optimizer_step
+            )
+
+        self._checkpoint(periodic=False, is_best=is_best, metric_value=value)
+
+    def _is_new_best(self, value: float, higher_is_better: bool) -> bool:
+        if self.state.best_metric is None:
+            return True
+        return value > self.state.best_metric if higher_is_better else value < self.state.best_metric
+
+    def _should_stop_early(self) -> bool:
+        patience = self.config.early_stopping_patience
+        return patience is not None and self._epochs_without_improvement >= patience
+
+    def _checkpoint(self, *, periodic: bool, is_best: bool, metric_value: float | None) -> None:
+        if self.checkpoint_manager is None or not self.distributed.is_main_process:
+            return
+        checkpoint = Checkpoint(
+            decoder_state=self.decoder.state_dict(),
+            optimizer_state=self.optimizer.state_dict(),
+            scheduler_state=self.scheduler.state_dict() if self.scheduler is not None else {},
+            scaler_state=self.precision.state_dict(),
+            training_state=self.state,
+            rng_state=capture_rng_state(),
+            fingerprints=self.config.fingerprints,
+        )
+        self.checkpoint_manager.save(checkpoint, is_best=is_best, periodic=periodic, metric_value=metric_value)
+
+    def _resume(self) -> None:
+        if self.checkpoint_manager is None:  # pragma: no cover — only called when it is set
+            raise RuntimeError("_resume called without a checkpoint_manager")
+        checkpoint = self.checkpoint_manager.load(
+            self.checkpoint_manager.last_path, expected_fingerprints=self.config.fingerprints, strict=True
+        )
+        self.decoder.load_state_dict(checkpoint.decoder_state)
+        self.optimizer.load_state_dict(checkpoint.optimizer_state)
+        if self.scheduler is not None and checkpoint.scheduler_state:
+            self.scheduler.load_state_dict(checkpoint.scheduler_state)
+        self.precision.load_state_dict(checkpoint.scaler_state)
+        self.state = checkpoint.training_state
+        restore_rng_state(checkpoint.rng_state)
+        logger.info(
+            "resumed from checkpoint at epoch %d, optimizer step %d",
+            self.state.epoch,
+            self.state.global_optimizer_step,
+        )
+
+    def _device_type(self) -> str:
+        try:
+            return next(self.decoder.parameters()).device.type
+        except StopIteration:
+            return "cpu"

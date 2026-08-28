@@ -1,0 +1,189 @@
+# ── Project identity ──────────────────────────────────────────────────────────
+
+[build-system]
+requires = ["setuptools>=61", "wheel", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pai-agritune"
+dynamic = ["version"]
+description = "Precision AI — train and evaluate agricultural segmentation decoders on frozen remote ViT encoder features."
+readme = "README.md"
+license = { file = "LICENSE.md" }
+authors = [{ name = "Precision AI", email = "michael@precision.ai" }]
+maintainers = [{ name = "Precision AI", email = "michael@precision.ai" }]
+requires-python = ">=3.10"
+keywords = [
+    "agriculture",
+    "computer-vision",
+    "machine-learning",
+    "segmentation",
+    "fine-tuning",
+    "vision-transformer",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "torch>=2.2",
+    "numpy>=1.26",
+    "pillow>=10.0",
+    "pydantic>=2.0",
+    "hydra-core>=1.3",
+    "omegaconf>=2.3",
+    "safetensors>=0.4",
+    "pyyaml>=6.0",
+    "tqdm>=4.66",
+    "rich>=13.0",
+    "openai>=1.0",
+    "httpx>=0.28",
+]
+
+[project.optional-dependencies]
+tracking = [
+    "tensorboard>=2.16",
+    "mlflow>=2.10",
+    "wandb>=0.16",
+]
+test = [
+    "pytest>=7.0",
+    "pytest-cov>=5.0",
+    "pytest-asyncio>=0.23",
+    "httpx>=0.28",
+    "httpx2>=2.0",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=5.0",
+    "pytest-asyncio>=0.23",
+    "httpx>=0.28",
+    "httpx2>=2.0",
+    "pre-commit>=3.7",
+    "pyright>=1.1",
+    "genbadge[coverage]>=1.1",
+]
+
+[project.scripts]
+agritune = "precisionai.agritune.cli.main:main"
+
+[project.urls]
+Homepage = "https://github.com/Precision-AI-Inc/agritune"
+Repository = "https://github.com/Precision-AI-Inc/agritune"
+Issues = "https://github.com/Precision-AI-Inc/agritune/issues"
+Changelog = "https://github.com/Precision-AI-Inc/agritune/blob/main/CHANGELOG.md"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["precisionai*"]
+
+[tool.setuptools.package-data]
+"precisionai.agritune" = ["configs/**/*.yaml"]
+
+[tool.setuptools_scm]
+version_scheme = "no-guess-dev"
+local_scheme = "no-local-version"
+fallback_version = "0.0.0"
+
+# ── pytest ────────────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "--cov=precisionai --cov-report=term-missing --cov-fail-under=90"
+asyncio_mode = "auto"
+markers = [
+    "integration: marks tests that require external resources (deselect with '-m \"not integration\"')",
+    "distributed: marks tests that require multi-process/multi-GPU coordination",
+]
+
+[tool.coverage.run]
+source = ["precisionai"]
+omit = ["*/tests/*", "*/__init__.py"]
+relative_files = true
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "raise ImportError",
+    "except ImportError",
+    "^\\s*\\.\\.\\.\\s*$",  # typing.Protocol stub bodies are never executed by design
+]
+
+# ── pyright ───────────────────────────────────────────────────────────────────
+[tool.pyright]
+pythonVersion = "3.10"
+typeCheckingMode = "standard"
+reportMissingImports = false
+reportMissingModuleSource = false
+
+# ── ruff ──────────────────────────────────────────────────────────────────────
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "N",    # pep8-naming
+    "C90",  # mccabe complexity
+    "D",    # pydocstyle
+    "PT",   # flake8-pytest-style
+    "RUF",  # ruff-specific rules
+    "PL",   # pylint
+    "ANN",  # flake8-annotations — enforce PEP 484 type hints
+    "PERF", # perflint — performance anti-patterns
+    "S",    # flake8-bandit — security linting
+]
+ignore = [
+    "E501",    # line too long — enforced by ruff-format at 120 chars
+    "B008",    # function calls in default args (FastAPI uses this pattern)
+    "SIM108",  # ternary operator — sometimes less readable
+    "D100",    # missing docstring in public module
+    "D104",    # missing docstring in public package
+    "D203",    # one-blank-line-before-class (conflicts with D211)
+    "D213",    # multi-line-summary-second-line (conflicts with D212)
+    "PLR0913", # too many arguments — common in training/evaluation functions
+    "PLR2004", # magic value comparisons — acceptable in tests/metrics
+    "ANN401",  # typing.Any is allowed for genuinely dynamic types
+    "S311",    # pseudo-random generators are intentional in scientific code
+    "S104",    # binding to 0.0.0.0 is intentional for a configurable server host
+]
+
+[tool.ruff.lint.per-file-ignores]
+"**/__init__.py"              = ["F401"]
+"tests/**"                    = ["D", "PLR", "ANN", "S"]
+"docs/conf.py"                = ["E402", "UP031", "ANN", "S"]
+"precisionai/agritune/configs/**" = ["D"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.isort]
+known-first-party = ["precisionai"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = true
