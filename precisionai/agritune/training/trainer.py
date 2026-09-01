@@ -82,9 +82,15 @@ class TrainerConfig:
     fingerprints: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        """Validate ``accumulation_steps``."""
+        """Validate optimizer-step, clipping, stopping, and checkpoint intervals."""
         if self.accumulation_steps < 1:
             raise ValueError(f"accumulation_steps must be >= 1; got {self.accumulation_steps}")
+        if self.grad_clip_norm is not None and self.grad_clip_norm <= 0:
+            raise ValueError(f"grad_clip_norm must be positive; got {self.grad_clip_norm}")
+        if self.early_stopping_patience is not None and self.early_stopping_patience < 1:
+            raise ValueError(f"early_stopping_patience must be positive; got {self.early_stopping_patience}")
+        if self.checkpoint_every_n_steps is not None and self.checkpoint_every_n_steps < 1:
+            raise ValueError(f"checkpoint_every_n_steps must be positive; got {self.checkpoint_every_n_steps}")
 
 
 class Trainer:
@@ -147,7 +153,6 @@ class Trainer:
         self.feature_augmentation = feature_augmentation
         self.precision = PrecisionContext(config.precision, device_type=self._device_type())
         self.state = TrainingState()
-        self._epochs_without_improvement = 0
         self._resumed = False
 
         if self.checkpoint_manager is not None and self.checkpoint_manager.has_last():
@@ -183,6 +188,9 @@ class Trainer:
         if not self._resumed:
             set_deterministic_seed(self.config.seed)
         for epoch in range(self.state.epoch, self.config.max_epochs):
+            if self._should_stop_early():
+                logger.info("early stopping before epoch %d", epoch)
+                break
             self._train_one_epoch(train_batches)
 
             if val_batches is not None and val_metric is not None:
@@ -191,6 +199,7 @@ class Trainer:
                 self._after_validation(metrics, val_metric_name, higher_is_better)
 
             self.state.epoch = epoch + 1
+            self.state.batch_in_epoch = 0
             self._checkpoint(periodic=False, is_best=False, metric_value=None)
 
             if self._should_stop_early():
@@ -199,7 +208,12 @@ class Trainer:
 
     def _train_one_epoch(self, batches: Iterable[TrainingBatch]) -> None:
         self.decoder.train()
-        for batch in batches:
+        accumulated_steps = 0
+        last_loss_value = 0.0
+        resume_offset = self.state.batch_in_epoch
+        for batch_index, batch in enumerate(batches):
+            if batch_index < resume_offset:
+                continue
             with self.precision.autocast():
                 features = self.feature_provider.get_features(batch.samples)
                 if self.feature_augmentation is not None:
@@ -210,14 +224,25 @@ class Trainer:
 
             self.precision.backward(scaled_loss)
             self.state.micro_step += 1
+            self.state.batch_in_epoch = batch_index + 1
+            accumulated_steps += 1
+            last_loss_value = loss.item()
 
-            if self.state.micro_step % self.config.accumulation_steps == 0:
-                self._optimizer_step(loss.item())
+            if accumulated_steps == self.config.accumulation_steps:
+                self._optimizer_step(last_loss_value)
+                accumulated_steps = 0
 
-    def _optimizer_step(self, last_loss_value: float) -> None:
+        if accumulated_steps:
+            gradient_scale = self.config.accumulation_steps / accumulated_steps
+            self._optimizer_step(last_loss_value, gradient_scale=gradient_scale)
+
+    def _optimizer_step(self, last_loss_value: float, *, gradient_scale: float = 1.0) -> None:
         if self.config.grad_clip_norm is not None:
             self.precision.unscale_(self.optimizer)
+            self._scale_gradients(gradient_scale)
             torch.nn.utils.clip_grad_norm_(self.decoder.parameters(), self.config.grad_clip_norm)
+        else:
+            self._scale_gradients(gradient_scale)
 
         self.precision.step(self.optimizer)
         self.optimizer.zero_grad()
@@ -226,8 +251,8 @@ class Trainer:
             scheduler.step()
         self.state.global_optimizer_step += 1
 
-        if self.tracker is not None and self.distributed.is_main_process:
-            self.tracker.log_metrics(
+        if self.distributed.is_main_process:
+            self._log_metrics(
                 {"train_loss": last_loss_value, "lr": self.optimizer.param_groups[0]["lr"]},
                 step=self.state.global_optimizer_step,
             )
@@ -238,15 +263,22 @@ class Trainer:
         ):
             self._checkpoint(periodic=True, is_best=False, metric_value=None)
 
+    def _scale_gradients(self, scale: float) -> None:
+        if scale == 1.0:
+            return
+        for parameter in self.decoder.parameters():
+            if parameter.grad is not None:
+                parameter.grad.mul_(scale)
+
     def _after_validation(self, metrics: dict[str, float], metric_name: str, higher_is_better: bool) -> None:
         value = metrics[metric_name]
         is_best = self._is_new_best(value, higher_is_better)
         if is_best:
             self.state.best_metric = value
             self.state.best_metric_name = metric_name
-            self._epochs_without_improvement = 0
+            self.state.epochs_without_improvement = 0
         else:
-            self._epochs_without_improvement += 1
+            self.state.epochs_without_improvement += 1
 
         scheduler = self.scheduler
         if scheduler is not None and isinstance(scheduler, ReduceLROnPlateau):
@@ -254,8 +286,8 @@ class Trainer:
             # higher-is-better metric so "improvement" means the same thing to the scheduler.
             scheduler.step(-value if higher_is_better else value)
 
-        if self.tracker is not None and self.distributed.is_main_process:
-            self.tracker.log_metrics(
+        if self.distributed.is_main_process:
+            self._log_metrics(
                 {f"val_{name}": val for name, val in metrics.items()}, step=self.state.global_optimizer_step
             )
 
@@ -264,6 +296,14 @@ class Trainer:
         ranking_value = -value if higher_is_better else value
         self._checkpoint(periodic=True, is_best=is_best, metric_value=ranking_value)
 
+    def _log_metrics(self, metrics: dict[str, float], *, step: int) -> None:
+        if self.tracker is None:
+            return
+        try:
+            self.tracker.log_metrics(metrics, step=step)
+        except Exception:
+            logger.exception("tracking backend failed while logging metrics; training will continue")
+
     def _is_new_best(self, value: float, higher_is_better: bool) -> bool:
         if self.state.best_metric is None:
             return True
@@ -271,7 +311,7 @@ class Trainer:
 
     def _should_stop_early(self) -> bool:
         patience = self.config.early_stopping_patience
-        return patience is not None and self._epochs_without_improvement >= patience
+        return patience is not None and self.state.epochs_without_improvement >= patience
 
     def _checkpoint(self, *, periodic: bool, is_best: bool, metric_value: float | None) -> None:
         if self.checkpoint_manager is None or not self.distributed.is_main_process:

@@ -60,6 +60,8 @@ def test_training_state_defaults() -> None:
     state = TrainingState()
     assert state.epoch == 0
     assert state.micro_step == 0
+    assert state.batch_in_epoch == 0
     assert state.global_optimizer_step == 0
     assert state.best_metric is None
     assert state.best_metric_name is None
+    assert state.epochs_without_improvement == 0

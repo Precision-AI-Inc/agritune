@@ -12,6 +12,8 @@ versions producing features of the same shape is the one case this cannot detect
 
 from dataclasses import dataclass
 
+import torch
+
 from precisionai.agritune.encoder.errors import EncoderError
 from precisionai.agritune.schemas.features import EncoderFeatures
 
@@ -26,10 +28,16 @@ class EncoderDimensionFingerprint:
         Patch embedding dimension.
     cls_dim : int | None
         CLS embedding dimension, or ``None`` if no CLS token is produced.
+    patch_dtype : torch.dtype
+        Patch-token dtype observed from the encoder response.
+    cls_dtype : torch.dtype | None
+        CLS-token dtype, or ``None`` if no CLS token is produced.
     """
 
     patch_dim: int
     cls_dim: int | None
+    patch_dtype: torch.dtype
+    cls_dtype: torch.dtype | None
 
 
 class EncoderConsistencyError(EncoderError):
@@ -60,7 +68,13 @@ class EncoderResponseValidator:
         """
         patch_dim = features.patch_tokens.shape[-1]
         cls_dim = features.cls_tokens.shape[-1] if features.cls_tokens is not None else None
-        fingerprint = EncoderDimensionFingerprint(patch_dim=patch_dim, cls_dim=cls_dim)
+        cls_dtype = features.cls_tokens.dtype if features.cls_tokens is not None else None
+        fingerprint = EncoderDimensionFingerprint(
+            patch_dim=patch_dim,
+            cls_dim=cls_dim,
+            patch_dtype=features.patch_tokens.dtype,
+            cls_dtype=cls_dtype,
+        )
 
         if self._fingerprint is None:
             self._fingerprint = fingerprint

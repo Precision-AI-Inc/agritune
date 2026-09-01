@@ -38,10 +38,13 @@ def _sample(sample_id: str) -> PreparedSample:
 class _FakeTracker:
     """A minimal Tracker recording every call, for asserting the trainer logs to it."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, fail_on_metrics: bool = False) -> None:
         self.metric_calls: list[tuple[dict[str, float], int]] = []
+        self._fail_on_metrics = fail_on_metrics
 
     def log_metrics(self, metrics: dict[str, float], *, step: int) -> None:
+        if self._fail_on_metrics:
+            raise RuntimeError("tracker unavailable")
         self.metric_calls.append((metrics, step))
 
     def log_params(self, params: dict[str, Any]) -> None:
@@ -80,6 +83,18 @@ class _DeterministicFeatureProvider:
             encoder_model="deterministic-fake",
             encoder_revision=None,
         )
+
+
+class _FailAfterOneBatchProvider:
+    def __init__(self, inner: _DeterministicFeatureProvider) -> None:
+        self._inner = inner
+        self._calls = 0
+
+    def get_features(self, samples: Sequence[PreparedSample]) -> EncoderFeatures:
+        self._calls += 1
+        if self._calls > 1:
+            raise RuntimeError("simulated interruption")
+        return self._inner.get_features(samples)
 
 
 def _build_trainer(
@@ -151,6 +166,41 @@ def test_gradient_accumulation_equivalence() -> None:
         assert torch.allclose(combined_param, accum_param, atol=1e-6)
 
 
+def test_partial_accumulation_window_is_flushed_with_correct_gradient_scale() -> None:
+    targets = torch.randint(0, 2, (3, 2, 2))
+    reference_batches = [
+        TrainingBatch(samples=[_sample("a"), _sample("b")], targets=targets[:2]),
+        TrainingBatch(samples=[_sample("c")], targets=targets[2:]),
+    ]
+    micro_batches = [
+        TrainingBatch(samples=[_sample(sample_id)], targets=targets[index : index + 1])
+        for index, sample_id in enumerate(("a", "b", "c"))
+    ]
+
+    reference_trainer, reference_decoder = _build_trainer(accumulation_steps=1, seed=42)
+    reference_trainer.fit(reference_batches)
+
+    accumulated_trainer, accumulated_decoder = _build_trainer(accumulation_steps=2, seed=42)
+    accumulated_trainer.fit(micro_batches)
+
+    assert accumulated_trainer.state.global_optimizer_step == 2
+    for reference_param, accumulated_param in zip(
+        reference_decoder.parameters(), accumulated_decoder.parameters(), strict=True
+    ):
+        assert torch.allclose(reference_param, accumulated_param, atol=1e-6)
+
+
+def test_partial_accumulation_skips_parameters_without_gradients() -> None:
+    trainer, decoder = _build_trainer(accumulation_steps=2, max_epochs=1, seed=4)
+    decoder.register_parameter("frozen", nn.Parameter(torch.ones(1), requires_grad=False))
+    batch = TrainingBatch(samples=[_sample("a")], targets=torch.randint(0, 2, (1, 2, 2)))
+
+    trainer.fit([batch])
+
+    assert trainer.state.global_optimizer_step == 1
+    assert decoder.frozen.grad is None
+
+
 def test_scheduler_steps_once_per_optimizer_step_not_per_micro_batch() -> None:
     scheduler_config = SchedulerConfig(name="linear_warmup", total_steps=4)
     trainer, _ = _build_trainer(accumulation_steps=2, max_epochs=1, scheduler_config=scheduler_config)
@@ -163,6 +213,35 @@ def test_scheduler_steps_once_per_optimizer_step_not_per_micro_batch() -> None:
     assert trainer.state.global_optimizer_step == 2
     assert trainer.scheduler is not None
     assert trainer.scheduler.last_epoch == 2
+
+
+def test_periodic_checkpoint_is_skipped_when_step_is_not_a_multiple(tmp_path: Path) -> None:
+    manager = CheckpointManager(tmp_path / "non-multiple")
+    trainer, _ = _build_trainer(max_epochs=1, checkpoint_manager=manager, checkpoint_every_n_steps=2)
+    batch = TrainingBatch(samples=[_sample("a")], targets=torch.randint(0, 2, (1, 2, 2)))
+
+    trainer.fit([batch])
+
+    assert trainer.state.global_optimizer_step == 1
+    assert list((tmp_path / "non-multiple").glob("step_*.ckpt")) == []
+
+
+def test_validation_ranks_a_lower_metric_as_better_when_configured(tmp_path: Path) -> None:
+    manager = CheckpointManager(tmp_path / "lower-is-better")
+    trainer, _ = _build_trainer(max_epochs=1, checkpoint_manager=manager)
+    train_batch = TrainingBatch(samples=[_sample("a"), _sample("b")], targets=torch.randint(0, 2, (2, 2, 2)))
+    val_batch = TrainingBatch(samples=[_sample("a"), _sample("b")], targets=torch.zeros(2, 2, 2, dtype=torch.long))
+
+    trainer.fit(
+        [train_batch],
+        [val_batch],
+        val_metric=SegmentationMetric(num_classes=2),
+        val_metric_name="mean_iou",
+        higher_is_better=False,
+    )
+
+    assert trainer.state.best_metric is not None
+    assert (tmp_path / "lower-is-better" / "best.ckpt").is_file()
 
 
 def test_early_stopping_triggers_after_patience_exceeded() -> None:
@@ -181,6 +260,36 @@ def test_early_stopping_triggers_after_patience_exceeded() -> None:
     # Deterministic features + a fixed val target mean the metric can improve at most once,
     # then plateaus — with patience=1, training must stop well before 10 epochs.
     assert trainer.state.epoch < 10
+    assert trainer.state.epochs_without_improvement >= 1
+
+
+def test_early_stopping_resume_does_not_train_extra_epochs(tmp_path: Path) -> None:
+    manager = CheckpointManager(tmp_path / "early-stop")
+    train_batch = TrainingBatch(samples=[_sample("a"), _sample("b")], targets=torch.randint(0, 2, (2, 2, 2)))
+    val_batch = TrainingBatch(samples=[_sample("a"), _sample("b")], targets=torch.zeros(2, 2, 2, dtype=torch.long))
+
+    first, _ = _build_trainer(max_epochs=10, early_stopping_patience=1, checkpoint_manager=manager, seed=3)
+    first.fit(
+        [train_batch],
+        [val_batch],
+        val_metric=SegmentationMetric(num_classes=2),
+        val_metric_name="mean_iou",
+        higher_is_better=True,
+    )
+    stopped_epoch = first.state.epoch
+    assert stopped_epoch < 10
+
+    resumed, _ = _build_trainer(max_epochs=10, early_stopping_patience=1, checkpoint_manager=manager, seed=3)
+    resumed.fit(
+        [train_batch],
+        [val_batch],
+        val_metric=SegmentationMetric(num_classes=2),
+        val_metric_name="mean_iou",
+        higher_is_better=True,
+    )
+
+    assert resumed.state.epoch == stopped_epoch
+    assert resumed.state.epochs_without_improvement == first.state.epochs_without_improvement
 
 
 def test_exact_checkpoint_resume(tmp_path: Path) -> None:
@@ -208,6 +317,43 @@ def test_exact_checkpoint_resume(tmp_path: Path) -> None:
         assert torch.allclose(continuous_param, resumed_param, atol=1e-6)
 
 
+def test_mid_epoch_checkpoint_resume_skips_already_consumed_batches(tmp_path: Path) -> None:
+    targets = torch.randint(0, 2, (3, 2, 2))
+    batches = [
+        TrainingBatch(samples=[_sample(sample_id)], targets=targets[index : index + 1])
+        for index, sample_id in enumerate(("a", "b", "c"))
+    ]
+
+    continuous_trainer, continuous_decoder = _build_trainer(max_epochs=1, seed=9)
+    continuous_trainer.fit(batches)
+
+    manager = CheckpointManager(tmp_path / "interrupted-mid-epoch")
+    interrupted_trainer, _ = _build_trainer(
+        max_epochs=1,
+        seed=9,
+        checkpoint_manager=manager,
+        checkpoint_every_n_steps=1,
+    )
+    assert isinstance(interrupted_trainer.feature_provider, _DeterministicFeatureProvider)
+    interrupted_trainer.feature_provider = _FailAfterOneBatchProvider(interrupted_trainer.feature_provider)
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        interrupted_trainer.fit(batches)
+
+    checkpoint = manager.load(manager.last_path)
+    assert checkpoint.training_state.epoch == 0
+    assert checkpoint.training_state.batch_in_epoch == 1
+
+    resumed_trainer, resumed_decoder = _build_trainer(max_epochs=1, seed=9, checkpoint_manager=manager)
+    resumed_trainer.fit(batches)
+
+    assert resumed_trainer.state.epoch == 1
+    assert resumed_trainer.state.batch_in_epoch == 0
+    for continuous_param, resumed_param in zip(
+        continuous_decoder.parameters(), resumed_decoder.parameters(), strict=True
+    ):
+        assert torch.allclose(continuous_param, resumed_param, atol=1e-6)
+
+
 def test_resume_restores_scheduler_state(tmp_path: Path) -> None:
     scheduler_config = SchedulerConfig(name="linear_warmup", total_steps=10)
     batch = TrainingBatch(samples=[_sample("a"), _sample("b")], targets=torch.randint(0, 2, (2, 2, 2)))
@@ -225,6 +371,19 @@ def test_resume_restores_scheduler_state(tmp_path: Path) -> None:
 def test_invalid_accumulation_steps_raises() -> None:
     with pytest.raises(ValueError, match="accumulation_steps must be >= 1"):
         TrainerConfig(max_epochs=1, accumulation_steps=0)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"grad_clip_norm": 0.0}, "grad_clip_norm must be positive"),
+        ({"early_stopping_patience": 0}, "early_stopping_patience must be positive"),
+        ({"checkpoint_every_n_steps": 0}, "checkpoint_every_n_steps must be positive"),
+    ],
+)
+def test_trainer_config_rejects_invalid_intervals(kwargs: dict[str, Any], message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        TrainerConfig(max_epochs=1, **kwargs)
 
 
 def test_grad_clip_norm_bounds_gradient_magnitude() -> None:
@@ -284,6 +443,17 @@ def test_tracker_receives_train_and_val_metrics() -> None:
     val_metric_names = {key for metrics, _ in tracker.metric_calls for key in metrics if key.startswith("val_")}
     assert "train_loss" in train_metric_names
     assert any(val_metric_names)
+
+
+def test_tracking_failure_does_not_interrupt_training() -> None:
+    tracker = _FakeTracker(fail_on_metrics=True)
+    trainer, _ = _build_trainer(max_epochs=2, tracker=tracker)
+    batch = TrainingBatch(samples=[_sample("a"), _sample("b")], targets=torch.randint(0, 2, (2, 2, 2)))
+
+    trainer.fit([batch])
+
+    assert trainer.state.epoch == 2
+    assert trainer.state.global_optimizer_step == 2
 
 
 def test_checkpoint_every_n_steps_writes_periodic_checkpoint(tmp_path: Path) -> None:

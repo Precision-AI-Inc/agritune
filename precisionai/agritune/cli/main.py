@@ -10,11 +10,13 @@ same services, so logic is never duplicated between entry points.
 """
 
 import argparse
+import os
 import sys
 from collections.abc import Callable, Sequence
 
 from precisionai.agritune.cli import handlers
 from precisionai.agritune.logging import configure_logging, get_logger
+from precisionai.agritune.utils.env import ENCODER_API_KEY_VARIABLE, load_env_file
 
 logger = get_logger(__name__)
 
@@ -38,7 +40,11 @@ def _build_dataset_parser(subparsers: argparse._SubParsersAction) -> None:
 
 def _add_encoder_selection_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--base-url", default=None, help="Hosted encoder API base URL; omit to use the fake encoder.")
-    parser.add_argument("--api-key", default=None, help="Encoder API key (or set via your shell environment).")
+    parser.add_argument(
+        "--api-key",
+        default=None,
+        help=f"Encoder API key; defaults to ${ENCODER_API_KEY_VARIABLE} from the environment or a .env file.",
+    )
     parser.add_argument("--model", default="pai-embedding", help="Encoder model alias (default: pai-embedding).")
     parser.add_argument(
         "--preprocessing", default="", help="A stable label for preprocessing params, for cache invalidation."
@@ -168,6 +174,12 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _apply_environment_defaults(args: argparse.Namespace) -> None:
+    """Fill encoder credentials absent from the command line from the environment."""
+    if getattr(args, "api_key", None) is None:
+        args.api_key = os.environ.get(ENCODER_API_KEY_VARIABLE)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the ``agritune`` CLI.
 
@@ -184,11 +196,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     configure_logging(args.log_level)
+    load_env_file()
 
     if args.command is None:
         parser.print_help()
         return 0
 
+    _apply_environment_defaults(args)
     handler: _CommandHandler = args.handler
     return handler(args)
 

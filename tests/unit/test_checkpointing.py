@@ -6,6 +6,7 @@
 from pathlib import Path
 
 import pytest
+import torch
 
 from precisionai.agritune.training.checkpointing import Checkpoint, CheckpointManager, CheckpointMismatchError
 from precisionai.agritune.training.state import TrainingState
@@ -64,11 +65,51 @@ def test_top_k_pruning_keeps_only_best_scores(tmp_path: Path) -> None:
     assert remaining == ["step_00000002.ckpt", "step_00000004.ckpt"]
 
 
+def test_prune_ignores_ranked_paths_that_are_already_gone(tmp_path: Path) -> None:
+    manager = CheckpointManager(tmp_path, top_k=1)
+    manager._ranked.append((9.0, tmp_path / "already-gone.ckpt"))
+    manager.save(_checkpoint(step=1), periodic=True, metric_value=0.1)
+
+    assert (tmp_path / "step_00000001.ckpt").is_file()
+    assert not (tmp_path / "already-gone.ckpt").exists()
+
+
+def test_prune_removes_multiple_excess_checkpoints_in_one_call(tmp_path: Path) -> None:
+    manager = CheckpointManager(tmp_path, top_k=1)
+    extras = []
+    for step in (1, 2):
+        path = tmp_path / f"stale_{step}.ckpt"
+        path.write_bytes(b"stale")
+        extras.append((float(step), path))
+    manager._ranked.extend(extras)
+    manager.save(_checkpoint(step=3), periodic=True, metric_value=0.05)
+
+    remaining = list(tmp_path.glob("step_*.ckpt"))
+    assert remaining == [tmp_path / "step_00000003.ckpt"]
+    assert not (tmp_path / "stale_1.ckpt").exists()
+    assert not (tmp_path / "stale_2.ckpt").exists()
+
+
 def test_top_k_zero_disables_pruning(tmp_path: Path) -> None:
     manager = CheckpointManager(tmp_path, top_k=0)
     for step in range(5):
         manager.save(_checkpoint(step=step), periodic=True, metric_value=float(step))
     assert len(list(tmp_path.glob("step_*.ckpt"))) == 5
+
+
+def test_load_ignores_unknown_training_state_fields_and_defaults_missing_ones(tmp_path: Path) -> None:
+    manager = CheckpointManager(tmp_path)
+    manager.save(_checkpoint())
+    payload = torch.load(manager.last_path, map_location="cpu", weights_only=False)
+    payload["training_state"].pop("batch_in_epoch", None)
+    payload["training_state"].pop("epochs_without_improvement", None)
+    payload["training_state"]["legacy_unknown"] = 1
+    torch.save(payload, manager.last_path)
+
+    loaded = manager.load(manager.last_path)
+
+    assert loaded.training_state.batch_in_epoch == 0
+    assert loaded.training_state.epochs_without_improvement == 0
 
 
 def test_load_without_expected_fingerprints_skips_check(tmp_path: Path) -> None:

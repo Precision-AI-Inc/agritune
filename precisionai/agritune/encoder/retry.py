@@ -50,6 +50,17 @@ class RetryPolicyConfig:
     max_backoff_seconds: float = 30.0
     jitter_ratio: float = 0.1
 
+    def __post_init__(self) -> None:
+        """Validate retry bounds."""
+        if self.max_attempts < 1:
+            raise ValueError(f"max_attempts must be positive; got {self.max_attempts}")
+        if self.initial_backoff_seconds < 0:
+            raise ValueError(f"initial_backoff_seconds must be non-negative; got {self.initial_backoff_seconds}")
+        if self.max_backoff_seconds < 0:
+            raise ValueError(f"max_backoff_seconds must be non-negative; got {self.max_backoff_seconds}")
+        if self.jitter_ratio < 0:
+            raise ValueError(f"jitter_ratio must be non-negative; got {self.jitter_ratio}")
+
 
 class RetryExhaustedError(EncoderError):
     """All retry attempts failed; wraps the final underlying :class:`EncoderError`."""

@@ -3,6 +3,8 @@
 
 """Unit tests for precisionai.agritune.schemas.features.EncoderFeatures."""
 
+from dataclasses import replace
+
 import pytest
 import torch
 
@@ -76,6 +78,19 @@ def test_variable_patch_count_via_valid_patch_mask() -> None:
     assert features.patch_grid_hw(1) == (2, 2)
 
 
+def test_patch_tokens_reject_nonpositive_dimensions() -> None:
+    with pytest.raises(ValueError, match="patch_tokens dimensions B, N, and D must be positive"):
+        EncoderFeatures(
+            patch_tokens=torch.ones(1, 0, 3),
+            cls_tokens=None,
+            patch_grid=torch.tensor([[1, 1]]),
+            valid_patch_mask=None,
+            image_sizes=[(8, 8)],
+            encoder_model="pai-embedding",
+            encoder_revision=None,
+        )
+
+
 def test_patch_tokens_wrong_ndim_raises() -> None:
     with pytest.raises(ValueError, match="patch_tokens must have shape"):
         EncoderFeatures(
@@ -89,6 +104,60 @@ def test_patch_tokens_wrong_ndim_raises() -> None:
         )
 
 
+def test_patch_tokens_reject_integer_dtype() -> None:
+    with pytest.raises(ValueError, match="patch_tokens must use a floating-point dtype"):
+        EncoderFeatures(
+            patch_tokens=torch.ones(1, 2, 3, dtype=torch.int64),
+            cls_tokens=None,
+            patch_grid=torch.tensor([[1, 2]]),
+            valid_patch_mask=None,
+            image_sizes=[(8, 8)],
+            encoder_model="pai-embedding",
+            encoder_revision=None,
+        )
+
+
+def test_patch_tokens_reject_nonfinite_values() -> None:
+    tokens = torch.ones(1, 2, 3)
+    tokens[0, 0, 0] = torch.nan
+    with pytest.raises(ValueError, match="patch_tokens must contain only finite values"):
+        EncoderFeatures(
+            patch_tokens=tokens,
+            cls_tokens=None,
+            patch_grid=torch.tensor([[1, 2]]),
+            valid_patch_mask=None,
+            image_sizes=[(8, 8)],
+            encoder_model="pai-embedding",
+            encoder_revision=None,
+        )
+
+
+def test_cls_tokens_reject_integer_dtype() -> None:
+    with pytest.raises(ValueError, match="cls_tokens must use a floating-point dtype"):
+        EncoderFeatures(
+            patch_tokens=torch.ones(1, 2, 3),
+            cls_tokens=torch.ones(1, 4, dtype=torch.int64),
+            patch_grid=torch.tensor([[1, 2]]),
+            valid_patch_mask=None,
+            image_sizes=[(8, 8)],
+            encoder_model="pai-embedding",
+            encoder_revision=None,
+        )
+
+
+def test_cls_tokens_reject_zero_class_dimension() -> None:
+    with pytest.raises(ValueError, match="cls_tokens must have shape"):
+        EncoderFeatures(
+            patch_tokens=torch.ones(1, 2, 3),
+            cls_tokens=torch.ones(1, 0),
+            patch_grid=torch.tensor([[1, 2]]),
+            valid_patch_mask=None,
+            image_sizes=[(8, 8)],
+            encoder_model="pai-embedding",
+            encoder_revision=None,
+        )
+
+
 def test_cls_tokens_batch_mismatch_raises() -> None:
     with pytest.raises(ValueError, match="cls_tokens must have shape"):
         EncoderFeatures(
@@ -97,6 +166,19 @@ def test_cls_tokens_batch_mismatch_raises() -> None:
             patch_grid=torch.tensor([[2, 3], [2, 3]]),
             valid_patch_mask=None,
             image_sizes=[(224, 224), (224, 224)],
+            encoder_model="pai-embedding",
+            encoder_revision=None,
+        )
+
+
+def test_cls_tokens_reject_nonfinite_values() -> None:
+    with pytest.raises(ValueError, match="cls_tokens must contain only finite values"):
+        EncoderFeatures(
+            patch_tokens=torch.ones(1, 2, 3),
+            cls_tokens=torch.tensor([[float("inf")]]),
+            patch_grid=torch.tensor([[1, 2]]),
+            valid_patch_mask=None,
+            image_sizes=[(8, 8)],
             encoder_model="pai-embedding",
             encoder_revision=None,
         )
@@ -128,6 +210,45 @@ def test_valid_patch_mask_wrong_shape_raises() -> None:
         )
 
 
+def test_valid_patch_mask_requires_boolean_dtype() -> None:
+    with pytest.raises(ValueError, match=r"valid_patch_mask must use dtype torch\.bool"):
+        EncoderFeatures(
+            patch_tokens=torch.randn(1, 2, 8),
+            cls_tokens=None,
+            patch_grid=torch.tensor([[1, 2]]),
+            valid_patch_mask=torch.ones(1, 2, dtype=torch.int64),
+            image_sizes=[(224, 224)],
+            encoder_model="pai-embedding",
+            encoder_revision=None,
+        )
+
+
+def test_patch_grid_requires_integer_dtype() -> None:
+    with pytest.raises(ValueError, match="patch_grid must use an integer dtype"):
+        EncoderFeatures(
+            patch_tokens=torch.randn(1, 2, 8),
+            cls_tokens=None,
+            patch_grid=torch.tensor([[1.0, 2.0]]),
+            valid_patch_mask=None,
+            image_sizes=[(224, 224)],
+            encoder_model="pai-embedding",
+            encoder_revision=None,
+        )
+
+
+def test_patch_grid_requires_positive_dimensions() -> None:
+    with pytest.raises(ValueError, match="patch_grid dimensions must be positive"):
+        EncoderFeatures(
+            patch_tokens=torch.randn(1, 2, 8),
+            cls_tokens=None,
+            patch_grid=torch.tensor([[0, 2]]),
+            valid_patch_mask=None,
+            image_sizes=[(224, 224)],
+            encoder_model="pai-embedding",
+            encoder_revision=None,
+        )
+
+
 def test_image_sizes_wrong_length_raises() -> None:
     with pytest.raises(ValueError, match="image_sizes must have length"):
         EncoderFeatures(
@@ -136,6 +257,19 @@ def test_image_sizes_wrong_length_raises() -> None:
             patch_grid=torch.tensor([[2, 3], [2, 3]]),
             valid_patch_mask=None,
             image_sizes=[(224, 224)],
+            encoder_model="pai-embedding",
+            encoder_revision=None,
+        )
+
+
+def test_image_sizes_reject_nonpositive_dimensions() -> None:
+    with pytest.raises(ValueError, match="must contain two positive integers"):
+        EncoderFeatures(
+            patch_tokens=torch.randn(1, 2, 3),
+            cls_tokens=None,
+            patch_grid=torch.tensor([[1, 2]]),
+            valid_patch_mask=None,
+            image_sizes=[(0, 8)],
             encoder_model="pai-embedding",
             encoder_revision=None,
         )
@@ -188,6 +322,17 @@ def test_concatenate_preserves_an_entrys_own_valid_patch_mask() -> None:
     assert combined.valid_patch_mask[0].tolist() == [True, True, True, False, False, False]
 
 
+def test_concatenate_preserves_masks_when_tensor_lengths_are_equal() -> None:
+    mask = torch.tensor([[True, False, True, False]])
+    first = _make_features(batch_size=1, num_patches=4, patch_grid=[(1, 2)], valid_patch_mask=mask)
+    second = _make_features(batch_size=1, num_patches=4, patch_grid=[(1, 2)], valid_patch_mask=mask)
+
+    combined = concatenate_encoder_features([first, second])
+
+    assert combined.valid_patch_mask is not None
+    assert torch.equal(combined.valid_patch_mask, torch.cat([mask, mask]))
+
+
 def test_concatenate_single_entry_is_a_no_op() -> None:
     only = _make_features(batch_size=2)
     combined = concatenate_encoder_features([only])
@@ -215,10 +360,34 @@ def test_concatenate_rejects_mismatched_patch_dim() -> None:
         concatenate_encoder_features([first, second])
 
 
+def test_concatenate_rejects_mismatched_patch_dtype() -> None:
+    first = _make_features(batch_size=1)
+    second = _make_features(batch_size=1)
+    second = replace(second, patch_tokens=second.patch_tokens.double())
+    with pytest.raises(ValueError, match="patch-token dtype"):
+        concatenate_encoder_features([first, second])
+
+
 def test_concatenate_rejects_mismatched_cls_presence() -> None:
     first = _make_features(batch_size=1, cls_dim=5)
     second = _make_features(batch_size=1, cls_dim=None)
     with pytest.raises(ValueError, match="cls_tokens is present"):
+        concatenate_encoder_features([first, second])
+
+
+def test_concatenate_rejects_mismatched_cls_dimension() -> None:
+    first = _make_features(batch_size=1, cls_dim=5)
+    second = _make_features(batch_size=1, cls_dim=6)
+    with pytest.raises(ValueError, match="CLS dimension"):
+        concatenate_encoder_features([first, second])
+
+
+def test_concatenate_rejects_mismatched_cls_dtype() -> None:
+    first = _make_features(batch_size=1, cls_dim=5)
+    second = _make_features(batch_size=1, cls_dim=5)
+    assert second.cls_tokens is not None
+    second = replace(second, cls_tokens=second.cls_tokens.double())
+    with pytest.raises(ValueError, match="CLS-token dtype"):
         concatenate_encoder_features([first, second])
 
 
@@ -235,6 +404,12 @@ def test_concatenate_rejects_mismatched_encoder_identity() -> None:
     )
     with pytest.raises(ValueError, match="encoder_model/encoder_revision"):
         concatenate_encoder_features([first, second])
+
+
+def test_select_one_rejects_out_of_range_index() -> None:
+    batch = _make_features(batch_size=2)
+    with pytest.raises(ValueError, match=r"index must be in \[0, 2\)"):
+        select_one(batch, 2)
 
 
 def test_select_one_returns_a_length_one_batch() -> None:
@@ -263,6 +438,24 @@ def test_select_one_preserves_cls_tokens_when_present() -> None:
     selected = select_one(batch, 1)
     assert selected.cls_tokens is not None
     assert torch.equal(selected.cls_tokens[0], batch.cls_tokens[1])
+
+
+def test_select_one_uses_the_valid_mask_instead_of_assuming_prefix_padding() -> None:
+    tokens = torch.arange(32, dtype=torch.float32).reshape(1, 4, 8)
+    mask = torch.tensor([[False, True, False, True]])
+    batch = EncoderFeatures(
+        patch_tokens=tokens,
+        cls_tokens=None,
+        patch_grid=torch.tensor([[1, 2]]),
+        valid_patch_mask=mask,
+        image_sizes=[(224, 224)],
+        encoder_model="fake",
+        encoder_revision=None,
+    )
+
+    selected = select_one(batch, 0)
+
+    assert torch.equal(selected.patch_tokens[0], tokens[0, [1, 3]])
 
 
 def test_select_one_handles_no_cls_tokens() -> None:

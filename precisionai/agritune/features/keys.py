@@ -9,11 +9,12 @@ schema version itself. See ``docs/feature-caching.md``.
 """
 
 import hashlib
+import json
 from dataclasses import dataclass
 
 from precisionai.agritune.schemas.augmentation import AugmentationRecord
 
-FEATURE_SCHEMA_VERSION = 1
+FEATURE_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -68,11 +69,12 @@ def hash_augmentation(record: AugmentationRecord | None) -> str:
     """
     if record is None:
         return "none"
-    parts = [str(record.seed)]
-    for transform in record.transforms:
-        parts.append(transform.name)
-        parts.append(repr(sorted(transform.params.items())))
-    return hashlib.sha256("|".join(parts).encode()).hexdigest()
+    payload = {
+        "seed": record.seed,
+        "transforms": [{"name": transform.name, "params": transform.params} for transform in record.transforms],
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode()).hexdigest()
 
 
 def compute_feature_key(
@@ -105,13 +107,14 @@ def compute_feature_key(
         A SHA-256 hex digest stable across processes and runs, changing whenever any input here
         changes.
     """
-    parts = [
-        sample_id,
-        image_hash,
-        augmentation_fingerprint,
-        encoder_fingerprint.model,
-        encoder_fingerprint.revision or "",
-        encoder_fingerprint.preprocessing,
-        str(feature_schema_version),
-    ]
-    return hashlib.sha256("|".join(parts).encode()).hexdigest()
+    payload = {
+        "sample_id": sample_id,
+        "image_hash": image_hash,
+        "augmentation_fingerprint": augmentation_fingerprint,
+        "encoder_model": encoder_fingerprint.model,
+        "encoder_revision": encoder_fingerprint.revision or "",
+        "encoder_preprocessing": encoder_fingerprint.preprocessing,
+        "feature_schema_version": feature_schema_version,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode()).hexdigest()

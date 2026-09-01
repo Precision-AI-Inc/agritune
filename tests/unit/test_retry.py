@@ -4,6 +4,7 @@
 """Unit tests for precisionai.agritune.encoder.retry."""
 
 import random
+from collections.abc import Callable
 
 import pytest
 
@@ -107,6 +108,20 @@ async def test_on_attempt_failure_reports_will_retry_correctly() -> None:
     with pytest.raises(RetryExhaustedError):
         await policy.run(operation, on_attempt_failure=on_failure)
     assert calls == [(1, True), (2, False)]
+
+
+@pytest.mark.parametrize(
+    ("build", "message"),
+    [
+        (lambda: RetryPolicyConfig(max_attempts=0), "max_attempts must be positive"),
+        (lambda: RetryPolicyConfig(initial_backoff_seconds=-1.0), "initial_backoff_seconds must be non-negative"),
+        (lambda: RetryPolicyConfig(max_backoff_seconds=-1.0), "max_backoff_seconds must be non-negative"),
+        (lambda: RetryPolicyConfig(jitter_ratio=-0.1), "jitter_ratio must be non-negative"),
+    ],
+)
+def test_retry_policy_config_rejects_invalid_bounds(build: Callable[[], RetryPolicyConfig], message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        build()
 
 
 def test_backoff_uses_retry_after_when_present() -> None:

@@ -160,6 +160,13 @@ def test_feature_channel_dropout_zeros_whole_channels_across_the_batch() -> None
     assert surviving_channels > 0
 
 
+def test_feature_channel_dropout_without_cls_tokens_only_masks_patches() -> None:
+    features = _make_features(cls_dim=None, patch_dim=16)
+    result = feature_channel_dropout(features, probability=0.5, generator=_generator(0))
+    assert result.cls_tokens is None
+    assert result.patch_tokens.shape == features.patch_tokens.shape
+
+
 def test_feature_channel_dropout_uses_independent_masks_for_patch_and_cls_dims() -> None:
     features = _make_features(patch_dim=4, cls_dim=6)
     result = feature_channel_dropout(features, probability=0.5, generator=_generator(0))

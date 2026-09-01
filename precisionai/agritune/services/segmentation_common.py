@@ -100,7 +100,15 @@ def build_static_augmented_batches(
             prepare_sample(sample, mode=mode, pipeline=pipeline, global_seed=global_seed, variant=variant)
             for sample in chunk
         ]
-        samples = [PreparedSample(sample_id=p.sample_id, image=p.image, target=None) for p in prepared]
+        samples = [
+            PreparedSample(
+                sample_id=p.sample_id,
+                image=p.image,
+                target=None,
+                augmentation_metadata=p.augmentation_metadata,
+            )
+            for p in prepared
+        ]
         targets = torch.stack([mask_to_target_tensor(p.target) for p in prepared])
         batches.append(TrainingBatch(samples=samples, targets=targets))
     return batches
@@ -146,6 +154,12 @@ class OnlineAugmentedBatches:
         self._hybrid_online_probability = hybrid_online_probability
         self._epoch = 0
 
+    def set_epoch(self, epoch: int) -> None:
+        """Set the next epoch index, for exact checkpoint resume."""
+        if epoch < 0:
+            raise ValueError(f"epoch must be non-negative; got {epoch}")
+        self._epoch = epoch
+
     def __iter__(self) -> Iterator[TrainingBatch]:
         """Yield one freshly re-augmented pass over the dataset, advancing the epoch counter."""
         epoch = self._epoch
@@ -164,7 +178,15 @@ class OnlineAugmentedBatches:
                 )
                 for sample in chunk
             ]
-            samples = [PreparedSample(sample_id=p.sample_id, image=p.image, target=None) for p in prepared]
+            samples = [
+                PreparedSample(
+                    sample_id=p.sample_id,
+                    image=p.image,
+                    target=None,
+                    augmentation_metadata=p.augmentation_metadata,
+                )
+                for p in prepared
+            ]
             targets = torch.stack([mask_to_target_tensor(p.target) for p in prepared])
             yield TrainingBatch(samples=samples, targets=targets)
 

@@ -1,0 +1,31 @@
+# Flat (non-Hydra) training config for the CWFID sanity check.
+# Prepare the dataset first: python examples/datasets/prepare_cwfid.py
+#
+# agritune train --config examples/segmentation/cwfid.yaml
+#
+# The API key is read from AGRITUNE_ENCODER_API_KEY (.env or the environment), never stored here.
+
+manifest_path: examples/datasets/cwfid/manifest.csv
+feature_store_dir: examples/datasets/cwfid/features
+run_root: examples/datasets/cwfid/runs
+run_id: cwfid-sanity
+num_classes: 3
+encoder_fingerprint:
+  model: pai-embedding
+  revision: null
+  preprocessing: ""
+feature_provider: cached
+encoder_base_url: https://embeddings.precision.ai/v1
+encoder_api_key: ${oc.env:AGRITUNE_ENCODER_API_KEY,null}
+decoder_name: mlp_probe
+batch_size: 4
+val_fraction: 0.25
+seed: 0
+optimizer:
+  name: adamw
+  lr: 0.001
+trainer:
+  max_epochs: 3
+  precision: fp32
+tracking:
+  backends: [jsonl]

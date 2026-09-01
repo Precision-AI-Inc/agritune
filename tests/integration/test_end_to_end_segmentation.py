@@ -16,6 +16,7 @@ from precisionai.agritune.encoder.fake import FakeEncoderBackend, FakeEncoderCon
 from precisionai.agritune.features.keys import EncoderFingerprint
 from precisionai.agritune.features.store import DirectoryFeatureStore
 from precisionai.agritune.optimization.optimizers import OptimizerConfig
+from precisionai.agritune.services.evaluation_service import EvaluationRunConfig, run_evaluation
 from precisionai.agritune.services.feature_service import build_features
 from precisionai.agritune.services.training_service import TrainingRunConfig, run_training
 from precisionai.agritune.training.trainer import TrainerConfig
@@ -91,3 +92,16 @@ async def test_full_pipeline_train_checkpoint_resume_evaluate(tmp_path: Path) ->
         second_result.final_train_state["global_optimizer_step"]
         > first_result.final_train_state["global_optimizer_step"]
     )
+
+    evaluation_metrics = run_evaluation(
+        EvaluationRunConfig(
+            manifest_path=str(manifest_path),
+            checkpoint_path=str(run_dir.checkpoints_dir / "last.ckpt"),
+            num_classes=2,
+            encoder_fingerprint=_FINGERPRINT,
+            batch_size=2,
+        ),
+        store=store,
+    )
+    assert "mean_iou" in evaluation_metrics
+    assert "pixel_accuracy" in evaluation_metrics

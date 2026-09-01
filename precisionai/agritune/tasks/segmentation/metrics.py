@@ -11,6 +11,11 @@ statistic from it at :meth:`~SegmentationMetric.compute` time — satisfies
 import torch
 
 
+def _out_of_range_labels(values: torch.Tensor, *, num_classes: int) -> list[int]:
+    invalid = (values < 0) | (values >= num_classes)
+    return sorted(int(label) for label in torch.unique(values[invalid]).tolist()) if torch.any(invalid) else []
+
+
 class SegmentationMetric:
     """Accumulates a confusion matrix and computes mIoU, per-class IoU/precision/recall, Dice/F1, pixel accuracy.
 
@@ -42,7 +47,16 @@ class SegmentationMetric:
         targets : torch.Tensor
             Ground-truth class indices, shape ``(B, H, W)``.
         """
+        if outputs.ndim not in (3, 4):
+            raise ValueError(f"outputs must have shape (B, H, W) or (B, C, H, W); got {tuple(outputs.shape)}")
+        if outputs.ndim == 4 and outputs.shape[1] != self.num_classes:
+            raise ValueError(f"logits class dimension must be {self.num_classes}; got {outputs.shape[1]}")
         predictions = outputs.argmax(dim=1) if outputs.ndim == 4 else outputs
+        if predictions.shape != targets.shape:
+            raise ValueError(
+                f"predictions and targets must share shape (B, H, W); got {tuple(predictions.shape)} and "
+                f"{tuple(targets.shape)}"
+            )
         valid = (
             targets != self.ignore_index
             if self.ignore_index is not None
@@ -51,6 +65,12 @@ class SegmentationMetric:
 
         predictions = predictions[valid].reshape(-1)
         targets = targets[valid].reshape(-1)
+        invalid_targets = _out_of_range_labels(targets, num_classes=self.num_classes)
+        if invalid_targets:
+            raise ValueError(f"targets contain labels outside [0, {self.num_classes}): {invalid_targets}")
+        invalid_predictions = _out_of_range_labels(predictions, num_classes=self.num_classes)
+        if invalid_predictions:
+            raise ValueError(f"predictions contain labels outside [0, {self.num_classes}): {invalid_predictions}")
         indices = targets * self.num_classes + predictions
         counts = torch.bincount(indices, minlength=self.num_classes**2)
         self._confusion += counts.reshape(self.num_classes, self.num_classes).to(self._confusion.dtype)

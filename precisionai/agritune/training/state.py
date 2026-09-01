@@ -28,19 +28,28 @@ class TrainingState:
         one.
     micro_step : int
         Total forward/backward passes so far, including those absorbed by gradient accumulation.
+    batch_in_epoch : int
+        Number of training batches already consumed in the current epoch. Zero at every completed
+        epoch boundary; used to skip exactly those batches when resuming a periodic mid-epoch
+        checkpoint.
     global_optimizer_step : int
         Total ``optimizer.step()`` calls so far — what schedulers should be driven by.
     best_metric : float | None
         Best validation metric seen so far, or ``None`` before the first evaluation.
     best_metric_name : str | None
         Which metric ``best_metric`` refers to.
+    epochs_without_improvement : int
+        Consecutive completed validation passes that did not improve ``best_metric``. Checkpointed
+        so early stopping does not reset — and therefore cannot run extra epochs — after resume.
     """
 
     epoch: int = 0
     micro_step: int = 0
+    batch_in_epoch: int = 0
     global_optimizer_step: int = 0
     best_metric: float | None = None
     best_metric_name: str | None = None
+    epochs_without_improvement: int = 0
 
 
 def set_deterministic_seed(seed: int) -> None:

@@ -3,6 +3,7 @@
 
 """Unit tests for precisionai.agritune.features.prefetch.PrefetchingFeatureProvider."""
 
+import threading
 import time
 from collections.abc import Sequence
 
@@ -124,6 +125,21 @@ def test_close_joins_the_background_thread_without_hanging() -> None:
 def test_close_before_starting_is_a_no_op() -> None:
     provider = PrefetchingFeatureProvider(_SpyProvider(), [_batch("s0")])
     provider.close()  # never started (get_features was never called) — must not hang or raise
+
+
+def test_put_retries_after_a_full_queue() -> None:
+    provider = PrefetchingFeatureProvider(_SpyProvider(), [_batch("s0")], queue_size=1)
+    provider._queue.put_nowait(_Success(["full"], _tag("full")))
+
+    def _make_room() -> None:
+        time.sleep(0.15)
+        provider._queue.get_nowait()
+
+    worker = threading.Thread(target=_make_room)
+    worker.start()
+    assert provider._put(_Success(["s1"], _tag("s1"))) is True
+    worker.join()
+    provider.close()
 
 
 def test_try_put_returns_false_when_the_queue_is_full() -> None:

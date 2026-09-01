@@ -15,6 +15,7 @@ import pytest
 import precisionai.agritune as agritune_pkg
 from precisionai.agritune.augmentations.image.pipeline import AugmentationMode
 from precisionai.agritune.cli.config import load_training_run_config
+from precisionai.agritune.utils.env import ENCODER_API_KEY_VARIABLE
 
 _CONFIG_PATH = Path(agritune_pkg.__file__).parent / "configs" / "config.yaml"
 
@@ -44,6 +45,8 @@ def test_default_group_selections_resolve(tmp_path: Path) -> None:
     assert config.optimizer.name == "adamw"
     assert config.scheduler is None
     assert config.tracking.backends == ["jsonl"]
+    assert config.original_config["defaults"]
+    assert config.config_overrides == _overrides(tmp_path)
     assert config.encoder_fingerprint.model == "fake-encoder"
     assert config.encoder_fingerprint.revision == "fake-v1"
     assert config.num_classes == 2
@@ -68,6 +71,12 @@ def test_group_variant_overrides_swap_the_selection(tmp_path: Path) -> None:
     assert config.scheduler is not None
     assert config.scheduler.name == "cosine"
     assert config.scheduler.total_steps == 100
+
+
+@pytest.mark.parametrize("variant", ["mlp_probe", "token_fpn", "aspp", "ppm", "segmenter", "mask_former"])
+def test_every_decoder_group_composes(tmp_path: Path, variant: str) -> None:
+    config = load_training_run_config(str(_CONFIG_PATH), _overrides(tmp_path, f"decoder={variant}"))
+    assert config.decoder_name == variant
 
 
 def test_decoder_kwargs_are_plumbed_through_from_the_group_config(tmp_path: Path) -> None:
@@ -120,6 +129,72 @@ def test_remote_encoder_group_resolves_with_base_url_override(tmp_path: Path) ->
     assert config.encoder_base_url == "https://example.test/v1"
     assert config.encoder_fingerprint.model == "pai-embedding"
     assert config.encoder_fingerprint.revision is None
+
+
+def test_remote_encoder_api_key_resolves_from_dotenv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(ENCODER_API_KEY_VARIABLE, raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(f"{ENCODER_API_KEY_VARIABLE}=sk-from-dotenv\n", encoding="utf-8")
+
+    config = load_training_run_config(
+        str(_CONFIG_PATH), _overrides(tmp_path, "encoder=remote", "encoder.base_url=https://example.test/v1")
+    )
+
+    assert config.encoder_api_key == "sk-from-dotenv"
+
+
+@pytest.mark.parametrize("variant", ["adamw", "adam", "sgd"])
+def test_every_optimizer_group_composes(tmp_path: Path, variant: str) -> None:
+    config = load_training_run_config(str(_CONFIG_PATH), _overrides(tmp_path, f"optimizer={variant}"))
+    assert config.optimizer.name == variant
+
+
+@pytest.mark.parametrize(
+    ("variant", "expected_name"),
+    [
+        ("cosine", "cosine"),
+        ("cosine_warmup", "cosine"),
+        ("linear_warmup", "linear_warmup"),
+        ("polynomial", "polynomial"),
+        ("plateau", "plateau"),
+    ],
+)
+def test_every_enabled_scheduler_group_composes(tmp_path: Path, variant: str, expected_name: str) -> None:
+    overrides = [f"scheduler={variant}"]
+    if variant != "plateau":
+        overrides.append("scheduler.total_steps=100")
+    config = load_training_run_config(str(_CONFIG_PATH), _overrides(tmp_path, *overrides))
+
+    assert config.scheduler is not None
+    assert config.scheduler.name == expected_name
+
+
+@pytest.mark.parametrize(
+    ("variant", "expected_backends"),
+    [
+        ("null", []),
+        ("jsonl", ["jsonl"]),
+        ("tensorboard", ["tensorboard"]),
+        ("local", ["jsonl", "tensorboard"]),
+        ("mlflow", ["mlflow"]),
+        ("wandb", ["wandb"]),
+        ("comet", ["comet"]),
+    ],
+)
+def test_every_tracking_group_without_required_overrides_composes(
+    tmp_path: Path, variant: str, expected_backends: list[str]
+) -> None:
+    selection = 'tracking="null"' if variant == "null" else f"tracking={variant}"
+    config = load_training_run_config(str(_CONFIG_PATH), _overrides(tmp_path, selection))
+    assert config.tracking.backends == expected_backends
+
+
+def test_neptune_tracking_group_composes_with_required_project(tmp_path: Path) -> None:
+    config = load_training_run_config(
+        str(_CONFIG_PATH), _overrides(tmp_path, "tracking=neptune", "tracking.neptune_project=workspace/project")
+    )
+    assert config.tracking.backends == ["neptune"]
+    assert config.tracking.neptune_project == "workspace/project"
 
 
 def test_trainer_max_epochs_override(tmp_path: Path) -> None:

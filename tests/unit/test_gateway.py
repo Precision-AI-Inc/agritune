@@ -8,6 +8,7 @@ the gateway behaves predictably (retries transient failures, gives up after max_
 metrics, and flags a mid-run encoder dimension drift).
 """
 
+import asyncio
 from collections.abc import Sequence
 from typing import Any
 
@@ -33,6 +34,24 @@ def _features(batch_size: int, *, patch_dim: int = 4) -> EncoderFeatures:
         encoder_model="scripted",
         encoder_revision=None,
     )
+
+
+class _ConcurrencyBackend:
+    """Record in-flight calls and complete them out of order."""
+
+    def __init__(self) -> None:
+        self.active = 0
+        self.max_active = 0
+
+    async def encode(self, images: Sequence[Any]) -> EncoderFeatures:
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        value = int(images[0])
+        await asyncio.sleep(0.01 if value == 0 else 0.001)
+        self.active -= 1
+        features = _features(len(images))
+        features.patch_tokens.fill_(value)
+        return features
 
 
 class _ScriptedBackend:
@@ -77,6 +96,16 @@ async def test_splits_large_batch_and_tracks_metrics() -> None:
     assert gateway.metrics.requests_total == 3
     assert gateway.metrics.requests_failed == 0
     assert gateway.metrics.images_encoded == 10
+
+
+async def test_split_batches_run_concurrently_but_preserve_input_order() -> None:
+    backend = _ConcurrencyBackend()
+    gateway = EncoderGateway(backend, GatewayConfig(max_batch_images=1, max_concurrency=2))
+
+    features = await gateway.encode([0, 1, 2])
+
+    assert backend.max_active == 2
+    assert features.patch_tokens[:, 0, 0].tolist() == [0.0, 1.0, 2.0]
 
 
 async def test_retries_transient_failure_then_succeeds() -> None:

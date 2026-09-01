@@ -3,6 +3,8 @@
 
 """Unit tests for precisionai.agritune.services.benchmark_service."""
 
+import pytest
+
 from precisionai.agritune.encoder.fake import FakeEncoderBackend, FakeEncoderConfig
 from precisionai.agritune.services.benchmark_service import BenchmarkReport, BenchmarkResult, run_benchmark
 
@@ -57,6 +59,29 @@ async def test_run_benchmark_records_errors_and_zero_throughput() -> None:
     assert result.error_count == 3
     assert result.images_per_second == 0.0
     assert result.latency_p50_seconds == 0.0
+
+
+@pytest.mark.parametrize(
+    ("batch_sizes", "concurrencies", "num_requests", "message"),
+    [
+        ([], [1], 1, "batch_sizes"),
+        ([0], [1], 1, "batch_sizes"),
+        ([1], [], 1, "concurrencies"),
+        ([1], [0], 1, "concurrencies"),
+        ([1], [1], 0, "num_requests_per_combination"),
+    ],
+)
+async def test_run_benchmark_rejects_nonpositive_workload_dimensions(
+    batch_sizes: list[int], concurrencies: list[int], num_requests: int, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        await run_benchmark(
+            FakeEncoderBackend(),
+            batch_sizes=batch_sizes,
+            concurrencies=concurrencies,
+            image_factory=_image_factory,
+            num_requests_per_combination=num_requests,
+        )
 
 
 def test_benchmark_report_best_returns_none_when_all_errored() -> None:

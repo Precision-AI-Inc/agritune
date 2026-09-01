@@ -15,6 +15,56 @@ from typing import Any
 import torch
 
 
+def _validate_token_values(patch_tokens: torch.Tensor, cls_tokens: torch.Tensor | None, *, batch_size: int) -> None:
+    if not patch_tokens.is_floating_point():
+        raise ValueError(f"patch_tokens must use a floating-point dtype; got {patch_tokens.dtype}")
+    if not torch.all(torch.isfinite(patch_tokens)):
+        raise ValueError("patch_tokens must contain only finite values")
+    if cls_tokens is None:
+        return
+    if cls_tokens.ndim != 2 or cls_tokens.shape[0] != batch_size or cls_tokens.shape[1] < 1:
+        raise ValueError(
+            f"cls_tokens must have shape (B, D_cls) with B={batch_size} and D_cls > 0; got {tuple(cls_tokens.shape)}"
+        )
+    if not cls_tokens.is_floating_point():
+        raise ValueError(f"cls_tokens must use a floating-point dtype; got {cls_tokens.dtype}")
+    if not torch.all(torch.isfinite(cls_tokens)):
+        raise ValueError("cls_tokens must contain only finite values")
+
+
+def _validate_image_sizes(image_sizes: list[tuple[int, int]], *, batch_size: int) -> None:
+    if len(image_sizes) != batch_size:
+        raise ValueError(f"image_sizes must have length B={batch_size}; got {len(image_sizes)}")
+    for index, image_size in enumerate(image_sizes):
+        if (
+            len(image_size) != 2
+            or any(isinstance(dimension, bool) or not isinstance(dimension, int) for dimension in image_size)
+            or any(dimension <= 0 for dimension in image_size)
+        ):
+            raise ValueError(f"image_sizes[{index}] must contain two positive integers; got {image_size}")
+
+
+def _validate_patch_grid(patch_grid: torch.Tensor, *, batch_size: int) -> None:
+    if patch_grid.shape != (batch_size, 2):
+        raise ValueError(f"patch_grid must have shape (B, 2) with B={batch_size}; got {tuple(patch_grid.shape)}")
+    if patch_grid.dtype not in (torch.uint8, torch.int8, torch.int16, torch.int32, torch.int64):
+        raise ValueError(f"patch_grid must use an integer dtype; got {patch_grid.dtype}")
+    if torch.any(patch_grid <= 0):
+        raise ValueError(f"patch_grid dimensions must be positive; got {patch_grid.tolist()}")
+
+
+def _validate_valid_patch_mask(valid_patch_mask: torch.Tensor | None, *, batch_size: int, num_patches: int) -> None:
+    if valid_patch_mask is None:
+        return
+    if valid_patch_mask.shape != (batch_size, num_patches):
+        raise ValueError(
+            f"valid_patch_mask must have shape (B, N)=({batch_size}, {num_patches}); got "
+            f"{tuple(valid_patch_mask.shape)}"
+        )
+    if valid_patch_mask.dtype != torch.bool:
+        raise ValueError(f"valid_patch_mask must use dtype torch.bool; got {valid_patch_mask.dtype}")
+
+
 @dataclass
 class EncoderFeatures:
     """Batched output of an :class:`EncoderBackend`, ready for a downstream :class:`Task`.
@@ -70,26 +120,16 @@ class EncoderFeatures:
         """
         if self.patch_tokens.ndim != 3:
             raise ValueError(f"patch_tokens must have shape (B, N, D); got {tuple(self.patch_tokens.shape)}")
-        batch_size, num_patches, _ = self.patch_tokens.shape
-
-        if self.cls_tokens is not None and (self.cls_tokens.ndim != 2 or self.cls_tokens.shape[0] != batch_size):
+        batch_size, num_patches, patch_dim = self.patch_tokens.shape
+        if batch_size < 1 or num_patches < 1 or patch_dim < 1:
             raise ValueError(
-                f"cls_tokens must have shape (B, D_cls) with B={batch_size}; got {tuple(self.cls_tokens.shape)}"
+                f"patch_tokens dimensions B, N, and D must be positive; got {tuple(self.patch_tokens.shape)}"
             )
+        _validate_token_values(self.patch_tokens, self.cls_tokens, batch_size=batch_size)
+        _validate_patch_grid(self.patch_grid, batch_size=batch_size)
+        _validate_valid_patch_mask(self.valid_patch_mask, batch_size=batch_size, num_patches=num_patches)
 
-        if self.patch_grid.shape != (batch_size, 2):
-            raise ValueError(
-                f"patch_grid must have shape (B, 2) with B={batch_size}; got {tuple(self.patch_grid.shape)}"
-            )
-
-        if self.valid_patch_mask is not None and self.valid_patch_mask.shape != (batch_size, num_patches):
-            raise ValueError(
-                f"valid_patch_mask must have shape (B, N)=({batch_size}, {num_patches}); got "
-                f"{tuple(self.valid_patch_mask.shape)}"
-            )
-
-        if len(self.image_sizes) != batch_size:
-            raise ValueError(f"image_sizes must have length B={batch_size}; got {len(self.image_sizes)}")
+        _validate_image_sizes(self.image_sizes, batch_size=batch_size)
 
         grid_products = (self.patch_grid[:, 0] * self.patch_grid[:, 1]).tolist()
         for index, expected_patches in enumerate(grid_products):
@@ -204,7 +244,9 @@ def concatenate_encoder_features(features_list: Sequence[EncoderFeatures]) -> En
         grids.append(entry.patch_grid)
         image_sizes.extend(entry.image_sizes)
 
-    needs_mask = max_patches != min(entry.patch_tokens.shape[1] for entry in features_list)
+    needs_mask = max_patches != min(entry.patch_tokens.shape[1] for entry in features_list) or any(
+        entry.valid_patch_mask is not None for entry in features_list
+    )
 
     cls_tokens: torch.Tensor | None = None
     if has_cls:
@@ -246,10 +288,17 @@ def select_one(features: EncoderFeatures, index: int) -> EncoderFeatures:
     EncoderFeatures
         A length-1 batch containing only that sample.
     """
+    if index < 0 or index >= features.batch_size:
+        raise ValueError(f"index must be in [0, {features.batch_size}); got {index}")
     height, width = features.patch_grid_hw(index)
     num_patches = height * width
+    tokens = features.patch_tokens[index]
+    if features.valid_patch_mask is not None:
+        tokens = tokens[features.valid_patch_mask[index]]
+    else:
+        tokens = tokens[:num_patches]
     return EncoderFeatures(
-        patch_tokens=features.patch_tokens[index : index + 1, :num_patches, :],
+        patch_tokens=tokens.unsqueeze(0),
         cls_tokens=features.cls_tokens[index : index + 1] if features.cls_tokens is not None else None,
         patch_grid=features.patch_grid[index : index + 1],
         valid_patch_mask=None,
@@ -266,7 +315,14 @@ def _validate_concatenation_inputs(
     for other in features_list[1:]:
         if other.patch_tokens.shape[2] != patch_dim:
             raise ValueError("all entries must share the same patch dimension")
+        if other.patch_tokens.dtype != first.patch_tokens.dtype:
+            raise ValueError("all entries must share the same patch-token dtype")
         if (other.cls_tokens is not None) != has_cls:
             raise ValueError("all entries must agree on whether cls_tokens is present")
+        if has_cls and other.cls_tokens is not None and first.cls_tokens is not None:
+            if other.cls_tokens.shape[1] != first.cls_tokens.shape[1]:
+                raise ValueError("all entries must share the same CLS dimension")
+            if other.cls_tokens.dtype != first.cls_tokens.dtype:
+                raise ValueError("all entries must share the same CLS-token dtype")
         if other.encoder_model != first.encoder_model or other.encoder_revision != first.encoder_revision:
             raise ValueError("all entries must share the same encoder_model/encoder_revision")

@@ -9,6 +9,29 @@ comparison against `agritune features verify`) and `clean()` (orphaned tensor/me
 `agritune features clean`). Precomputation (`agritune features build`) is resumable — restarting
 after a partial run only encodes the missing samples. See `agritune_implementation_plan.md` §9–10.
 
+For cached training with `augmentation.mode: offline`, precompute the same deterministic variant
+(and its unaugmented validation features) through the service API:
+
+```python
+from precisionai.agritune.augmentations.image import AugmentationMode, ImageAugmentationPipeline
+from precisionai.agritune.services.feature_service import build_features
+
+await build_features(
+    "manifest.csv",
+    store=store,
+    encoder=encoder,
+    encoder_fingerprint=fingerprint,
+    augmentation_mode=AugmentationMode.OFFLINE,
+    augmentation_pipeline=ImageAugmentationPipeline(pipeline_config),
+    global_seed=training_seed,
+    augmentation_variant=variant,
+)
+```
+
+The pipeline, seed, variant, encoder fingerprint, and manifest must match training. Online and
+hybrid augmentation are intentionally rejected by precomputation because they produce an unbounded
+sequence; use an online or hybrid feature provider for those modes.
+
 ## Feature providers
 
 Three `FeatureProvider` implementations (`precisionai.agritune.features.provider`), matching

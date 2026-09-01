@@ -15,6 +15,7 @@ from precisionai.agritune.augmentations.image.pipeline import (
     AugmentationPipelineConfig,
     GeometricConfig,
     ImageAugmentationPipeline,
+    prepare_sample,
 )
 from precisionai.agritune.data.dataset import ManifestDataset
 from precisionai.agritune.encoder.fake import FakeEncoderBackend
@@ -205,6 +206,7 @@ def test_build_static_augmented_batches_offline_applies_augmentation(tmp_path: P
     original = dataset[0].image
     flipped = batches[0].samples[0].image
     assert not np.array_equal(np.array(original), np.array(flipped))
+    assert batches[0].samples[0].augmentation_metadata is not None
 
 
 def test_build_static_augmented_batches_offline_is_deterministic(tmp_path: Path) -> None:
@@ -238,9 +240,12 @@ def test_online_augmented_batches_reaugments_on_each_iteration(tmp_path: Path) -
     first_epoch = list(batches)
     second_epoch = list(batches)
 
-    first_image = first_epoch[0].samples[0].image
-    second_image = second_epoch[0].samples[0].image
-    assert not np.array_equal(np.array(first_image), np.array(second_image))
+    first_sample = first_epoch[0].samples[0]
+    second_sample = second_epoch[0].samples[0]
+    assert not np.array_equal(np.array(first_sample.image), np.array(second_sample.image))
+    assert first_sample.augmentation_metadata is not None
+    assert second_sample.augmentation_metadata is not None
+    assert first_sample.augmentation_metadata.seed != second_sample.augmentation_metadata.seed
 
 
 def test_online_augmented_batches_advances_its_epoch_counter(tmp_path: Path) -> None:
@@ -256,6 +261,46 @@ def test_online_augmented_batches_advances_its_epoch_counter(tmp_path: Path) -> 
     assert batches._epoch == 1
     list(batches)
     assert batches._epoch == 2
+
+
+def test_online_augmented_batches_can_start_at_a_resumed_epoch(tmp_path: Path) -> None:
+    manifest_path = _build_gradient_manifest(tmp_path)
+    dataset = ManifestDataset(manifest_path)
+    batches = OnlineAugmentedBatches(
+        dataset,
+        pipeline=ImageAugmentationPipeline(),
+        mode=AugmentationMode.ONLINE,
+        global_seed=0,
+        batch_size=2,
+    )
+
+    batches.set_epoch(4)
+    resumed_epoch = list(batches)
+
+    assert batches._epoch == 5
+    assert resumed_epoch[0].samples[0].augmentation_metadata is not None
+    expected = prepare_sample(
+        dataset[0],
+        mode=AugmentationMode.ONLINE,
+        pipeline=ImageAugmentationPipeline(),
+        global_seed=0,
+        epoch=4,
+    )
+    assert expected.augmentation_metadata is not None
+    assert resumed_epoch[0].samples[0].augmentation_metadata.seed == expected.augmentation_metadata.seed
+
+
+def test_online_augmented_batches_rejects_negative_start_epoch(tmp_path: Path) -> None:
+    manifest_path = _build_gradient_manifest(tmp_path)
+    batches = OnlineAugmentedBatches(
+        ManifestDataset(manifest_path),
+        pipeline=ImageAugmentationPipeline(),
+        mode=AugmentationMode.ONLINE,
+        global_seed=0,
+        batch_size=2,
+    )
+    with pytest.raises(ValueError, match="epoch must be non-negative"):
+        batches.set_epoch(-1)
 
 
 def test_online_augmented_batches_hybrid_mode_is_deterministic_per_epoch(tmp_path: Path) -> None:

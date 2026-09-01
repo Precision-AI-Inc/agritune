@@ -53,11 +53,19 @@ class DiceLoss(nn.Module):
         return 1.0 - dice_per_class.mean()
 
 
+def _validate_targets(targets: torch.Tensor, *, num_classes: int, valid: torch.Tensor) -> None:
+    invalid = valid & ((targets < 0) | (targets >= num_classes))
+    if torch.any(invalid):
+        labels = sorted(int(label) for label in torch.unique(targets[invalid]).tolist())
+        raise ValueError(f"targets contain labels outside [0, {num_classes}): {labels}")
+
+
 def _one_hot_targets(
     targets: torch.Tensor, *, num_classes: int, ignore_index: int | None
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Return ``(one_hot, valid_mask)``, both shape ``(B, num_classes, H, W)``."""
     valid = targets != ignore_index if ignore_index is not None else torch.ones_like(targets, dtype=torch.bool)
+    _validate_targets(targets, num_classes=num_classes, valid=valid)
     clamped = targets.clamp(min=0, max=num_classes - 1)
     one_hot = functional.one_hot(clamped, num_classes=num_classes).permute(0, 3, 1, 2).float()
     return one_hot, valid.unsqueeze(1).float()
@@ -71,6 +79,10 @@ def cross_entropy_loss(
     class_weights: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Compute the standard per-pixel cross-entropy loss."""
+    valid = targets != ignore_index
+    _validate_targets(targets, num_classes=logits.shape[1], valid=valid)
+    if not torch.any(valid):
+        return logits.sum() * 0.0
     return functional.cross_entropy(logits, targets, weight=class_weights, ignore_index=ignore_index)
 
 

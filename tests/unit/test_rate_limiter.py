@@ -68,3 +68,16 @@ def test_invalid_max_concurrency_raises() -> None:
 def test_non_positive_requests_per_minute_raises() -> None:
     with pytest.raises(ValueError, match="rate_per_second must be positive"):
         RateLimiter(RateLimiterConfig(requests_per_minute=0))
+
+
+def test_non_positive_images_per_minute_raises() -> None:
+    with pytest.raises(ValueError, match="rate_per_second must be positive"):
+        RateLimiter(RateLimiterConfig(images_per_minute=0))
+
+
+@pytest.mark.parametrize("num_images", [0, -1])
+async def test_acquire_rejects_non_positive_image_count(num_images: int) -> None:
+    limiter = RateLimiter()
+    with pytest.raises(ValueError, match="num_images must be positive"):
+        async with limiter.acquire(num_images=num_images):
+            pass

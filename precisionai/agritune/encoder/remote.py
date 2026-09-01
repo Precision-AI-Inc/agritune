@@ -69,6 +69,25 @@ def _image_to_data_uri(image: Image.Image) -> str:
     return f"data:image/png;base64,{encoded}"
 
 
+def _decode_cls_embedding(embedding: Any) -> torch.Tensor:
+    """Decode a CLS vector from a float list or a little-endian float32 base64 buffer."""
+    if isinstance(embedding, str):
+        try:
+            decoded = np.frombuffer(base64.b64decode(embedding, validate=True), dtype="<f4")
+        except (ValueError, TypeError) as exc:
+            raise MalformedEncoderResponseError(f"could not decode embedding: {exc}") from exc
+        if decoded.size < 1:
+            raise MalformedEncoderResponseError("encoder response item missing 'embedding'")
+        return torch.from_numpy(np.array(decoded, copy=True)).to(dtype=torch.float32)
+    try:
+        vector = torch.as_tensor(embedding, dtype=torch.float32).reshape(-1)
+    except (TypeError, ValueError, RuntimeError) as exc:
+        raise MalformedEncoderResponseError(f"could not decode embedding: {exc}") from exc
+    if vector.numel() < 1:
+        raise MalformedEncoderResponseError("encoder response item missing 'embedding'")
+    return vector.contiguous()
+
+
 def _retry_after_seconds(exc: openai.APIStatusError) -> float | None:
     header = exc.response.headers.get("retry-after")
     if header is None:
@@ -164,14 +183,27 @@ class RemoteEncoderBackend:
                 f"encoder returned {len(response.data)} entries for {len(image_sizes)} images"
             )
 
+        try:
+            raw_indices = [item.index for item in response.data]
+        except AttributeError as exc:
+            raise MalformedEncoderResponseError("encoder response item has an invalid or missing index") from exc
+        if any(isinstance(index, bool) or not isinstance(index, int) for index in raw_indices):
+            raise MalformedEncoderResponseError("encoder response item has an invalid or missing index")
+        indices = raw_indices
+        expected_indices = list(range(len(image_sizes)))
+        if sorted(indices) != expected_indices:
+            raise MalformedEncoderResponseError(
+                f"encoder response indices must be exactly {expected_indices}; got {indices}"
+            )
+
         cls_vectors: list[torch.Tensor] = []
         patch_token_list: list[torch.Tensor] = []
         grids: list[tuple[int, int]] = []
 
-        for item in sorted(response.data, key=lambda entry: entry.index):
+        for item in sorted(response.data, key=lambda entry: int(entry.index)):
             if not item.embedding:
                 raise MalformedEncoderResponseError("encoder response item missing 'embedding'")
-            cls_vectors.append(torch.tensor(item.embedding, dtype=torch.float32))
+            cls_vectors.append(_decode_cls_embedding(item.embedding))
 
             patch_tokens, grid = self._decode_patch_item(item)
             patch_token_list.append(patch_tokens)
@@ -188,8 +220,13 @@ class RemoteEncoderBackend:
                 "encoder response item missing 'patch_embeddings'/'patch_shape' — was return_patch_tokens requested?"
             )
         try:
-            patch_dim, height, width = (int(dim) for dim in patch_shape)
-            array = np.frombuffer(base64.b64decode(patch_embeddings), dtype="<f4").reshape(patch_dim, height, width)
+            if any(isinstance(dim, bool) or not isinstance(dim, int) for dim in patch_shape):
+                raise ValueError(f"patch_shape dimensions must be integers; got {patch_shape}")
+            patch_dim, height, width = patch_shape
+            if patch_dim <= 0 or height <= 0 or width <= 0:
+                raise ValueError(f"patch_shape dimensions must be positive; got {patch_shape}")
+            decoded = base64.b64decode(patch_embeddings, validate=True)
+            array = np.frombuffer(decoded, dtype="<f4").reshape(patch_dim, height, width)
         except (ValueError, TypeError) as exc:
             raise MalformedEncoderResponseError(f"could not decode patch_embeddings: {exc}") from exc
 
@@ -209,6 +246,11 @@ class RemoteEncoderBackend:
         batch_size = len(patch_token_list)
         max_patches = max(tokens.shape[0] for tokens in patch_token_list)
         patch_dim = patch_token_list[0].shape[1]
+        if any(tokens.shape[1] != patch_dim for tokens in patch_token_list):
+            raise MalformedEncoderResponseError("encoder response items have inconsistent patch dimensions")
+        cls_dim = cls_vectors[0].shape[0]
+        if any(vector.shape[0] != cls_dim for vector in cls_vectors):
+            raise MalformedEncoderResponseError("encoder response items have inconsistent CLS dimensions")
 
         padded = torch.zeros(batch_size, max_patches, patch_dim, dtype=torch.float32)
         valid_mask = torch.zeros(batch_size, max_patches, dtype=torch.bool)

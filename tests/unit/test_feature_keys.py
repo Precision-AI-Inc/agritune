@@ -94,6 +94,28 @@ def test_compute_feature_key_changes_with_encoder_model() -> None:
     assert key_a != key_b
 
 
+def test_compute_feature_key_does_not_collide_when_fields_contain_delimiters() -> None:
+    first = compute_feature_key(
+        sample_id="a|b",
+        image_hash="c",
+        augmentation_fingerprint="none",
+        encoder_fingerprint=_FINGERPRINT,
+    )
+    second = compute_feature_key(
+        sample_id="a",
+        image_hash="b|c",
+        augmentation_fingerprint="none",
+        encoder_fingerprint=_FINGERPRINT,
+    )
+    assert first != second
+
+
+def test_hash_augmentation_does_not_collide_when_transform_names_contain_delimiters() -> None:
+    first = AugmentationRecord(seed=1, transforms=[TransformRecord(name="a|b", params={"x": 1})])
+    second = AugmentationRecord(seed=1, transforms=[TransformRecord(name="a", params={"x": "b|1"})])
+    assert hash_augmentation(first) != hash_augmentation(second)
+
+
 def test_compute_feature_key_changes_with_feature_schema_version() -> None:
     key_a = compute_feature_key(
         sample_id="s1",

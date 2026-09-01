@@ -10,10 +10,13 @@ exactly as the SDK would raise them.
 """
 
 import base64
+from typing import Any, cast
 
 import httpx2
+import numpy as np
 import openai
 import pytest
+import torch
 
 from precisionai.agritune.encoder.errors import (
     EncoderError,
@@ -22,7 +25,7 @@ from precisionai.agritune.encoder.errors import (
     EncoderTimeoutError,
     MalformedEncoderResponseError,
 )
-from precisionai.agritune.encoder.remote import RemoteEncoderBackend, RemoteEncoderConfig
+from precisionai.agritune.encoder.remote import RemoteEncoderBackend, RemoteEncoderConfig, _decode_cls_embedding
 from tests.fixtures.fake_openai_client import (
     FakeAsyncOpenAIClient,
     FakeEmbeddingItem,
@@ -42,6 +45,10 @@ def _status_response(status_code: int, headers: dict[str, str] | None = None) ->
     return httpx2.Response(status_code=status_code, headers=headers or {}, request=_request())
 
 
+def _b64_f32(values: list[float]) -> str:
+    return base64.b64encode(np.asarray(values, dtype="<f4").tobytes()).decode("ascii")
+
+
 async def test_encode_returns_features_for_single_image() -> None:
     item = make_patch_item(index=0, cls_dim=5, patch_dim=8, grid=(2, 3), seed=1)
     client = FakeAsyncOpenAIClient(response=FakeEmbeddingResponse([item]))
@@ -57,6 +64,64 @@ async def test_encode_returns_features_for_single_image() -> None:
     assert features.encoder_model == "pai-embedding"
     assert features.encoder_revision is None
     assert features.valid_patch_mask is None
+
+
+async def test_encode_accepts_base64_cls_embeddings() -> None:
+    item = make_patch_item(index=0, cls_dim=4, patch_dim=2, grid=(1, 1), seed=3)
+    expected = list(item.embedding)
+    cast(Any, item).embedding = _b64_f32(expected)
+    client = FakeAsyncOpenAIClient(response=FakeEmbeddingResponse([item]))
+    backend = RemoteEncoderBackend(_CONFIG, client=client)
+
+    features = await backend.encode([make_image((4, 4))])
+
+    assert features.cls_tokens is not None
+    assert torch.allclose(features.cls_tokens[0], torch.tensor(expected, dtype=torch.float32))
+
+
+def test_decode_cls_embedding_rejects_empty_base64() -> None:
+    with pytest.raises(MalformedEncoderResponseError, match="missing 'embedding'"):
+        _decode_cls_embedding("")
+
+
+async def test_truncated_base64_cls_embedding_raises_malformed_error() -> None:
+    item = make_patch_item(index=0, cls_dim=2, patch_dim=2, grid=(1, 1))
+    cast(Any, item).embedding = base64.b64encode(b"x").decode("ascii")
+    client = FakeAsyncOpenAIClient(response=FakeEmbeddingResponse([item]))
+    backend = RemoteEncoderBackend(_CONFIG, client=client)
+
+    with pytest.raises(MalformedEncoderResponseError, match="could not decode embedding"):
+        await backend.encode([make_image((4, 4))])
+
+
+async def test_non_numeric_cls_embedding_raises_malformed_error() -> None:
+    item = make_patch_item(index=0, cls_dim=2, patch_dim=2, grid=(1, 1))
+    cast(Any, item).embedding = {"unexpected": "object"}
+    client = FakeAsyncOpenAIClient(response=FakeEmbeddingResponse([item]))
+    backend = RemoteEncoderBackend(_CONFIG, client=client)
+
+    with pytest.raises(MalformedEncoderResponseError, match="could not decode embedding"):
+        await backend.encode([make_image((4, 4))])
+
+
+async def test_empty_nested_cls_embedding_raises_malformed_error() -> None:
+    item = make_patch_item(index=0, cls_dim=2, patch_dim=2, grid=(1, 1))
+    cast(Any, item).embedding = [[]]
+    client = FakeAsyncOpenAIClient(response=FakeEmbeddingResponse([item]))
+    backend = RemoteEncoderBackend(_CONFIG, client=client)
+
+    with pytest.raises(MalformedEncoderResponseError, match="missing 'embedding'"):
+        await backend.encode([make_image((4, 4))])
+
+
+async def test_invalid_base64_cls_embedding_raises_malformed_error() -> None:
+    item = make_patch_item(index=0, cls_dim=2, patch_dim=2, grid=(1, 1))
+    cast(Any, item).embedding = "not-valid-base64!!"
+    client = FakeAsyncOpenAIClient(response=FakeEmbeddingResponse([item]))
+    backend = RemoteEncoderBackend(_CONFIG, client=client)
+
+    with pytest.raises(MalformedEncoderResponseError, match="could not decode embedding"):
+        await backend.encode([make_image((4, 4))])
 
 
 async def test_encode_records_original_image_sizes() -> None:
@@ -127,6 +192,93 @@ async def test_response_length_mismatch_raises_malformed_error() -> None:
     backend = RemoteEncoderBackend(_CONFIG, client=client)
     with pytest.raises(MalformedEncoderResponseError, match="entries for"):
         await backend.encode([make_image((4, 4)), make_image((4, 4))])
+
+
+async def test_missing_index_attribute_raises_malformed_error() -> None:
+    item = make_patch_item(index=0, cls_dim=2, patch_dim=2, grid=(1, 1))
+    del item.index
+    client = FakeAsyncOpenAIClient(response=FakeEmbeddingResponse([item]))
+    backend = RemoteEncoderBackend(_CONFIG, client=client)
+
+    with pytest.raises(MalformedEncoderResponseError, match="invalid or missing index"):
+        await backend.encode([make_image((4, 4))])
+
+
+async def test_invalid_response_index_raises_malformed_error() -> None:
+    item = make_patch_item(index=0, cls_dim=2, patch_dim=2, grid=(1, 1))
+    cast(Any, item).index = "not-an-index"
+    client = FakeAsyncOpenAIClient(response=FakeEmbeddingResponse([item]))
+    backend = RemoteEncoderBackend(_CONFIG, client=client)
+
+    with pytest.raises(MalformedEncoderResponseError, match="invalid or missing index"):
+        await backend.encode([make_image((4, 4))])
+
+
+async def test_fractional_response_index_raises_malformed_error() -> None:
+    item = make_patch_item(index=0, cls_dim=2, patch_dim=2, grid=(1, 1))
+    cast(Any, item).index = 0.5
+    client = FakeAsyncOpenAIClient(response=FakeEmbeddingResponse([item]))
+    backend = RemoteEncoderBackend(_CONFIG, client=client)
+
+    with pytest.raises(MalformedEncoderResponseError, match="invalid or missing index"):
+        await backend.encode([make_image((4, 4))])
+
+
+async def test_duplicate_response_indices_raise_malformed_error() -> None:
+    items = [
+        make_patch_item(index=0, cls_dim=2, patch_dim=2, grid=(1, 1)),
+        make_patch_item(index=0, cls_dim=2, patch_dim=2, grid=(1, 1)),
+    ]
+    client = FakeAsyncOpenAIClient(response=FakeEmbeddingResponse(items))
+    backend = RemoteEncoderBackend(_CONFIG, client=client)
+
+    with pytest.raises(MalformedEncoderResponseError, match="indices must be exactly"):
+        await backend.encode([make_image((4, 4)), make_image((4, 4))])
+
+
+async def test_inconsistent_patch_dimensions_raise_malformed_error() -> None:
+    items = [
+        make_patch_item(index=0, cls_dim=2, patch_dim=2, grid=(1, 1)),
+        make_patch_item(index=1, cls_dim=2, patch_dim=3, grid=(1, 1)),
+    ]
+    client = FakeAsyncOpenAIClient(response=FakeEmbeddingResponse(items))
+    backend = RemoteEncoderBackend(_CONFIG, client=client)
+
+    with pytest.raises(MalformedEncoderResponseError, match="inconsistent patch dimensions"):
+        await backend.encode([make_image((4, 4)), make_image((4, 4))])
+
+
+async def test_inconsistent_cls_dimensions_raise_malformed_error() -> None:
+    items = [
+        make_patch_item(index=0, cls_dim=2, patch_dim=2, grid=(1, 1)),
+        make_patch_item(index=1, cls_dim=3, patch_dim=2, grid=(1, 1)),
+    ]
+    client = FakeAsyncOpenAIClient(response=FakeEmbeddingResponse(items))
+    backend = RemoteEncoderBackend(_CONFIG, client=client)
+
+    with pytest.raises(MalformedEncoderResponseError, match="inconsistent CLS dimensions"):
+        await backend.encode([make_image((4, 4)), make_image((4, 4))])
+
+
+async def test_fractional_patch_shape_raises_malformed_error() -> None:
+    item = make_patch_item(index=0, cls_dim=2, patch_dim=2, grid=(1, 1))
+    cast(Any, item).patch_shape = [2, 1.5, 1]
+    client = FakeAsyncOpenAIClient(response=FakeEmbeddingResponse([item]))
+    backend = RemoteEncoderBackend(_CONFIG, client=client)
+
+    with pytest.raises(MalformedEncoderResponseError, match="dimensions must be integers"):
+        await backend.encode([make_image((4, 4))])
+
+
+async def test_non_positive_patch_shape_raises_malformed_error() -> None:
+    item = FakeEmbeddingItem(
+        index=0, embedding=[0.1, 0.2], patch_embeddings=base64.b64encode(b"").decode(), patch_shape=[2, 0, 1]
+    )
+    client = FakeAsyncOpenAIClient(response=FakeEmbeddingResponse([item]))
+    backend = RemoteEncoderBackend(_CONFIG, client=client)
+
+    with pytest.raises(MalformedEncoderResponseError, match="patch_shape dimensions must be positive"):
+        await backend.encode([make_image((4, 4))])
 
 
 async def test_missing_patch_fields_raises_malformed_error() -> None:

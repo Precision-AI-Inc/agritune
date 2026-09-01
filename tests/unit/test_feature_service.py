@@ -5,6 +5,9 @@
 
 from pathlib import Path
 
+import pytest
+
+from precisionai.agritune.augmentations.image.pipeline import AugmentationMode
 from precisionai.agritune.encoder.fake import FakeEncoderBackend
 from precisionai.agritune.features.keys import EncoderFingerprint
 from precisionai.agritune.features.store import DirectoryFeatureStore
@@ -42,6 +45,49 @@ async def test_build_features_restricts_to_given_sample_ids(tmp_path: Path) -> N
     assert stats.total == 2
     assert stats.computed == 2
     assert len(store.list_keys()) == 2
+
+
+async def test_build_features_precomputes_a_resumable_offline_variant(tmp_path: Path) -> None:
+    manifest_path = build_manifest(tmp_path)
+    store = DirectoryFeatureStore(tmp_path / "features")
+
+    first = await build_features(
+        str(manifest_path),
+        store=store,
+        encoder=FakeEncoderBackend(),
+        encoder_fingerprint=_FINGERPRINT,
+        augmentation_mode=AugmentationMode.OFFLINE,
+        global_seed=7,
+        augmentation_variant=2,
+    )
+    second_backend = FakeEncoderBackend()
+    second = await build_features(
+        str(manifest_path),
+        store=store,
+        encoder=second_backend,
+        encoder_fingerprint=_FINGERPRINT,
+        augmentation_mode=AugmentationMode.OFFLINE,
+        global_seed=7,
+        augmentation_variant=2,
+    )
+
+    assert first.computed == 8
+    assert second.skipped == 8
+    assert second_backend.call_count == 0
+
+
+async def test_build_features_rejects_unbounded_augmentation_modes(tmp_path: Path) -> None:
+    manifest_path = build_manifest(tmp_path)
+    store = DirectoryFeatureStore(tmp_path / "features")
+
+    with pytest.raises(ValueError, match="supports augmentation mode 'none' or 'offline'"):
+        await build_features(
+            str(manifest_path),
+            store=store,
+            encoder=FakeEncoderBackend(),
+            encoder_fingerprint=_FINGERPRINT,
+            augmentation_mode=AugmentationMode.ONLINE,
+        )
 
 
 async def test_build_features_is_resumable(tmp_path: Path) -> None:

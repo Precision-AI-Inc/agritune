@@ -1,3 +1,7 @@
+# Local environment / secrets — .env holds the encoder API key, .env.example is committed
+.env
+.env.local
+
 # Virtual environments
 .venv/
 env/
@@ -122,6 +126,10 @@ mlruns/
 runs/
 feature_store/
 *.safetensors
+
+# Downloaded / prepared example datasets (see examples/datasets/)
+examples/datasets/cwfid/
+sample_data/
 
 # OS files
 .DS_Store

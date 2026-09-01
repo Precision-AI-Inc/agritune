@@ -11,10 +11,15 @@ tiny dataset -> fake encoder -> feature precompute -> decoder -> train -> checkp
 evaluate.
 """
 
-from dataclasses import dataclass, field
+import hashlib
+import json
+from dataclasses import asdict, dataclass, field, is_dataclass, replace
+from enum import Enum
+from pathlib import Path
 from typing import Any
 
 import numpy as np
+import torch
 
 from precisionai.agritune.augmentations.image.pipeline import (
     AugmentationMode,
@@ -22,14 +27,15 @@ from precisionai.agritune.augmentations.image.pipeline import (
     GeometricConfig,
     ImageAugmentationPipeline,
     PhotometricConfig,
+    prepare_sample,
 )
 from precisionai.agritune.data.dataset import ManifestDataset
-from precisionai.agritune.data.manifest import load_manifest
+from precisionai.agritune.data.manifest import ManifestRow, load_manifest
 from precisionai.agritune.data.split import SplitAssignment, random_split
 from precisionai.agritune.features.keys import EncoderFingerprint
 from precisionai.agritune.features.provider import HybridFeatureProvider, OnlineFeatureProvider
 from precisionai.agritune.features.store import DirectoryFeatureStore, ShardedFeatureStore
-from precisionai.agritune.logging import RunDirectory
+from precisionai.agritune.logging import RunDirectory, get_logger
 from precisionai.agritune.optimization.optimizers import OptimizerConfig, build_optimizer
 from precisionai.agritune.optimization.schedulers import SchedulerConfig, build_scheduler
 from precisionai.agritune.schemas.protocols import FeatureProvider
@@ -52,6 +58,100 @@ from precisionai.agritune.training.checkpointing import CheckpointManager
 from precisionai.agritune.training.trainer import Trainer, TrainerConfig
 
 _FEATURE_PROVIDERS = ("cached", "online", "hybrid")
+logger = get_logger(__name__)
+
+
+def _jsonable(value: Any) -> Any:
+    result = value
+    if isinstance(value, torch.Tensor):
+        result = value.detach().cpu().tolist()
+    elif isinstance(value, Enum):
+        result = value.value
+    elif isinstance(value, Path):
+        result = str(value)
+    elif isinstance(value, dict):
+        result = {str(key): _jsonable(item) for key, item in value.items()}
+    elif isinstance(value, list | tuple):
+        result = [_jsonable(item) for item in value]
+    elif is_dataclass(value) and not isinstance(value, type):
+        result = _jsonable(asdict(value))
+    return result
+
+
+def _redact_secrets(value: Any) -> Any:
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, item in value.items():
+            normalized = str(key).lower()
+            if normalized.endswith(("api_key", "api_token", "authorization", "password")):
+                redacted[str(key)] = "<redacted>" if item is not None else None
+            else:
+                redacted[str(key)] = _redact_secrets(item)
+        return redacted
+    if isinstance(value, list | tuple):
+        return [_redact_secrets(item) for item in value]
+    return _jsonable(value)
+
+
+def _stable_fingerprint(value: Any) -> str:
+    payload = json.dumps(_jsonable(value), sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _dataset_fingerprint(manifest_path: str, rows: list[ManifestRow]) -> str:
+    manifest = Path(manifest_path)
+    digest = hashlib.sha256(manifest.read_bytes())
+    for row in sorted(rows, key=lambda item: item.sample_id):
+        digest.update(row.sample_id.encode("utf-8"))
+        digest.update((manifest.parent / row.image_path).read_bytes())
+        digest.update((manifest.parent / row.mask_path).read_bytes())
+    return digest.hexdigest()
+
+
+def _critical_config(config: "TrainingRunConfig") -> dict[str, Any]:
+    trainer = _jsonable(config.trainer)
+    trainer.pop("max_epochs", None)
+    trainer.pop("fingerprints", None)
+    return {
+        "num_classes": config.num_classes,
+        "feature_provider": config.feature_provider,
+        "encoder_base_url": config.encoder_base_url,
+        "augmentation": _jsonable(config.augmentation),
+        "decoder_name": config.decoder_name,
+        "decoder_kwargs": _jsonable(config.decoder_kwargs),
+        "batch_size": config.batch_size,
+        "val_fraction": config.val_fraction,
+        "seed": config.seed,
+        "optimizer": _jsonable(config.optimizer),
+        "scheduler": _jsonable(config.scheduler),
+        "trainer": trainer,
+        "loss": _jsonable(config.loss),
+        "val_metric_name": config.val_metric_name,
+        "higher_is_better": config.higher_is_better,
+    }
+
+
+def _resolved_config(config: "TrainingRunConfig") -> dict[str, Any]:
+    resolved: dict[str, Any] = _jsonable(config)
+    resolved.pop("original_config", None)
+    resolved.pop("config_overrides", None)
+    return _redact_secrets(resolved)
+
+
+def _original_config(config: "TrainingRunConfig") -> dict[str, Any]:
+    source = config.original_config or _resolved_config(config)
+    original = _redact_secrets(source)
+    if config.config_overrides:
+        overrides = []
+        for override in config.config_overrides:
+            key, separator, _ = override.partition("=")
+            normalized = key.lower()
+            if separator and normalized.endswith(("api_key", "api_token", "authorization", "password")):
+                overrides.append(f"{key}=<redacted>")
+            else:
+                overrides.append(override)
+        return {"config": original, "overrides": overrides}
+    return original
 
 
 @dataclass
@@ -130,6 +230,11 @@ class TrainingRunConfig:
         Maximum number of best-by-validation-metric periodic checkpoints to retain; ``0`` keeps
         every one — see :class:`~precisionai.agritune.training.checkpointing.CheckpointManager`.
     tracking : TrackingSelection
+    original_config : dict[str, Any]
+        Unresolved source mapping captured by the CLI config loader for provenance. Direct Python
+        callers may leave it empty, in which case the resolved configuration is recorded instead.
+    config_overrides : list[str]
+        Hydra/dotlist overrides supplied alongside the source configuration.
     """
 
     manifest_path: str
@@ -155,6 +260,8 @@ class TrainingRunConfig:
     higher_is_better: bool = True
     checkpoint_top_k: int = 3
     tracking: TrackingSelection = field(default_factory=TrackingSelection)
+    original_config: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
+    config_overrides: list[str] = field(default_factory=list, repr=False, compare=False)
 
 
 @dataclass
@@ -176,6 +283,14 @@ class TrainingRunResult:
 
 
 def _validate_config(config: TrainingRunConfig) -> None:
+    if config.num_classes < 1:
+        raise ValueError(f"num_classes must be positive; got {config.num_classes}")
+    if config.batch_size < 1:
+        raise ValueError(f"batch_size must be positive; got {config.batch_size}")
+    if config.trainer.max_epochs < 1:
+        raise ValueError(f"trainer.max_epochs must be positive; got {config.trainer.max_epochs}")
+    if config.checkpoint_top_k < 0:
+        raise ValueError(f"checkpoint_top_k must be non-negative; got {config.checkpoint_top_k}")
     if config.feature_provider not in _FEATURE_PROVIDERS:
         raise ValueError(
             f"unsupported feature_provider: {config.feature_provider!r}; expected one of {_FEATURE_PROVIDERS}"
@@ -216,13 +331,17 @@ def _build_feature_provider(
     return provider, rows
 
 
+def _build_augmentation_pipeline(config: TrainingRunConfig) -> ImageAugmentationPipeline:
+    return ImageAugmentationPipeline(
+        AugmentationPipelineConfig(geometric=config.augmentation.geometric, photometric=config.augmentation.photometric)
+    )
+
+
 def _build_train_batches(config: TrainingRunConfig, train_dataset: ManifestDataset) -> Any:
     if config.augmentation.mode is AugmentationMode.NONE:
         return build_training_batches(train_dataset, batch_size=config.batch_size)
 
-    pipeline = ImageAugmentationPipeline(
-        AugmentationPipelineConfig(geometric=config.augmentation.geometric, photometric=config.augmentation.photometric)
-    )
+    pipeline = _build_augmentation_pipeline(config)
     if config.augmentation.mode is AugmentationMode.OFFLINE:
         return build_static_augmented_batches(
             train_dataset,
@@ -273,6 +392,19 @@ def run_training(config: TrainingRunConfig, *, store: DirectoryFeatureStore | Sh
     split: SplitAssignment = random_split(
         rows, val_fraction=config.val_fraction, train_fraction=train_fraction, seed=config.seed
     )
+    if not split.train:
+        raise ValueError("training split is empty; adjust val_fraction/seed or add more samples")
+    dataset_fingerprint = _dataset_fingerprint(config.manifest_path, rows)
+    split_fingerprint = _stable_fingerprint(asdict(split))
+    encoder_fingerprint = _stable_fingerprint(
+        {"encoder": asdict(config.encoder_fingerprint), "base_url": config.encoder_base_url}
+    )
+    critical_fingerprints = {
+        "config": _stable_fingerprint(_critical_config(config)),
+        "dataset": dataset_fingerprint,
+        "split": split_fingerprint,
+        "encoder": encoder_fingerprint,
+    }
 
     train_dataset = ManifestDataset(config.manifest_path, sample_ids=split.train)
     val_dataset = ManifestDataset(config.manifest_path, sample_ids=split.val or split.train)
@@ -281,7 +413,21 @@ def run_training(config: TrainingRunConfig, *, store: DirectoryFeatureStore | Sh
     val_batches = build_training_batches(val_dataset, batch_size=config.batch_size)
 
     first_train_sample = train_dataset[0]
-    probe_sample = PreparedSample(sample_id=first_train_sample.sample_id, image=first_train_sample.image, target=None)
+    prepared_probe = prepare_sample(
+        first_train_sample,
+        mode=config.augmentation.mode,
+        pipeline=_build_augmentation_pipeline(config),
+        global_seed=config.seed,
+        variant=config.augmentation.variant,
+        epoch=0,
+        hybrid_online_probability=config.augmentation.hybrid_online_probability,
+    )
+    probe_sample = PreparedSample(
+        sample_id=prepared_probe.sample_id,
+        image=prepared_probe.image,
+        target=None,
+        augmentation_metadata=prepared_probe.augmentation_metadata,
+    )
     patch_dim, cls_dim = probe_feature_dims(provider, probe_sample)
     output_size = tuple(np.array(first_train_sample.target).shape)
 
@@ -301,44 +447,68 @@ def run_training(config: TrainingRunConfig, *, store: DirectoryFeatureStore | Sh
     checkpoint_manager = CheckpointManager(run_dir.checkpoints_dir, top_k=config.checkpoint_top_k)
     tracker = build_trackers(config.tracking, run_dir=run_dir, run_id=config.run_id)
 
+    trainer_config = replace(
+        config.trainer,
+        fingerprints={**config.trainer.fingerprints, **critical_fingerprints},
+    )
     trainer = Trainer(
         task=task,
         decoder=decoder,
         feature_provider=provider,
         optimizer=optimizer,
         scheduler=scheduler,
-        config=config.trainer,
+        config=trainer_config,
         checkpoint_manager=checkpoint_manager,
         tracker=tracker,
     )
 
-    val_metric = SegmentationMetric(num_classes=config.num_classes)
-    trainer.fit(
-        train_batches,
-        val_batches,
-        val_metric=val_metric,
-        val_metric_name=config.val_metric_name,
-        higher_is_better=config.higher_is_better,
-    )
-    final_val_metrics = val_metric.compute()
-    tracker.close()
+    if isinstance(train_batches, OnlineAugmentedBatches):
+        train_batches.set_epoch(trainer.state.epoch)
 
+    val_metric = SegmentationMetric(num_classes=config.num_classes)
+    try:
+        trainer.fit(
+            train_batches,
+            val_batches,
+            val_metric=val_metric,
+            val_metric_name=config.val_metric_name,
+            higher_is_better=config.higher_is_better,
+        )
+        final_val_metrics = val_metric.compute()
+    finally:
+        try:
+            tracker.close()
+        except Exception:
+            logger.exception("tracking backend failed while closing; training artifacts remain valid")
+        store.flush()
+
+    feature_cache_fingerprint = _stable_fingerprint(sorted(store.list_keys()))
     run_dir.write_provenance(
-        config_original={},
-        config_resolved={
-            "num_classes": config.num_classes,
-            "decoder": config.decoder_name,
-            "feature_provider": config.feature_provider,
-            "augmentation_mode": config.augmentation.mode.value,
-            "tracking_backends": config.tracking.backends,
-        },
+        config_original=_original_config(config),
+        config_resolved=_resolved_config(config),
         run_info={
             "seed": config.seed,
             "epoch": trainer.state.epoch,
             "global_optimizer_step": trainer.state.global_optimizer_step,
             "best_metric": trainer.state.best_metric,
+            "config_fingerprint": critical_fingerprints["config"],
+            "dataset_fingerprint": dataset_fingerprint,
+            "split_fingerprint": split_fingerprint,
+            "encoder_fingerprint": encoder_fingerprint,
+            "feature_cache_fingerprint": feature_cache_fingerprint,
         },
-        encoder_info={"model": config.encoder_fingerprint.model, "revision": config.encoder_fingerprint.revision},
+        dataset_info={
+            "manifest_path": config.manifest_path,
+            "fingerprint": dataset_fingerprint,
+            "split_fingerprint": split_fingerprint,
+            "split": asdict(split),
+        },
+        encoder_info={
+            "model": config.encoder_fingerprint.model,
+            "revision": config.encoder_fingerprint.revision,
+            "preprocessing": config.encoder_fingerprint.preprocessing,
+            "fingerprint": encoder_fingerprint,
+        },
     )
 
     return TrainingRunResult(

@@ -123,3 +123,11 @@ precisionai.agritune.api
    :members:
    :undoc-members:
    :show-inheritance:
+
+precisionai.agritune.api.routes
+----------------------------------
+
+.. automodule:: precisionai.agritune.api.routes
+   :members:
+   :undoc-members:
+   :show-inheritance:

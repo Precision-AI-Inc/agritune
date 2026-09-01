@@ -3,6 +3,7 @@
 
 """Unit tests for precisionai.agritune.tasks.segmentation.metrics.SegmentationMetric."""
 
+import pytest
 import torch
 
 from precisionai.agritune.schemas.protocols import Metric
@@ -53,6 +54,36 @@ def test_ignore_index_excludes_pixels() -> None:
     metric.update(predictions, targets)
     result = metric.compute()
     assert result["mean_iou"] == 1.0
+
+
+def test_update_rejects_out_of_range_targets() -> None:
+    metric = SegmentationMetric(num_classes=2)
+    with pytest.raises(ValueError, match=r"targets contain labels outside \[0, 2\)"):
+        metric.update(torch.tensor([[[0, 1]]]), torch.tensor([[[0, 2]]]))
+
+
+def test_update_rejects_out_of_range_predictions() -> None:
+    metric = SegmentationMetric(num_classes=2)
+    with pytest.raises(ValueError, match=r"predictions contain labels outside \[0, 2\)"):
+        metric.update(torch.tensor([[[0, 2]]]), torch.tensor([[[0, 1]]]))
+
+
+def test_update_rejects_wrong_output_rank() -> None:
+    metric = SegmentationMetric(num_classes=2)
+    with pytest.raises(ValueError, match="outputs must have shape"):
+        metric.update(torch.zeros(2, 2), torch.zeros(1, 2, 2, dtype=torch.long))
+
+
+def test_update_rejects_shape_mismatch() -> None:
+    metric = SegmentationMetric(num_classes=2)
+    with pytest.raises(ValueError, match="predictions and targets must share shape"):
+        metric.update(torch.zeros(1, 2, 2, dtype=torch.long), torch.zeros(1, 3, 3, dtype=torch.long))
+
+
+def test_update_rejects_wrong_logit_class_dimension() -> None:
+    metric = SegmentationMetric(num_classes=2)
+    with pytest.raises(ValueError, match="logits class dimension must be 2"):
+        metric.update(torch.zeros(1, 3, 2, 2), torch.zeros(1, 2, 2, dtype=torch.long))
 
 
 def test_multiple_updates_accumulate() -> None:

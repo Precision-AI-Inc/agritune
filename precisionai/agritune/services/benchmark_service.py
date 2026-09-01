@@ -144,6 +144,13 @@ async def run_benchmark(
     -------
     BenchmarkReport
     """
+    if not batch_sizes or any(batch_size < 1 for batch_size in batch_sizes):
+        raise ValueError("batch_sizes must contain only positive integers")
+    if not concurrencies or any(concurrency < 1 for concurrency in concurrencies):
+        raise ValueError("concurrencies must contain only positive integers")
+    if num_requests_per_combination < 1:
+        raise ValueError("num_requests_per_combination must be positive")
+
     results = [
         await _run_combination(
             encoder,

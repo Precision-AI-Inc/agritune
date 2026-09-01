@@ -11,6 +11,7 @@ The gateway itself satisfies :class:`~precisionai.agritune.schemas.protocols.Enc
 ``FeatureProvider`` can hold either a bare backend or a gateway-wrapped one without caring which.
 """
 
+import asyncio
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -153,7 +154,7 @@ class EncoderGateway:
             raise ValueError("images must be non-empty")
 
         batches = list(batch_items(images, max_batch_size=self._config.max_batch_images))
-        results = [await self._encode_batch(batch) for batch in batches]
+        results = await asyncio.gather(*(self._encode_batch(batch) for batch in batches))
         return concatenate_encoder_features(results)
 
     async def _encode_batch(self, batch: list[ImageInput]) -> EncoderFeatures:

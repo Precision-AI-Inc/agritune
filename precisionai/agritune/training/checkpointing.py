@@ -9,7 +9,7 @@ warns or fails when critical fingerprints differ (encoder revision changed, clas
 decoder architecture changed) — see ``agritune_implementation_plan.md`` §14.
 """
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -168,12 +168,14 @@ class CheckpointManager:
         if expected_fingerprints:
             self._check_fingerprints(fingerprints, expected_fingerprints, strict=strict)
 
+        allowed = {item.name for item in fields(TrainingState)}
+        training_payload = {key: value for key, value in payload["training_state"].items() if key in allowed}
         return Checkpoint(
             decoder_state=payload["decoder_state"],
             optimizer_state=payload["optimizer_state"],
             scheduler_state=payload["scheduler_state"],
             scaler_state=payload["scaler_state"],
-            training_state=TrainingState(**payload["training_state"]),
+            training_state=TrainingState(**training_payload),
             rng_state=payload["rng_state"],
             fingerprints=fingerprints,
         )

@@ -104,9 +104,16 @@ class RateLimiter:
         Parameters
         ----------
         num_images : int
-            Number of images the caller is about to send in this request, consumed from the
-            images/minute budget.
+            Positive number of images the caller is about to send in this request, consumed from
+            the images/minute budget.
+
+        Raises
+        ------
+        ValueError
+            If ``num_images`` is not positive.
         """
+        if num_images <= 0:
+            raise ValueError(f"num_images must be positive; got {num_images}")
         async with self._concurrency_semaphore:
             if self._request_bucket is not None:
                 await self._request_bucket.acquire(1.0)

@@ -3,6 +3,7 @@
 
 """Unit tests for precisionai.agritune.tasks.segmentation.losses."""
 
+import pytest
 import torch
 
 from precisionai.agritune.tasks.segmentation.losses import (
@@ -41,6 +42,25 @@ def test_cross_entropy_loss_ignore_index_excludes_pixels() -> None:
     assert loss.item() < 0.01
 
 
+def test_cross_entropy_loss_all_ignored_pixels_returns_differentiable_zero() -> None:
+    targets = torch.full((1, 2, 2), -100, dtype=torch.long)
+    logits = torch.randn(1, _NUM_CLASSES, 2, 2, requires_grad=True)
+
+    loss = cross_entropy_loss(logits, targets, ignore_index=-100)
+    loss.backward()
+
+    assert loss.item() == 0.0
+    assert logits.grad is not None
+    assert torch.all(logits.grad == 0.0)
+
+
+def test_cross_entropy_loss_rejects_nonignored_out_of_range_labels() -> None:
+    targets = torch.tensor([[[0, _NUM_CLASSES]]])
+    logits = torch.randn(1, _NUM_CLASSES, 1, 2)
+    with pytest.raises(ValueError, match=r"labels outside \[0, 3\)"):
+        cross_entropy_loss(logits, targets)
+
+
 def test_cross_entropy_loss_class_weights_changes_value() -> None:
     # A mix of classes is required: if every target were the same class, weighting cancels out
     # of the mean-reduction (sum(loss * w) / sum(w) collapses back to the unweighted mean).
@@ -74,6 +94,13 @@ def test_dice_loss_respects_ignore_index() -> None:
     logits = torch.randn(1, _NUM_CLASSES, 2, 2)
     loss = DiceLoss(num_classes=_NUM_CLASSES, ignore_index=-1)(logits, targets)
     assert torch.isfinite(loss)
+
+
+def test_dice_loss_rejects_nonignored_out_of_range_labels() -> None:
+    targets = torch.tensor([[[0, _NUM_CLASSES]]])
+    logits = torch.randn(1, _NUM_CLASSES, 1, 2)
+    with pytest.raises(ValueError, match=r"labels outside \[0, 3\)"):
+        DiceLoss(num_classes=_NUM_CLASSES)(logits, targets)
 
 
 def test_bce_with_logits_loss_is_low_for_confident_correct_predictions() -> None:

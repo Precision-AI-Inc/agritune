@@ -15,3 +15,10 @@ per-sample metadata) into `Sample` objects. Three split strategies (`precisionai
 even on a split produced by `random_split`. `agritune dataset validate` / `agritune dataset
 inspect` check for missing files, duplicate IDs, image/mask dimension mismatches, invalid labels,
 and report class-pixel-count statistics. See `agritune_implementation_plan.md` §5.
+
+## Preparing a dataset
+
+A worked example that downloads the public Crop/Weed Field Image Dataset (CWFID), converts its
+RGB annotations into single-channel class-index masks, and writes a manifest lives in
+[`examples/datasets/`](../examples/datasets/README.md). The end-to-end command sequence (validate
+→ feature build → train → evaluate → predict) is [`examples/SANITY_CHECK.md`](../examples/SANITY_CHECK.md).

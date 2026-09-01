@@ -29,6 +29,7 @@ from precisionai.agritune.services.training_service import AugmentationSelection
 from precisionai.agritune.tasks.segmentation.losses import SegmentationLossConfig
 from precisionai.agritune.training.precision import PrecisionConfig
 from precisionai.agritune.training.trainer import TrainerConfig
+from precisionai.agritune.utils.env import load_env_file
 
 
 def load_training_run_config(config_path: str, overrides: list[str] | None = None) -> TrainingRunConfig:
@@ -47,18 +48,31 @@ def load_training_run_config(config_path: str, overrides: list[str] | None = Non
     Returns
     -------
     TrainingRunConfig
+
+    See Also
+    --------
+    precisionai.agritune.utils.env.load_env_file : Loads a ``.env`` file so that
+        ``${oc.env:...}`` interpolations can resolve from it.
     """
+    # Must precede resolution: `${oc.env:...}` interpolations read os.environ, so a .env file
+    # only reaches them if it has been loaded into the environment by this point.
+    load_env_file()
+
     overrides = overrides or []
     path = Path(config_path)
     raw = OmegaConf.load(path)
 
+    original: dict[str, Any] = OmegaConf.to_container(raw, resolve=False)  # type: ignore[assignment]
     if isinstance(raw, DictConfig) and "defaults" in raw:
         resolved = _compose_config_groups(path, overrides)
     else:
         merged = OmegaConf.merge(raw, OmegaConf.from_dotlist(overrides)) if overrides else raw
         resolved = OmegaConf.to_container(merged, resolve=True)  # type: ignore[assignment]
 
-    return _config_from_dict(resolved)
+    config = _config_from_dict(resolved)
+    config.original_config = original
+    config.config_overrides = list(overrides)
+    return config
 
 
 def _compose_config_groups(config_path: Path, overrides: list[str]) -> dict[str, Any]:

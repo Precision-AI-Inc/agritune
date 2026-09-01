@@ -12,7 +12,7 @@ defaults:
   - augmentation: none
   - feature_provider: cached
   - task: segmentation
-  - decoder: linear
+  - decoder: mlp_probe
   - optimizer: adamw
   - scheduler: none
   - tracking: jsonl
@@ -34,6 +34,32 @@ agritune train --config precisionai/agritune/configs/config.yaml \
 `augmentation=online`/`hybrid` combined with `feature_provider=cached` is rejected before training
 starts — a cached provider's key would only ever match the first epoch's augmentation
 fingerprint. `agritune_implementation_plan.md` §23's own example of an invalid combination.
+
+## Secrets and `.env` files
+
+The `encoder=remote` group reads the API key from the environment rather than the config file:
+
+```yaml
+api_key: ${oc.env:AGRITUNE_ENCODER_API_KEY,null}
+```
+
+OmegaConf's `oc.env` resolver reads `os.environ` and nothing else — it has no `.env` support of its
+own. AgriTune bridges the gap by loading a `.env` file into the environment *before* composition,
+so the interpolation above resolves from a file with no change to any config:
+
+```bash
+pip install -e ".[dotenv]"      # python-dotenv is an optional extra
+cp .env.example .env            # then fill in AGRITUNE_ENCODER_API_KEY
+```
+
+- The nearest `.env` at or above the working directory is used; set `AGRITUNE_ENV_FILE` to point
+  somewhere else.
+- **Variables already exported in your shell always win** — a `.env` file never overwrites them.
+- `--api-key` on the CLI beats both.
+- Without `python-dotenv` installed, a discovered `.env` is skipped with a warning (never
+  silently); an explicitly requested one raises `ImportError`.
+- `.env` is gitignored; `.env.example` is committed. Never put a key in a config file — resolved
+  configs are written into `runs/<run_id>/` for reproducibility.
 
 ## Two ways to point ``--config`` at a file
 

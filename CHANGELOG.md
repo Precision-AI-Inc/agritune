@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- CWFID example: `examples/datasets/prepare_cwfid.py` downloads the public Crop/Weed Field Image
+  Dataset, writes an AgriTune manifest, and `examples/SANITY_CHECK.md` runs the full hosted-encoder
+  pipeline against it.
+- Optional `.env` support (`pip install pai-agritune[dotenv]`): a `.env` file is loaded into the
+  environment before Hydra composition, so `${oc.env:AGRITUNE_ENCODER_API_KEY,null}` in
+  `encoder/remote.yaml` resolves from it. Exported shell variables still take precedence, and
+  `AGRITUNE_ENV_FILE` selects a file outside the working directory.
 - Repository foundations: packaging, CI, pre-commit, structured logging, CLI entrypoint (`agritune --help`).
 - Core schemas/protocols, agricultural dataset/manifest/split system, deterministic augmentation
   pipeline, encoder abstraction (fake + remote) with a rate-limited/retrying gateway, feature
@@ -69,5 +76,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The image augmentation pipeline (`augmentations.image`) now composes
   [albumentations](https://albumentations.ai/) transforms instead of hand-rolled PIL/numpy code,
   using `Compose.set_random_seed` for the same exact-reproducibility guarantee as before.
+
+### Fixed
+
+- Flush partial gradient-accumulation windows instead of silently dropping their gradients.
+- Execute gateway-split encoder batches concurrently while preserving response order.
+- Preserve augmentation fingerprints through training batches so hybrid cache keys cannot reuse
+  stale features across different augmented images.
+- Harden variable-grid feature masking, remote-response validation, checkpoint fingerprints,
+  secret-safe run provenance, and tracker-failure isolation.
+- Persist early-stopping progress across resume so training cannot run extra epochs after a stop.
+- Derive feature-cache keys from a canonical JSON payload so delimiter characters in sample IDs
+  cannot collide with adjacent fingerprint fields.
+- Decode CLS embeddings from little-endian float32 base64, matching `encoding_format="base64"` on
+  the hosted encoder API — a float-list-only parser crashed on the real `pai-embedding` response.
 
 [Unreleased]: https://github.com/Precision-AI-Inc/agritune/compare/v0.1.0...HEAD

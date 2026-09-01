@@ -1,18 +1,69 @@
 # Copyright 2026 Precision AI
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for precisionai.agritune.tracking.comet_tracker.CometTracker.
+"""Unit tests for the optional Comet adapter without network access."""
 
-``comet_ml`` is an optional extra (``pai-agritune[tracking]``) and is not installed in the default
-test environment — this only exercises the missing-dependency error path, matching CLAUDE.md's
-optional-dependency pattern.
-"""
+from typing import Any
 
 import pytest
 
+from precisionai.agritune.tracking import comet_tracker
 from precisionai.agritune.tracking.comet_tracker import CometTracker
 
 
-def test_raises_import_error_with_install_hint_when_comet_missing() -> None:
+class _FakeExperiment:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, Any]] = []
+
+    def log_metrics(self, metrics: dict[str, float], *, step: int) -> None:
+        self.calls.append(("log_metrics", (metrics, step)))
+
+    def log_parameters(self, params: dict[str, Any]) -> None:
+        self.calls.append(("log_parameters", params))
+
+    def log_asset(self, path: str) -> None:
+        self.calls.append(("log_asset", path))
+
+    def end(self) -> None:
+        self.calls.append(("end", None))
+
+
+class _FakeComet:
+    def __init__(self) -> None:
+        self.constructor_args: tuple[str, str | None, str | None] | None = None
+        self.experiment = _FakeExperiment()
+
+    def __getattr__(self, name: str) -> Any:
+        if name == "Experiment":
+            return self._build_experiment
+        raise AttributeError(name)
+
+    def _build_experiment(self, *, project_name: str, api_key: str | None, workspace: str | None) -> _FakeExperiment:
+        self.constructor_args = (project_name, api_key, workspace)
+        return self.experiment
+
+
+def test_raises_import_error_with_install_hint_when_comet_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(comet_tracker, "_COMET_AVAILABLE", False)
     with pytest.raises(ImportError, match=r"pip install pai-agritune\[tracking\]"):
         CometTracker(project_name="agritune-test")
+
+
+def test_delegates_the_full_tracker_protocol(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeComet()
+    monkeypatch.setattr(comet_tracker, "_COMET_AVAILABLE", True)
+    monkeypatch.setattr(comet_tracker, "comet_ml", fake)
+
+    tracker = CometTracker(project_name="project", api_key="token", workspace="workspace")
+    tracker.log_metrics({"loss": 1.0}, step=2)
+    tracker.log_params({"lr": 0.1})
+    tracker.log_artifact("model.ckpt")
+    tracker.close()
+
+    assert fake.constructor_args == ("project", "token", "workspace")
+    assert fake.experiment.calls == [
+        ("log_metrics", ({"loss": 1.0}, 2)),
+        ("log_parameters", {"lr": 0.1}),
+        ("log_asset", "model.ckpt"),
+        ("end", None),
+    ]

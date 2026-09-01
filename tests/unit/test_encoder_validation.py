@@ -10,10 +10,16 @@ from precisionai.agritune.encoder.validation import EncoderConsistencyError, Enc
 from precisionai.agritune.schemas.features import EncoderFeatures
 
 
-def _features(*, patch_dim: int, cls_dim: int | None) -> EncoderFeatures:
+def _features(
+    *,
+    patch_dim: int,
+    cls_dim: int | None,
+    patch_dtype: torch.dtype = torch.float32,
+    cls_dtype: torch.dtype = torch.float32,
+) -> EncoderFeatures:
     return EncoderFeatures(
-        patch_tokens=torch.randn(1, 4, patch_dim),
-        cls_tokens=torch.randn(1, cls_dim) if cls_dim is not None else None,
+        patch_tokens=torch.randn(1, 4, patch_dim, dtype=patch_dtype),
+        cls_tokens=torch.randn(1, cls_dim, dtype=cls_dtype) if cls_dim is not None else None,
         patch_grid=torch.tensor([[2, 2]]),
         valid_patch_mask=None,
         image_sizes=[(224, 224)],
@@ -52,3 +58,17 @@ def test_cls_presence_drift_raises() -> None:
     validator.validate(_features(patch_dim=8, cls_dim=5))
     with pytest.raises(EncoderConsistencyError, match="dimensions changed mid-run"):
         validator.validate(_features(patch_dim=8, cls_dim=None))
+
+
+def test_patch_dtype_drift_raises() -> None:
+    validator = EncoderResponseValidator()
+    validator.validate(_features(patch_dim=8, cls_dim=5))
+    with pytest.raises(EncoderConsistencyError, match="dimensions changed mid-run"):
+        validator.validate(_features(patch_dim=8, cls_dim=5, patch_dtype=torch.float64))
+
+
+def test_cls_dtype_drift_raises() -> None:
+    validator = EncoderResponseValidator()
+    validator.validate(_features(patch_dim=8, cls_dim=5))
+    with pytest.raises(EncoderConsistencyError, match="dimensions changed mid-run"):
+        validator.validate(_features(patch_dim=8, cls_dim=5, cls_dtype=torch.float64))
