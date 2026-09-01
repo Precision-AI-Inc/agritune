@@ -4,19 +4,46 @@
 """``CometTracker`` — an optional Comet ML tracking backend.
 
 Requires the ``comet_ml`` package (``pip install pai-agritune[tracking]``); never required to run
-AgriTune otherwise. Comet asks that ``comet_ml`` be imported before ``torch`` in the process that
-uses it — see Comet's own setup docs; this module only performs that import when constructed.
+AgriTune otherwise.
+
+Unlike the other optional trackers, ``comet_ml`` is deliberately **not** imported at module level
+(a deviation from CLAUDE.md's usual "module-level try/except" pattern for optional deps, and from
+the docstring in this same section before it was fixed to match reality). Merely importing
+``comet_ml`` activates its automatic instrumentation of other frameworks present in the process
+(notably ``mlflow``) — it silently mirrors their logging calls into a hidden offline Comet
+experiment, regardless of whether any code ever constructs a Comet ``Experiment``. Since
+``precisionai.agritune.services.tracking_selection`` imports every tracker module up front to
+build its backend registry, an eager top-level import here would inject an uninvited Comet
+experiment into every run that selects a *different* backend (e.g. ``"mlflow"``) whenever
+``comet_ml`` merely happens to be installed alongside it — which it always is, since both ship in
+the same ``pai-agritune[tracking]`` extra. The import is therefore deferred to the first
+:class:`CometTracker` construction, so it only happens when a caller actually asks for Comet.
 """
 
 from typing import Any
 
-try:
-    import comet_ml
+comet_ml: Any = None
+_COMET_AVAILABLE = False
+_comet_import_attempted = False
 
-    _COMET_AVAILABLE = True
-except ImportError:
-    comet_ml: Any = None
-    _COMET_AVAILABLE = False
+
+def _ensure_comet_imported() -> None:
+    """Perform the (module-global, one-time) ``comet_ml`` import on first use.
+
+    A no-op after the first call — including when a test has monkeypatched ``_COMET_AVAILABLE``/
+    ``comet_ml`` directly, since that already implies an import was "attempted".
+    """
+    global comet_ml, _COMET_AVAILABLE, _comet_import_attempted  # noqa: PLW0603 — one-time lazy-import cache
+    if _comet_import_attempted:
+        return
+    _comet_import_attempted = True
+    try:
+        import comet_ml as _comet_ml_module  # noqa: PLC0415 — see module docstring: must not run at import time
+
+        comet_ml = _comet_ml_module
+        _COMET_AVAILABLE = True
+    except ImportError:
+        pass
 
 
 class CometTracker:
@@ -38,6 +65,7 @@ class CometTracker:
     """
 
     def __init__(self, *, project_name: str, api_key: str | None = None, workspace: str | None = None) -> None:
+        _ensure_comet_imported()
         if not _COMET_AVAILABLE:
             raise ImportError("comet_ml is required for CometTracker: pip install pai-agritune[tracking]") from None
         self._experiment = comet_ml.Experiment(project_name=project_name, api_key=api_key, workspace=workspace)

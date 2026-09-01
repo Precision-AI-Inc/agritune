@@ -9,6 +9,7 @@ statistic from it at :meth:`~SegmentationMetric.compute` time — satisfies
 """
 
 import torch
+from torch.nn import functional
 
 
 def _out_of_range_labels(values: torch.Tensor, *, num_classes: int) -> list[int]:
@@ -43,7 +44,10 @@ class SegmentationMetric:
         ----------
         outputs : torch.Tensor
             Either per-class logits, shape ``(B, num_classes, H, W)`` (argmax'd internally), or
-            already-computed predictions, shape ``(B, H, W)``.
+            already-computed predictions, shape ``(B, H, W)``. Logits are bilinearly resized to
+            ``targets``'s spatial size first if the two disagree — see ``losses.py``'s module
+            docstring on why a decoder's fixed ``output_size`` doesn't always match every batch's
+            targets (e.g. validation vs. geometrically-augmented training targets).
         targets : torch.Tensor
             Ground-truth class indices, shape ``(B, H, W)``.
         """
@@ -51,6 +55,8 @@ class SegmentationMetric:
             raise ValueError(f"outputs must have shape (B, H, W) or (B, C, H, W); got {tuple(outputs.shape)}")
         if outputs.ndim == 4 and outputs.shape[1] != self.num_classes:
             raise ValueError(f"logits class dimension must be {self.num_classes}; got {outputs.shape[1]}")
+        if outputs.ndim == 4 and outputs.shape[-2:] != targets.shape[-2:]:
+            outputs = functional.interpolate(outputs, size=targets.shape[-2:], mode="bilinear", align_corners=False)
         predictions = outputs.argmax(dim=1) if outputs.ndim == 4 else outputs
         if predictions.shape != targets.shape:
             raise ValueError(

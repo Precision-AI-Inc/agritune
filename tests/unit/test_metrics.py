@@ -80,6 +80,19 @@ def test_update_rejects_shape_mismatch() -> None:
         metric.update(torch.zeros(1, 2, 2, dtype=torch.long), torch.zeros(1, 3, 3, dtype=torch.long))
 
 
+def test_update_resizes_mismatched_logits_to_match_targets() -> None:
+    metric = SegmentationMetric(num_classes=2)
+    targets = torch.zeros(1, 2, 2, dtype=torch.long)
+    mismatched_logits = torch.zeros(1, 2, 4, 4)
+    mismatched_logits[:, 0] = 10.0  # confidently predicts class 0 everywhere, at 4x4 resolution
+
+    metric.update(mismatched_logits, targets)  # must not raise despite the spatial size mismatch
+
+    result = metric.compute()
+    assert result["pixel_accuracy"] == 1.0  # class 0 everywhere matches an all-zero target
+    assert result["iou_class_0"] == 1.0
+
+
 def test_update_rejects_wrong_logit_class_dimension() -> None:
     metric = SegmentationMetric(num_classes=2)
     with pytest.raises(ValueError, match="logits class dimension must be 2"):

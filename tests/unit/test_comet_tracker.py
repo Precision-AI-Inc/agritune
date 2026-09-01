@@ -43,7 +43,19 @@ class _FakeComet:
         return self.experiment
 
 
+def test_importing_module_does_not_import_comet_ml() -> None:
+    """Regression test: comet_ml auto-instruments other frameworks (e.g. mlflow) merely by being
+    imported, so importing this module — which happens unconditionally via
+    tracking_selection.py's backend registry, regardless of which backend is selected — must
+    never trigger a real ``import comet_ml`` as a side effect. Only constructing a CometTracker
+    may do that.
+    """
+    assert comet_tracker._comet_import_attempted is False
+    assert comet_tracker.comet_ml is None
+
+
 def test_raises_import_error_with_install_hint_when_comet_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(comet_tracker, "_comet_import_attempted", True)
     monkeypatch.setattr(comet_tracker, "_COMET_AVAILABLE", False)
     with pytest.raises(ImportError, match=r"pip install pai-agritune\[tracking\]"):
         CometTracker(project_name="agritune-test")
@@ -51,6 +63,7 @@ def test_raises_import_error_with_install_hint_when_comet_missing(monkeypatch: p
 
 def test_delegates_the_full_tracker_protocol(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _FakeComet()
+    monkeypatch.setattr(comet_tracker, "_comet_import_attempted", True)
     monkeypatch.setattr(comet_tracker, "_COMET_AVAILABLE", True)
     monkeypatch.setattr(comet_tracker, "comet_ml", fake)
 

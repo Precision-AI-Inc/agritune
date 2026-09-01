@@ -127,6 +127,31 @@ def _tupleize(data: dict[str, Any], *keys: str) -> dict[str, Any]:
     return result
 
 
+def load_augmentation_selection(config_path: str | None) -> AugmentationSelection:
+    """Load an :class:`AugmentationSelection` from a YAML file shaped like ``configs/augmentation/*.yaml``.
+
+    Shared by ``agritune features build --augmentation-config`` and ``POST /features/build``'s
+    ``augmentation_config_path``, so an offline-augmented feature cache and the training run that
+    reads it can point at the exact same file rather than duplicating (and risking a mismatched
+    copy of) the ``geometric``/``photometric`` parameters — see ``docs/feature-caching.md``.
+
+    Parameters
+    ----------
+    config_path : str | None
+        Path to a YAML file with top-level ``mode``/``variant``/``geometric``/``photometric`` keys
+        (e.g. ``precisionai/agritune/configs/augmentation/offline.yaml``); ``None`` returns the
+        default selection (``mode: none`` — no augmentation).
+
+    Returns
+    -------
+    AugmentationSelection
+    """
+    if config_path is None:
+        return AugmentationSelection()
+    data: dict[str, Any] = OmegaConf.to_container(OmegaConf.load(config_path), resolve=True)  # type: ignore[assignment]
+    return _augmentation_from_dict(data)
+
+
 def _augmentation_from_dict(data: dict[str, Any]) -> AugmentationSelection:
     geometric_data = _tupleize(dict(data.get("geometric") or {}), "resize", "random_crop")
     photometric_data = _tupleize(

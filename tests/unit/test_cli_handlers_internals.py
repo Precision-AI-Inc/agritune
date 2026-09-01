@@ -52,6 +52,8 @@ def test_features_build_reports_failure_and_exits_nonzero(
     args = argparse.Namespace(
         manifest=str(manifest_path),
         store=str(tmp_path / "features"),
+        augmentation_config=None,
+        seed=0,
         base_url=None,
         api_key=None,
         model="pai-embedding",

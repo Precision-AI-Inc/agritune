@@ -13,7 +13,8 @@ import sys
 
 from PIL import Image
 
-from precisionai.agritune.cli.config import load_training_run_config
+from precisionai.agritune.augmentations.image.pipeline import AugmentationPipelineConfig, ImageAugmentationPipeline
+from precisionai.agritune.cli.config import load_augmentation_selection, load_training_run_config
 from precisionai.agritune.features.integrity import verify_store
 from precisionai.agritune.features.keys import EncoderFingerprint
 from precisionai.agritune.features.manifest import FeatureManifest
@@ -28,6 +29,7 @@ from precisionai.agritune.services.evaluation_service import EvaluationRunConfig
 from precisionai.agritune.services.feature_service import build_features
 from precisionai.agritune.services.prediction_service import PredictionRunConfig, run_prediction
 from precisionai.agritune.services.training_service import run_training
+from precisionai.agritune.tasks.segmentation.losses import SegmentationLossConfig
 
 logger = get_logger(__name__)
 
@@ -66,6 +68,10 @@ def features_build(args: argparse.Namespace) -> int:
     """Handle ``agritune features build``."""
     store = DirectoryFeatureStore(args.store)
     encoder, fingerprint = _build_encoder(args)
+    augmentation = load_augmentation_selection(args.augmentation_config)
+    pipeline = ImageAugmentationPipeline(
+        AugmentationPipelineConfig(geometric=augmentation.geometric, photometric=augmentation.photometric)
+    )
 
     def on_progress(stats: PrecomputeStats) -> None:
         done = stats.computed + stats.skipped + stats.failed
@@ -77,7 +83,15 @@ def features_build(args: argparse.Namespace) -> int:
 
     stats = asyncio.run(
         build_features(
-            args.manifest, store=store, encoder=encoder, encoder_fingerprint=fingerprint, on_progress=on_progress
+            args.manifest,
+            store=store,
+            encoder=encoder,
+            encoder_fingerprint=fingerprint,
+            augmentation_mode=augmentation.mode,
+            augmentation_pipeline=pipeline,
+            global_seed=args.seed,
+            augmentation_variant=augmentation.variant,
+            on_progress=on_progress,
         )
     )
     print(file=sys.stderr)
@@ -131,6 +145,7 @@ def train(args: argparse.Namespace) -> int:
     result = run_training(config, store=store)
     print(f"run directory: {result.run_directory.path}")
     print(f"final epoch: {result.final_train_state['epoch']}")
+    print(f"train metrics: {result.train_metrics}")
     print(f"val metrics: {result.val_metrics}")
     return 0
 
@@ -148,6 +163,12 @@ def evaluate(args: argparse.Namespace) -> int:
         decoder_name=args.decoder,
         batch_size=args.batch_size,
         sample_ids=args.sample_ids or None,
+        loss=SegmentationLossConfig(
+            name=args.loss_name,
+            ignore_index=args.loss_ignore_index,
+            ce_weight=args.loss_ce_weight,
+            dice_weight=args.loss_dice_weight,
+        ),
     )
     metrics = run_evaluation(config, store=store)
     print(json.dumps(metrics, indent=2))
@@ -194,13 +215,16 @@ def encoder_benchmark(args: argparse.Namespace) -> int:
     )
 
     for result in report.results:
-        print(
+        line = (
             f"batch={result.batch_size:>3} concurrency={result.concurrency:>3}  "
             f"{result.images_per_second:6.2f} img/s  "
             f"p50={result.latency_p50_seconds * 1000:6.1f}ms  "
             f"p95={result.latency_p95_seconds * 1000:6.1f}ms  "
             f"errors={result.error_count}"
         )
+        if result.sample_error is not None:
+            line += f"  ({result.sample_error})"
+        print(line)
 
     best = report.best
     if best is None:

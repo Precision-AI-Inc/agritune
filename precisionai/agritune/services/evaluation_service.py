@@ -53,6 +53,9 @@ class EvaluationRunConfig:
     sample_ids : list[str] | None
         Restrict evaluation to these sample IDs (e.g. a held-out test split); ``None`` evaluates
         every row in the manifest.
+    loss : SegmentationLossConfig
+        Should match the loss the checkpoint was trained under, or the reported ``"loss"`` value
+        won't be comparable to training/validation loss from that run.
     """
 
     manifest_path: str
@@ -63,6 +66,7 @@ class EvaluationRunConfig:
     decoder_kwargs: dict[str, Any] = field(default_factory=dict)
     batch_size: int = 4
     sample_ids: list[str] | None = None
+    loss: SegmentationLossConfig = field(default_factory=SegmentationLossConfig)
 
 
 def run_evaluation(config: EvaluationRunConfig, *, store: FeatureStore) -> dict[str, float]:
@@ -78,7 +82,8 @@ def run_evaluation(config: EvaluationRunConfig, *, store: FeatureStore) -> dict[
     -------
     dict[str, float]
         The metrics :meth:`~precisionai.agritune.tasks.segmentation.metrics.SegmentationMetric.compute`
-        reports.
+        reports, plus a ``"loss"`` entry computed under ``config.loss``
+        (see :func:`~precisionai.agritune.training.evaluator.evaluate`).
 
     Raises
     ------
@@ -111,6 +116,6 @@ def run_evaluation(config: EvaluationRunConfig, *, store: FeatureStore) -> dict[
     decoder.load_state_dict(checkpoint.decoder_state)
     decoder.eval()
 
-    task = SegmentationTask(decoder, SegmentationLoss(SegmentationLossConfig(), num_classes=config.num_classes))
+    task = SegmentationTask(decoder, SegmentationLoss(config.loss, num_classes=config.num_classes))
     metric = SegmentationMetric(num_classes=config.num_classes)
     return evaluate(task, provider, batches, metric)

@@ -66,6 +66,19 @@ class FeaturesBuildRequest(BaseModel):
     manifest_path: str
     store: str
     encoder: EncoderSelection = Field(default_factory=EncoderSelection)
+    augmentation_config_path: str | None = Field(
+        default=None,
+        description="Path (on the server) to a YAML file shaped like configs/augmentation/"
+        "{none,offline}.yaml; omit for no augmentation. mode must be 'none' or 'offline' — online/"
+        "hybrid augmentation cannot be finitely precomputed. Point this at the exact same file the "
+        "training config's augmentation: block will use, or the feature cache keys won't match.",
+    )
+    seed: int = Field(
+        default=0,
+        description="Global seed offline augmentation derives each sample's seed from — must match "
+        "the training config's top-level seed (only consulted when the augmentation config's mode is "
+        "'offline').",
+    )
 
 
 class FeaturesBuildResponse(BaseModel):
@@ -120,6 +133,7 @@ class TrainResponse(BaseModel):
     final_epoch: int
     global_optimizer_step: int
     best_metric: float | None
+    train_metrics: dict[str, float]
     val_metrics: dict[str, float]
 
 
@@ -137,6 +151,25 @@ class ScoredRunRequest(BaseModel):
     batch_size: int = 4
     sample_ids: list[str] | None = None
     encoder_fingerprint: EncoderFingerprintRequest = Field(default_factory=EncoderFingerprintRequest)
+
+
+class LossConfigRequest(BaseModel):
+    """Which loss to reconstruct the reported ``"loss"`` metric under — mirrors ``--loss-*`` in the CLI.
+
+    Should match the loss the checkpoint was trained under, or the reported value won't be
+    comparable to training/validation loss from that run.
+    """
+
+    name: str = Field(default="ce", description='"ce", "bce", "dice", "ce_dice", or "bce_dice".')
+    ignore_index: int = Field(default=-100, description="Pixel value excluded from the loss.")
+    ce_weight: float = Field(default=1.0, description="Weight of the CE/BCE term in a combined loss.")
+    dice_weight: float = Field(default=1.0, description="Weight of the Dice term in a combined loss.")
+
+
+class EvaluateRequest(ScoredRunRequest):
+    """Body for ``POST /evaluate``."""
+
+    loss: LossConfigRequest = Field(default_factory=LossConfigRequest)
 
 
 class EvaluateResponse(BaseModel):

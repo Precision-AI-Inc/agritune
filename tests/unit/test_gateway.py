@@ -9,6 +9,7 @@ metrics, and flags a mid-run encoder dimension drift).
 """
 
 import asyncio
+import logging
 from collections.abc import Sequence
 from typing import Any
 
@@ -147,6 +148,19 @@ async def test_exhausts_retries_and_records_failure() -> None:
     assert gateway.metrics.requests_failed == 1
     assert gateway.metrics.timeout_count == 3
     assert gateway.metrics.requests_retried == 2  # first two failures retried, third exhausts
+
+
+async def test_retry_attempts_are_logged(caplog: pytest.LogCaptureFixture) -> None:
+    """Every retry attempt must be visible in logs — a bounded retry-then-fail run and a hang
+    look identical from the terminal otherwise."""
+    backend = _ScriptedBackend([EncoderTimeoutError("slow"), EncoderTimeoutError("slow"), EncoderTimeoutError("slow")])
+    gateway = EncoderGateway(backend, _no_backoff_config())
+
+    with caplog.at_level(logging.WARNING, logger="agritune.encoder.gateway"), pytest.raises(RetryExhaustedError):
+        await gateway.encode([1])
+
+    assert caplog.text.count("retrying with backoff") == 2
+    assert caplog.text.count("no attempts remaining") == 1
 
 
 async def test_dimension_drift_across_batches_raises_consistency_error() -> None:

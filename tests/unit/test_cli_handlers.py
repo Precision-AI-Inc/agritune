@@ -56,6 +56,85 @@ def test_features_build_computes_and_reports_stats(tmp_path: Path, capsys: pytes
     assert store_path.is_dir()
 
 
+def test_features_build_with_offline_augmentation_also_computes_the_augmented_variant(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    manifest_path = build_manifest(tmp_path)
+    store_path = tmp_path / "features"
+    augmentation_config_path = tmp_path / "augmentation.yaml"
+    augmentation_config_path.write_text(
+        yaml.safe_dump({"mode": "offline", "variant": 0, "geometric": {"horizontal_flip_probability": 0.5}})
+    )
+
+    exit_code = main(
+        [
+            "features",
+            "build",
+            "--manifest",
+            str(manifest_path),
+            "--store",
+            str(store_path),
+            "--augmentation-config",
+            str(augmentation_config_path),
+            "--seed",
+            "0",
+        ]
+    )
+
+    assert exit_code == 0
+    assert "computed=8" in capsys.readouterr().out  # 4 samples x (unaugmented + one offline variant)
+
+
+def test_train_reads_an_offline_augmented_cache_built_via_the_cli(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    store_path = tmp_path / "features"
+    augmentation = {"mode": "offline", "variant": 0, "geometric": {"horizontal_flip_probability": 0.5}}
+    augmentation_config_path = tmp_path / "augmentation.yaml"
+    augmentation_config_path.write_text(yaml.safe_dump(augmentation))
+
+    build_exit_code = main(
+        [
+            "features",
+            "build",
+            "--manifest",
+            str(manifest_path),
+            "--store",
+            str(store_path),
+            "--augmentation-config",
+            str(augmentation_config_path),
+            "--seed",
+            "0",
+        ]
+    )
+    assert build_exit_code == 0
+    capsys.readouterr()
+
+    config = {
+        "manifest_path": str(manifest_path),
+        "feature_store_dir": str(store_path),
+        "run_root": str(tmp_path / "runs"),
+        "run_id": "offline-aug-run",
+        "num_classes": 2,
+        "encoder_fingerprint": {"model": "fake-encoder", "revision": "fake-v1", "preprocessing": ""},
+        "feature_provider": "cached",
+        "augmentation": augmentation,
+        "seed": 0,
+        "batch_size": 2,
+        "val_fraction": 0.34,
+        "optimizer": {"name": "adamw", "lr": 0.05},
+        "trainer": {"max_epochs": 1},
+    }
+    config_path = tmp_path / "train.yaml"
+    config_path.write_text(yaml.safe_dump(config))
+
+    exit_code = main(["train", "--config", str(config_path)])
+
+    assert exit_code == 0
+    assert "final epoch: 1" in capsys.readouterr().out
+
+
 def test_train_runs_full_pipeline_from_yaml_config(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
     store_path = tmp_path / "features"
@@ -86,6 +165,7 @@ def test_train_runs_full_pipeline_from_yaml_config(tmp_path: Path, capsys: pytes
     out = capsys.readouterr().out
     assert "run directory" in out
     assert "final epoch: 2" in out
+    assert "train metrics" in out
     assert (tmp_path / "runs" / "cli-run" / "checkpoints" / "last.ckpt").is_file()
 
 
@@ -220,6 +300,30 @@ def test_evaluate_reports_metrics(tmp_path: Path, capsys: pytest.CaptureFixture[
     assert exit_code == 0
     result = json.loads(capsys.readouterr().out)
     assert "mean_iou" in result
+
+
+def test_evaluate_reports_loss_under_requested_loss_config(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    manifest_path, store_path, checkpoint_path = _build_features_and_train_via_cli(tmp_path, capsys)
+
+    exit_code = main(
+        [
+            "evaluate",
+            "--manifest",
+            str(manifest_path),
+            "--store",
+            str(store_path),
+            "--checkpoint",
+            str(checkpoint_path),
+            "--num-classes",
+            "2",
+            "--loss-name",
+            "dice",
+        ]
+    )
+
+    assert exit_code == 0
+    result = json.loads(capsys.readouterr().out)
+    assert "loss" in result
 
 
 def test_predict_writes_prediction_files(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

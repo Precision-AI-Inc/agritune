@@ -70,6 +70,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for `TokenFPNDecoder`'s `cls_fusion`/`hidden_dim`, previously unconfigurable outside direct
   Python construction) — set via each decoder's own Hydra config-group variant
   (`configs/decoder/{mlp_probe,token_fpn,aspp,ppm,segmenter,mask_former}.yaml`).
+- `Trainer.fit`'s optional `train_metric` parameter: a `Metric` accumulated over every training
+  batch each epoch (reset at the epoch's start) and logged as `train_{name}` (e.g. `train_mean_iou`)
+  alongside the existing `train_loss`/`lr`, exposed via `Trainer.last_train_metrics`. `run_training`
+  now always passes one, so `TrainingRunResult.train_metrics` / `agritune train`'s printed summary
+  / `POST /train`'s response report full segmentation metrics for the training set too, not just
+  loss — useful for spotting a train/val gap, though noisier than validation since it reflects a
+  moving model on (possibly augmented) training batches.
+- `Evaluator.evaluate` (shared by `Trainer`'s validation pass and `agritune evaluate`) now also
+  computes a batch-size-weighted mean loss and adds it to its returned dict as `"loss"`, so
+  `val_metric_name: loss` (with `higher_is_better: false`) works as a checkpoint/early-stopping
+  signal. `EvaluationRunConfig`/`agritune evaluate --loss-*`/`POST /evaluate`'s `loss` field let the
+  loss config used for this be set to match what a checkpoint was actually trained under.
+- `agritune features build --augmentation-config <path> --seed <int>` (and `POST /features/build`'s
+  matching `augmentation_config_path`/`seed` fields): precomputes a deterministic offline-augmented
+  variant alongside the unaugmented features, closing a gap where `feature_service.build_features`
+  already supported `augmentation_mode=OFFLINE` but neither entry point exposed it. The
+  `--augmentation-config` file is the same `mode`/`variant`/`geometric`/`photometric` shape as
+  `configs/augmentation/*.yaml` — point both the build and the training config's `augmentation:`
+  block at the same file so their cache keys match. New `cli.config.load_augmentation_selection`
+  shares the parsing between the CLI and the API route.
 
 ### Changed
 
@@ -90,5 +110,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cannot collide with adjacent fingerprint fields.
 - Decode CLS embeddings from little-endian float32 base64, matching `encoding_format="base64"` on
   the hosted encoder API — a float-list-only parser crashed on the real `pai-embedding` response.
+- Defer `comet_ml`'s import to `CometTracker` construction instead of importing it at module load.
+  `comet_ml` auto-instruments other frameworks in the process (notably `mlflow`) merely by being
+  imported; since `tracking_selection.py` imports every tracker module up front, selecting any
+  *other* backend (e.g. `mlflow`) silently created an uninvited offline Comet experiment whenever
+  `comet_ml` happened to be installed alongside it — which it always is, since both ship in the
+  `pai-agritune[tracking]` extra.
+- Derive a training run's decoder `output_size` from the actually-augmented probe sample instead
+  of the raw pre-augmentation one, so `augmentation.geometric.resize`/`random_crop` (which change
+  spatial size) no longer builds a decoder upsampling to the wrong resolution.
+  `SegmentationLoss.forward`/`SegmentationMetric.update` now also bilinearly resize logits to the
+  target's spatial size when they differ, since validation targets are never augmented and can
+  therefore legitimately disagree with training's working resolution under one fixed decoder.
+- Log every encoder retry attempt (`EncoderGateway`) at `WARNING` instead of only counting it in
+  metrics — a bounded retry-then-fail run and an actual hang were previously indistinguishable from
+  the terminal, since nothing was printed during the backoff sleeps between attempts.
 
 [Unreleased]: https://github.com/Precision-AI-Inc/agritune/compare/v0.1.0...HEAD

@@ -134,6 +134,20 @@ def test_segmentation_loss_bce() -> None:
     assert torch.isfinite(loss)
 
 
+def test_segmentation_loss_resizes_logits_to_match_a_differently_sized_target() -> None:
+    targets = torch.randint(0, _NUM_CLASSES, (1, 4, 4))
+    mismatched_logits = torch.randn(1, _NUM_CLASSES, 8, 8)
+    resized_logits = torch.nn.functional.interpolate(
+        mismatched_logits, size=(4, 4), mode="bilinear", align_corners=False
+    )
+    loss_fn = SegmentationLoss(SegmentationLossConfig(name="ce"), num_classes=_NUM_CLASSES)
+
+    loss = loss_fn(mismatched_logits, targets)
+
+    assert torch.isfinite(loss)
+    assert torch.isclose(loss, cross_entropy_loss(resized_logits, targets, ignore_index=-100))
+
+
 def test_segmentation_loss_ce_dice_combines_both_terms() -> None:
     targets = torch.randint(0, _NUM_CLASSES, (1, 4, 4))
     logits = torch.randn(1, _NUM_CLASSES, 4, 4)

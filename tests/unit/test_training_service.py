@@ -108,6 +108,7 @@ def test_run_training_default_config_is_backward_compatible(tmp_path: Path) -> N
 
     assert result.final_train_state["epoch"] == 1
     assert "mean_iou" in result.val_metrics
+    assert "mean_iou" in result.train_metrics
 
     run_dir = result.run_directory.path
     assert (run_dir / "dataset.json").is_file()
@@ -160,6 +161,31 @@ def test_run_training_with_offline_augmentation(tmp_path: Path) -> None:
     result = run_training(config, store=store)
 
     assert result.final_train_state["epoch"] == 1
+
+
+def test_run_training_with_resizing_augmentation_does_not_crash_on_target_shape_mismatch(tmp_path: Path) -> None:
+    """Regression test: geometric augmentation with resize/random_crop changes training targets'
+    spatial size, but validation targets are never augmented — the decoder's one fixed output_size
+    must be derived from the augmented shape, and loss/metric computation must tolerate validation
+    (or any other) batch not matching it."""
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    store = DirectoryFeatureStore(tmp_path / "features")
+
+    config = _base_config(
+        tmp_path,
+        manifest_path,
+        run_id="resize-aug-run",
+        feature_provider="online",
+        augmentation=AugmentationSelection(
+            mode=AugmentationMode.OFFLINE,
+            geometric=GeometricConfig(resize=(6, 6), random_crop=(4, 4)),
+        ),
+    )
+    result = run_training(config, store=store)
+
+    assert result.final_train_state["epoch"] == 1
+    assert "mean_iou" in result.train_metrics
+    assert "mean_iou" in result.val_metrics
 
 
 def test_offline_precomputed_features_are_compatible_with_cached_training(tmp_path: Path) -> None:

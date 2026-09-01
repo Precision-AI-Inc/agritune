@@ -61,6 +61,33 @@ async def test_run_benchmark_records_errors_and_zero_throughput() -> None:
     assert result.latency_p50_seconds == 0.0
 
 
+async def test_run_benchmark_records_sample_error_message() -> None:
+    encoder = FakeEncoderBackend(FakeEncoderConfig(failure_probability=1.0, status_code_on_failure=503))
+    report = await run_benchmark(
+        encoder,
+        batch_sizes=[1],
+        concurrencies=[1],
+        image_factory=_image_factory,
+        num_requests_per_combination=2,
+    )
+    result = report.results[0]
+    assert result.sample_error is not None
+    assert result.sample_error.startswith("503:")
+    assert "simulated 503" in result.sample_error
+
+
+async def test_run_benchmark_sample_error_is_none_on_success() -> None:
+    encoder = FakeEncoderBackend()
+    report = await run_benchmark(
+        encoder,
+        batch_sizes=[1],
+        concurrencies=[1],
+        image_factory=_image_factory,
+        num_requests_per_combination=2,
+    )
+    assert report.results[0].sample_error is None
+
+
 @pytest.mark.parametrize(
     ("batch_sizes", "concurrencies", "num_requests", "message"),
     [

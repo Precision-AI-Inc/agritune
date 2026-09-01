@@ -273,12 +273,15 @@ class TrainingRunResult:
     run_directory : RunDirectory
     final_train_state : dict[str, Any]
         A plain-dict snapshot of the trainer's final :class:`~precisionai.agritune.training.state.TrainingState`.
+    train_metrics : dict[str, float]
+        The last training epoch's metrics (see ``Trainer.fit``'s ``train_metric`` parameter).
     val_metrics : dict[str, float]
         The last validation pass's metrics.
     """
 
     run_directory: RunDirectory
     final_train_state: dict[str, Any]
+    train_metrics: dict[str, float]
     val_metrics: dict[str, float]
 
 
@@ -429,7 +432,10 @@ def run_training(config: TrainingRunConfig, *, store: DirectoryFeatureStore | Sh
         augmentation_metadata=prepared_probe.augmentation_metadata,
     )
     patch_dim, cls_dim = probe_feature_dims(provider, probe_sample)
-    output_size = tuple(np.array(first_train_sample.target).shape)
+    # From the *augmented* target, not first_train_sample.target directly: geometric augmentation
+    # (resize/random_crop) changes the spatial size every training batch's target actually has, so
+    # probing the pre-augmentation sample would build a decoder upsampling to the wrong resolution.
+    output_size = tuple(np.array(prepared_probe.target).shape)
 
     decoder = build_decoder(
         config.decoder_name,
@@ -465,16 +471,21 @@ def run_training(config: TrainingRunConfig, *, store: DirectoryFeatureStore | Sh
     if isinstance(train_batches, OnlineAugmentedBatches):
         train_batches.set_epoch(trainer.state.epoch)
 
+    train_metric = SegmentationMetric(num_classes=config.num_classes)
     val_metric = SegmentationMetric(num_classes=config.num_classes)
     try:
         trainer.fit(
             train_batches,
             val_batches,
+            train_metric=train_metric,
             val_metric=val_metric,
             val_metric_name=config.val_metric_name,
             higher_is_better=config.higher_is_better,
         )
-        final_val_metrics = val_metric.compute()
+        final_train_metrics = (
+            trainer.last_train_metrics if trainer.last_train_metrics is not None else train_metric.compute()
+        )
+        final_val_metrics = trainer.last_val_metrics if trainer.last_val_metrics is not None else val_metric.compute()
     finally:
         try:
             tracker.close()
@@ -518,5 +529,6 @@ def run_training(config: TrainingRunConfig, *, store: DirectoryFeatureStore | Sh
             "global_optimizer_step": trainer.state.global_optimizer_step,
             "best_metric": trainer.state.best_metric,
         },
+        train_metrics=final_train_metrics,
         val_metrics=final_val_metrics,
     )

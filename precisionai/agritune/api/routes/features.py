@@ -13,6 +13,8 @@ from precisionai.agritune.api.schemas import (
     FeaturesStoreRequest,
     FeaturesVerifyResponse,
 )
+from precisionai.agritune.augmentations.image.pipeline import AugmentationPipelineConfig, ImageAugmentationPipeline
+from precisionai.agritune.cli.config import load_augmentation_selection
 from precisionai.agritune.features.integrity import verify_store
 from precisionai.agritune.features.manifest import FeatureManifest
 from precisionai.agritune.features.store import DirectoryFeatureStore
@@ -32,7 +34,20 @@ async def build(request: FeaturesBuildRequest) -> FeaturesBuildResponse:
         model=request.encoder.model,
         preprocessing=request.encoder.preprocessing,
     )
-    stats = await build_features(request.manifest_path, store=store, encoder=encoder, encoder_fingerprint=fingerprint)
+    augmentation = load_augmentation_selection(request.augmentation_config_path)
+    pipeline = ImageAugmentationPipeline(
+        AugmentationPipelineConfig(geometric=augmentation.geometric, photometric=augmentation.photometric)
+    )
+    stats = await build_features(
+        request.manifest_path,
+        store=store,
+        encoder=encoder,
+        encoder_fingerprint=fingerprint,
+        augmentation_mode=augmentation.mode,
+        augmentation_pipeline=pipeline,
+        global_seed=request.seed,
+        augmentation_variant=augmentation.variant,
+    )
     return FeaturesBuildResponse(
         total=stats.total,
         computed=stats.computed,

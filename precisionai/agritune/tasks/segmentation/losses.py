@@ -7,6 +7,12 @@ Every loss takes ``logits`` of shape ``(B, num_classes, H, W)`` and ``targets`` 
 ``(B, H, W)`` holding integer class indices (a single-label per-pixel class map) — including the
 BCE variant, which internally one-hot encodes ``targets`` and applies a per-class independent
 binary loss. ``ignore_index`` excludes pixels (e.g. a "void"/unlabeled class) from every loss.
+
+A decoder's ``output_size`` (its fixed upsample target, set once at construction) does not
+necessarily match every batch's targets — most notably, validation targets are never resized by
+geometric augmentation while training targets may be (``resize``/``random_crop``), so the two
+splits can legitimately disagree on spatial size. ``SegmentationLoss.forward`` bilinearly resizes
+``logits`` to ``targets``'s spatial size whenever they differ, rather than requiring an exact match.
 """
 
 from dataclasses import dataclass
@@ -146,6 +152,8 @@ class SegmentationLoss(nn.Module):
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """Compute the configured loss for one batch."""
+        if logits.shape[-2:] != targets.shape[-2:]:
+            logits = functional.interpolate(logits, size=targets.shape[-2:], mode="bilinear", align_corners=False)
         config = self._config
         if config.name == "ce":
             return cross_entropy_loss(

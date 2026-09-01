@@ -35,6 +35,9 @@ class BenchmarkResult:
         Percentiles over successful requests' latencies; ``0.0`` if every request failed.
     error_count : int
         Requests that raised an :class:`~precisionai.agritune.encoder.errors.EncoderError`.
+    sample_error : str | None
+        Message from the first failing request in this combination, prefixed with its HTTP
+        status code when one is available; ``None`` when ``error_count`` is ``0``.
     """
 
     batch_size: int
@@ -44,6 +47,7 @@ class BenchmarkResult:
     latency_p95_seconds: float
     latency_p99_seconds: float
     error_count: int
+    sample_error: str | None = None
 
 
 @dataclass
@@ -73,6 +77,11 @@ def _percentile(sorted_values: list[float], fraction: float) -> float:
     return sorted_values[index]
 
 
+def _format_error(exc: EncoderError) -> str:
+    message = " ".join(str(exc).split())[:200]
+    return f"{exc.status_code}: {message}" if exc.status_code is not None else message
+
+
 async def _run_combination(
     encoder: EncoderBackend,
     *,
@@ -83,17 +92,20 @@ async def _run_combination(
 ) -> BenchmarkResult:
     latencies: list[float] = []
     errors = 0
+    sample_error: str | None = None
     semaphore = asyncio.Semaphore(concurrency)
 
     async def one_request() -> None:
-        nonlocal errors
+        nonlocal errors, sample_error
         async with semaphore:
             images = [image_factory() for _ in range(batch_size)]
             start = time.monotonic()
             try:
                 await encoder.encode(images)
-            except EncoderError:
+            except EncoderError as exc:
                 errors += 1
+                if sample_error is None:
+                    sample_error = _format_error(exc)
                 return
             latencies.append(time.monotonic() - start)
 
@@ -113,6 +125,7 @@ async def _run_combination(
         latency_p95_seconds=_percentile(sorted_latencies, 0.95),
         latency_p99_seconds=_percentile(sorted_latencies, 0.99),
         error_count=errors,
+        sample_error=sample_error,
     )
 
 

@@ -7,7 +7,8 @@ from pathlib import Path
 
 import yaml
 
-from precisionai.agritune.cli.config import load_training_run_config
+from precisionai.agritune.augmentations.image.pipeline import AugmentationMode
+from precisionai.agritune.cli.config import load_augmentation_selection, load_training_run_config
 
 _BASE_CONFIG = {
     "manifest_path": "manifest.csv",
@@ -36,6 +37,32 @@ def test_scheduler_is_none_when_omitted(tmp_path: Path) -> None:
     path = _write_config(tmp_path, {})
     config = load_training_run_config(str(path))
     assert config.scheduler is None
+
+
+def test_load_augmentation_selection_defaults_to_none_mode() -> None:
+    selection = load_augmentation_selection(None)
+    assert selection.mode is AugmentationMode.NONE
+
+
+def test_load_augmentation_selection_reads_offline_config(tmp_path: Path) -> None:
+    path = tmp_path / "augmentation.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "mode": "offline",
+                "variant": 2,
+                "geometric": {"horizontal_flip_probability": 0.5, "rotation_max_degrees": 10.0},
+                "photometric": {"brightness_range": [0.8, 1.2]},
+            }
+        )
+    )
+
+    selection = load_augmentation_selection(str(path))
+
+    assert selection.mode is AugmentationMode.OFFLINE
+    assert selection.variant == 2
+    assert selection.geometric.horizontal_flip_probability == 0.5
+    assert selection.photometric.brightness_range == (0.8, 1.2)
 
 
 def test_scheduler_is_built_when_given(tmp_path: Path) -> None:

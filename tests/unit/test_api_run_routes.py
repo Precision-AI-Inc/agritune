@@ -59,6 +59,29 @@ def _train_a_checkpoint(client: TestClient, tmp_path: Path, *, run_id: str = "ap
     return manifest_path, store_path, checkpoint_path
 
 
+def test_features_build_with_offline_augmentation_computes_the_augmented_variant_too(tmp_path: Path) -> None:
+    client = _client()
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    store_path = tmp_path / "features"
+    augmentation_config_path = tmp_path / "augmentation.yaml"
+    augmentation_config_path.write_text(
+        yaml.safe_dump({"mode": "offline", "variant": 0, "geometric": {"horizontal_flip_probability": 0.5}})
+    )
+
+    response = client.post(
+        "/features/build",
+        json={
+            "manifest_path": str(manifest_path),
+            "store": str(store_path),
+            "augmentation_config_path": str(augmentation_config_path),
+            "seed": 0,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["computed"] == 12  # 6 samples x (unaugmented + one offline variant)
+
+
 def test_train_runs_full_pipeline_and_reports_metrics(tmp_path: Path) -> None:
     client = _client()
     _, _, checkpoint_path = _train_a_checkpoint(client, tmp_path)
@@ -89,6 +112,7 @@ def test_train_applies_dotlist_overrides(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     assert response.json()["final_epoch"] == 3
+    assert "mean_iou" in response.json()["train_metrics"]
 
 
 def test_evaluate_reports_metrics(tmp_path: Path) -> None:
@@ -107,6 +131,25 @@ def test_evaluate_reports_metrics(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     assert "mean_iou" in response.json()["metrics"]
+
+
+def test_evaluate_reports_loss_under_requested_loss_config(tmp_path: Path) -> None:
+    client = _client()
+    manifest_path, store_path, checkpoint_path = _train_a_checkpoint(client, tmp_path)
+
+    response = client.post(
+        "/evaluate",
+        json={
+            "manifest_path": str(manifest_path),
+            "store": str(store_path),
+            "checkpoint_path": str(checkpoint_path),
+            "num_classes": 2,
+            "loss": {"name": "dice"},
+        },
+    )
+
+    assert response.status_code == 200
+    assert "loss" in response.json()["metrics"]
 
 
 def test_predict_writes_prediction_files(tmp_path: Path) -> None:

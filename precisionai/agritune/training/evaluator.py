@@ -39,7 +39,7 @@ def evaluate(
     batches: Iterable[TrainingBatch],
     metric: Metric,
 ) -> dict[str, float]:
-    """Run ``task`` over every batch with gradients disabled, accumulating ``metric``.
+    """Run ``task`` over every batch with gradients disabled, accumulating ``metric`` and loss.
 
     Parameters
     ----------
@@ -57,11 +57,21 @@ def evaluate(
     Returns
     -------
     dict[str, float]
-        ``metric.compute()`` after every batch has been processed.
+        ``metric.compute()`` after every batch has been processed, plus a ``"loss"`` entry: the
+        mean of ``task.compute_loss(outputs, targets)`` over every batch, weighted by batch size
+        (so a smaller trailing batch doesn't skew the average). ``0.0`` if ``batches`` is empty.
     """
+    loss_total = 0.0
+    sample_count = 0
     with torch.no_grad():
         for batch in batches:
             features = feature_provider.get_features(batch.samples)
             outputs = task.forward(features)
             metric.update(outputs, batch.targets)
-    return metric.compute()
+            batch_size = len(batch.samples)
+            loss_total += task.compute_loss(outputs, batch.targets).item() * batch_size
+            sample_count += batch_size
+
+    result = metric.compute()
+    result["loss"] = loss_total / sample_count if sample_count > 0 else 0.0
+    return result

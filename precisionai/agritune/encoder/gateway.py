@@ -22,7 +22,10 @@ from precisionai.agritune.encoder.errors import EncoderError, EncoderRateLimitEr
 from precisionai.agritune.encoder.rate_limiter import RateLimiter, RateLimiterConfig
 from precisionai.agritune.encoder.retry import RetryPolicy, RetryPolicyConfig
 from precisionai.agritune.encoder.validation import EncoderResponseValidator
+from precisionai.agritune.logging import get_logger
 from precisionai.agritune.schemas.features import EncoderFeatures, concatenate_encoder_features
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -181,10 +184,22 @@ class EncoderGateway:
         self.metrics.requests_total += 1
 
     def _on_attempt_failure(self, error: EncoderError, attempt: int, will_retry: bool) -> None:
-        del attempt
         if isinstance(error, EncoderRateLimitError):
             self.metrics.rate_limited_count += 1
         elif isinstance(error, EncoderTimeoutError):
             self.metrics.timeout_count += 1
         if will_retry:
             self.metrics.requests_retried += 1
+            logger.warning(
+                "encoder request failed on attempt %d (%s: %s); retrying with backoff",
+                attempt,
+                type(error).__name__,
+                error,
+            )
+        else:
+            logger.warning(
+                "encoder request failed on attempt %d (%s: %s); no attempts remaining",
+                attempt,
+                type(error).__name__,
+                error,
+            )

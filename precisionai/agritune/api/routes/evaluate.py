@@ -5,16 +5,17 @@
 
 from fastapi import APIRouter
 
-from precisionai.agritune.api.schemas import EvaluateResponse, ScoredRunRequest
+from precisionai.agritune.api.schemas import EvaluateRequest, EvaluateResponse
 from precisionai.agritune.features.keys import EncoderFingerprint
 from precisionai.agritune.features.store import DirectoryFeatureStore
 from precisionai.agritune.services.evaluation_service import EvaluationRunConfig, run_evaluation
+from precisionai.agritune.tasks.segmentation.losses import SegmentationLossConfig
 
 router = APIRouter(tags=["evaluate"])
 
 
 @router.post("/evaluate", response_model=EvaluateResponse)
-def evaluate(request: ScoredRunRequest) -> EvaluateResponse:
+def evaluate(request: EvaluateRequest) -> EvaluateResponse:
     """Load a checkpointed decoder and score it against a dataset (or a restricted sample set)."""
     store = DirectoryFeatureStore(request.store)
     config = EvaluationRunConfig(
@@ -29,5 +30,11 @@ def evaluate(request: ScoredRunRequest) -> EvaluateResponse:
         decoder_name=request.decoder,
         batch_size=request.batch_size,
         sample_ids=request.sample_ids,
+        loss=SegmentationLossConfig(
+            name=request.loss.name,
+            ignore_index=request.loss.ignore_index,
+            ce_weight=request.loss.ce_weight,
+            dice_weight=request.loss.dice_weight,
+        ),
     )
     return EvaluateResponse(metrics=run_evaluation(config, store=store))

@@ -24,5 +24,6 @@ def train(request: TrainRequest) -> TrainResponse:
         final_epoch=result.final_train_state["epoch"],
         global_optimizer_step=result.final_train_state["global_optimizer_step"],
         best_metric=result.final_train_state["best_metric"],
+        train_metrics=result.train_metrics,
         val_metrics=result.val_metrics,
     )

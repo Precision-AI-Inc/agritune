@@ -4,28 +4,137 @@
 # agritune train --config examples/segmentation/cwfid.yaml
 #
 # The API key is read from AGRITUNE_ENCODER_API_KEY (.env or the environment), never stored here.
+#
+# This file spells out every field TrainingRunConfig accepts (see
+# precisionai/agritune/cli/config.py and precisionai/agritune/services/training_service.py for the
+# authoritative schema) — including fields already equal to their default — as a single reference
+# for every knob available to `agritune train`. Any of these can also be overridden from the CLI
+# instead of editing the file, e.g.:
+#   agritune train --config examples/segmentation/cwfid.yaml trainer.max_epochs=10 optimizer.lr=1e-4
 
+# --- Dataset / run identity -------------------------------------------------
 manifest_path: examples/datasets/cwfid/manifest.csv
 feature_store_dir: examples/datasets/cwfid/features
-run_root: examples/datasets/cwfid/runs
-run_id: cwfid-sanity
+run_root: examples/datasets/cwfid/runs   # runs/<run_id>/ is created here
+run_id: cwfid-sanity-mlp_probe-online_aug
 num_classes: 3
+seed: 0                                  # global seed; trainer.seed falls back to this when unset
+
+# --- Encoder identity --------------------------------------------------------
+# encoder_fingerprint must match whatever the feature store at feature_store_dir was built with
+# under feature_provider "cached"/"hybrid" (every lookup misses otherwise).
 encoder_fingerprint:
   model: pai-embedding
-  revision: null
-  preprocessing: ""
-feature_provider: cached
+  revision: null                         # null unless the hosted API exposes one (see docs/encoder.md)
+  preprocessing: ""                      # stable label for preprocessing params, for cache invalidation
+
+# --- Feature provider ---------------------------------------------------------
+# "cached" (default) reads only from feature_store_dir; "online" calls the encoder for every
+# sample every epoch; "hybrid" reads the cache and write-through populates whatever is missing.
+# encoder_base_url/encoder_api_key are ignored entirely under "cached".
+feature_provider: online                 # cached | online | hybrid
 encoder_base_url: https://embeddings.precision.ai/v1
 encoder_api_key: ${oc.env:AGRITUNE_ENCODER_API_KEY,null}
+
+# --- Image augmentation -------------------------------------------------------
+# mode "none" (default) applies no augmentation at all and ignores every field below it — matches
+# every pre-v0.2 run exactly. "online"/"hybrid" require feature_provider to also be "online"/
+# "hybrid" (a "cached" provider's key would only ever match the first epoch's augmentation
+# fingerprint). Validation samples are never augmented, regardless of mode.
+augmentation:
+  mode: online                             # none | offline | online | hybrid
+  variant: 0                             # offline variant index; ignored outside offline/hybrid
+  hybrid_online_probability: 0.3         # forwarded to prepare_sample under hybrid; ignored otherwise
+  geometric:
+    resize: [256, 256]                         # [width, height]; applied first if set
+    random_crop: [224, 224]                     # [width, height]; applied after resize if set
+    horizontal_flip_probability: 0.5
+    vertical_flip_probability: 0.5
+    rotation_max_degrees: 0.45
+  photometric:
+    brightness_range: [0,0.4]               # [min, max] multiplicative factor around 1.0
+    contrast_range: [0,0.4]                 # [min, max] multiplicative factor around 1.0
+    saturation_range: [0,0.4]               # [min, max] multiplicative factor around 1.0
+    hue_max_degrees: 0.3
+    blur_probability: 0.3
+    blur_radius_range: [0.1, 2.0]
+    noise_probability: 0.4
+    noise_std_range: [0.01, 0.05]
+    channel_dropout_probability: 0.3
+    gsd_jitter_probability: 0.3
+    gsd_jitter_scale_range: [0.5, 0.9]
+    vegetation_index_jitter_probability: 0.3
+    vegetation_index_jitter_range: [-15.0, 15.0]
+    seasonal_color_shift_probability: 0.3
+    seasonal_hue_shift_degrees: 0.1
+
+# --- Decoder -------------------------------------------------------------------
+# decoder_name: mlp_probe | token_fpn | aspp | ppm | segmenter | mask_former
+# decoder_kwargs is forwarded verbatim to the selected decoder's constructor — shown below are
+# mlp_probe's own kwargs (matching its defaults); swapping decoder_name requires swapping these
+# keys too (e.g. atrous_rates/hidden_dim for aspp, pool_sizes for ppm, num_queries for
+# mask_former, cls_fusion/hidden_dim for token_fpn).
 decoder_name: mlp_probe
+decoder_kwargs:
+  hidden_dims: []                        # empty = a single nn.Linear(patch_dim, num_classes)
+  dropout: 0.0                           # applied after each hidden layer; never after the last one
+
+# --- Batching / split ------------------------------------------------------------
 batch_size: 4
-val_fraction: 0.25
-seed: 0
+val_fraction: 0.25                       # fraction of samples held out for validation (random split)
+
+# --- Optimizer -------------------------------------------------------------------
 optimizer:
-  name: adamw
+  name: adam                              # adamw | adam | sgd
   lr: 0.001
+  weight_decay: 0.01
+  betas: [0.9, 0.999]                    # ignored for sgd
+  momentum: 0.9                          # ignored for adam/adamw
+
+# --- LR scheduler ------------------------------------------------------------------
+# enabled: false (or an empty mapping) disables the scheduler entirely, equivalent to omitting
+# this section. "constant" (shown) is a no-op multiplier of 1.0, identical in effect to no
+# scheduler at all — included here only to document every field.
+scheduler:
+  enabled: false                          # false disables the scheduler regardless of the fields below
+  name: polynomial                         # constant | cosine | linear_warmup | polynomial | plateau
+  warmup_steps: 10                        # ignored by constant/plateau
+  total_steps: 20                      # required by cosine/linear_warmup/polynomial
+  polynomial_power: 1.0                  # only used by polynomial
+  plateau_factor: 0.5                    # only used by plateau
+  plateau_patience: 10                   # only used by plateau
+
+# --- Trainer -----------------------------------------------------------------------
 trainer:
-  max_epochs: 3
-  precision: fp32
+  max_epochs: 100
+  accumulation_steps: 1                 # micro-batches accumulated before each optimizer step
+  grad_clip_norm: null                   # max gradient norm for clipping; null disables clipping
+  precision: fp32                        # fp32 | fp16 | bf16
+  seed: 0                                # defaults to the top-level seed when omitted
+  early_stopping_patience: null          # stop after this many validation passes with no improvement
+  checkpoint_every_n_steps: null         # also checkpoint periodically, in addition to end-of-epoch/best
+
+# --- Loss ------------------------------------------------------------------------
+loss:
+  name: ce                               # ce | bce | dice | ce_dice | bce_dice
+  ignore_index: -100                     # pixel value excluded from every term
+  class_weights: null                    # per-class weights (CE "weight" / BCE "pos_weight")
+  ce_weight: 1.0                         # weight applied to the CE/BCE term in a combined loss
+  dice_weight: 1.0                       # weight applied to the Dice term in a combined loss
+
+# --- Validation / checkpointing ---------------------------------------------------
+val_metric_name: mean_iou
+higher_is_better: true
+checkpoint_top_k: 3                      # best-by-val-metric checkpoints retained; 0 keeps every one
+
+# --- Tracking ----------------------------------------------------------------------
+# backends: any of null, jsonl, tensorboard, mlflow, wandb, neptune, comet (a list — combine
+# several to fan out to multiple backends at once). Only the settings for backends you actually
+# select are consulted.
 tracking:
   backends: [jsonl]
+  mlflow_experiment_name: my_experiment
+  mlflow_tracking_uri: null
+  wandb_project: agritune
+  neptune_project: null                  # required, as "workspace/project", if neptune is selected
+  comet_project_name: agritune

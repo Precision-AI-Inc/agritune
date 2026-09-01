@@ -445,6 +445,53 @@ def test_tracker_receives_train_and_val_metrics() -> None:
     assert any(val_metric_names)
 
 
+def test_train_metric_is_accumulated_and_exposed_via_last_train_metrics() -> None:
+    trainer, _ = _build_trainer(max_epochs=1)
+    train_batch = TrainingBatch(samples=[_sample("a"), _sample("b")], targets=torch.randint(0, 2, (2, 2, 2)))
+    val_batch = TrainingBatch(samples=[_sample("a"), _sample("b")], targets=torch.randint(0, 2, (2, 2, 2)))
+    train_metric = SegmentationMetric(num_classes=2)
+
+    assert trainer.last_train_metrics is None
+
+    trainer.fit([train_batch], [val_batch], train_metric=train_metric, val_metric=SegmentationMetric(num_classes=2))
+
+    assert trainer.last_train_metrics is not None
+    assert "mean_iou" in trainer.last_train_metrics
+    assert train_metric.confusion_matrix().sum().item() == 2 * 2 * 2  # 2 samples x 2x2 pixels, one epoch
+
+
+def test_train_metric_resets_at_the_start_of_each_epoch() -> None:
+    trainer, _ = _build_trainer(max_epochs=2)
+    train_batch = TrainingBatch(samples=[_sample("a"), _sample("b")], targets=torch.randint(0, 2, (2, 2, 2)))
+    train_metric = SegmentationMetric(num_classes=2)
+
+    trainer.fit([train_batch], train_metric=train_metric)
+
+    # Not doubled across the two epochs — reset before the second epoch's accumulation.
+    assert train_metric.confusion_matrix().sum().item() == 2 * 2 * 2
+
+
+def test_tracker_receives_train_metric_with_train_prefix() -> None:
+    tracker = _FakeTracker()
+    trainer, _ = _build_trainer(tracker=tracker)
+    train_batch = TrainingBatch(samples=[_sample("a"), _sample("b")], targets=torch.randint(0, 2, (2, 2, 2)))
+
+    trainer.fit([train_batch], train_metric=SegmentationMetric(num_classes=2))
+
+    logged_names = {key for metrics, _ in tracker.metric_calls for key in metrics}
+    assert "train_mean_iou" in logged_names
+    assert "train_pixel_accuracy" in logged_names
+
+
+def test_no_train_metric_by_default() -> None:
+    trainer, _ = _build_trainer()
+    train_batch = TrainingBatch(samples=[_sample("a"), _sample("b")], targets=torch.randint(0, 2, (2, 2, 2)))
+
+    trainer.fit([train_batch])  # must not raise without a train_metric
+
+    assert trainer.last_train_metrics is None
+
+
 def test_tracking_failure_does_not_interrupt_training() -> None:
     tracker = _FakeTracker(fail_on_metrics=True)
     trainer, _ = _build_trainer(max_epochs=2, tracker=tracker)

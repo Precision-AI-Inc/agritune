@@ -3,6 +3,7 @@
 
 """Unit tests for precisionai.agritune.training.evaluator."""
 
+import pytest
 import torch
 
 from precisionai.agritune.schemas.samples import PreparedSample
@@ -36,6 +37,36 @@ def test_evaluate_accumulates_across_all_batches() -> None:
 
     assert "mean_iou" in result
     assert metric.confusion_matrix().sum().item() == 3 * 2 * 4 * 4  # 3 batches x 2 samples x 4x4 pixels
+
+
+def test_evaluate_reports_loss_weighted_by_batch_size() -> None:
+    task = _task()
+    provider = FakeFeatureProvider(patch_dim=8, cls_dim=None, patch_grid=(2, 2))
+    metric = SegmentationMetric(num_classes=3)
+
+    small_batch = TrainingBatch(samples=[_sample("a")], targets=torch.randint(0, 3, (1, 4, 4)))
+    large_batch = TrainingBatch(samples=[_sample("b"), _sample("c")], targets=torch.randint(0, 3, (2, 4, 4)))
+
+    result = evaluate(task, provider, [small_batch, large_batch], metric)
+
+    features_a = provider.get_features(small_batch.samples)
+    features_b = provider.get_features(large_batch.samples)
+    loss_a = task.compute_loss(task.forward(features_a), small_batch.targets).item()
+    loss_b = task.compute_loss(task.forward(features_b), large_batch.targets).item()
+    expected = (loss_a * 1 + loss_b * 2) / 3
+
+    assert "loss" in result
+    assert result["loss"] == pytest.approx(expected, rel=1e-4)
+
+
+def test_evaluate_loss_is_zero_for_no_batches() -> None:
+    task = _task()
+    provider = FakeFeatureProvider(patch_dim=8, cls_dim=None, patch_grid=(2, 2))
+    metric = SegmentationMetric(num_classes=3)
+
+    result = evaluate(task, provider, [], metric)
+
+    assert result["loss"] == 0.0
 
 
 def test_evaluate_does_not_track_gradients() -> None:

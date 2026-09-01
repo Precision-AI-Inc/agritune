@@ -125,6 +125,16 @@ class Trainer:
         When given, applied to every training batch's features right after
         ``feature_provider.get_features`` and before ``task.forward`` — never during validation,
         matching the usual train-only role of augmentation. ``None`` disables it entirely.
+
+    Attributes
+    ----------
+    last_train_metrics : dict[str, float] | None
+        Whatever ``train_metric.compute()`` (see :meth:`fit`) returned for the most recently
+        completed training epoch — ``None`` before the first one, or if ``train_metric`` was
+        never given to :meth:`fit`.
+    last_val_metrics : dict[str, float] | None
+        Whatever :func:`~precisionai.agritune.training.evaluator.evaluate` returned for the most
+        recent validation pass (including its ``"loss"`` entry) — ``None`` before the first one.
     """
 
     def __init__(
@@ -153,6 +163,8 @@ class Trainer:
         self.feature_augmentation = feature_augmentation
         self.precision = PrecisionContext(config.precision, device_type=self._device_type())
         self.state = TrainingState()
+        self.last_train_metrics: dict[str, float] | None = None
+        self.last_val_metrics: dict[str, float] | None = None
         self._resumed = False
 
         if self.checkpoint_manager is not None and self.checkpoint_manager.has_last():
@@ -164,6 +176,7 @@ class Trainer:
         train_batches: Iterable[TrainingBatch],
         val_batches: Iterable[TrainingBatch] | None = None,
         *,
+        train_metric: Metric | None = None,
         val_metric: Metric | None = None,
         val_metric_name: str = "mean_iou",
         higher_is_better: bool = True,
@@ -176,6 +189,12 @@ class Trainer:
             Re-iterated once per epoch.
         val_batches : Iterable[TrainingBatch] | None, optional
             Re-iterated once per epoch for validation, if given together with ``val_metric``.
+        train_metric : Metric | None, optional
+            Accumulates statistics over every training batch each epoch (reset at the start of
+            the epoch) and is logged as ``train_{name}`` alongside ``train_loss``. Computed from
+            the model in ``.train()`` mode on (possibly augmented) training batches, so it is
+            noisier and less comparable across epochs than the equivalent validation metric —
+            useful mainly for spotting a train/val gap, not as a model-selection signal.
         val_metric : Metric | None, optional
             Accumulates validation statistics; reset at the start of each validation pass.
         val_metric_name : str, optional
@@ -191,11 +210,14 @@ class Trainer:
             if self._should_stop_early():
                 logger.info("early stopping before epoch %d", epoch)
                 break
-            self._train_one_epoch(train_batches)
+            self._train_one_epoch(train_batches, train_metric)
+            if train_metric is not None:
+                self._after_train_epoch(train_metric)
 
             if val_batches is not None and val_metric is not None:
                 val_metric.reset()
                 metrics = evaluate(self.task, self.feature_provider, val_batches, val_metric)
+                self.last_val_metrics = metrics
                 self._after_validation(metrics, val_metric_name, higher_is_better)
 
             self.state.epoch = epoch + 1
@@ -206,8 +228,10 @@ class Trainer:
                 logger.info("early stopping after epoch %d", epoch)
                 break
 
-    def _train_one_epoch(self, batches: Iterable[TrainingBatch]) -> None:
+    def _train_one_epoch(self, batches: Iterable[TrainingBatch], train_metric: Metric | None) -> None:
         self.decoder.train()
+        if train_metric is not None:
+            train_metric.reset()
         accumulated_steps = 0
         last_loss_value = 0.0
         resume_offset = self.state.batch_in_epoch
@@ -222,6 +246,10 @@ class Trainer:
                 loss = self.task.compute_loss(outputs, batch.targets)
                 scaled_loss = loss / self.config.accumulation_steps
 
+            if train_metric is not None:
+                with torch.no_grad():
+                    train_metric.update(outputs, batch.targets)
+
             self.precision.backward(scaled_loss)
             self.state.micro_step += 1
             self.state.batch_in_epoch = batch_index + 1
@@ -235,6 +263,14 @@ class Trainer:
         if accumulated_steps:
             gradient_scale = self.config.accumulation_steps / accumulated_steps
             self._optimizer_step(last_loss_value, gradient_scale=gradient_scale)
+
+    def _after_train_epoch(self, train_metric: Metric) -> None:
+        metrics = train_metric.compute()
+        self.last_train_metrics = metrics
+        if self.distributed.is_main_process:
+            self._log_metrics(
+                {f"train_{name}": value for name, value in metrics.items()}, step=self.state.global_optimizer_step
+            )
 
     def _optimizer_step(self, last_loss_value: float, *, gradient_scale: float = 1.0) -> None:
         if self.config.grad_clip_norm is not None:

@@ -14,6 +14,7 @@ from precisionai.agritune.optimization.optimizers import OptimizerConfig
 from precisionai.agritune.services.evaluation_service import EvaluationRunConfig, run_evaluation
 from precisionai.agritune.services.feature_service import build_features
 from precisionai.agritune.services.training_service import TrainingRunConfig, run_training
+from precisionai.agritune.tasks.segmentation.losses import SegmentationLossConfig
 from precisionai.agritune.training.trainer import TrainerConfig
 from tests.fixtures.manifest_factory import build_manifest
 
@@ -79,6 +80,47 @@ async def test_run_evaluation_restricts_to_sample_ids(tmp_path: Path) -> None:
     )
     metrics = run_evaluation(config, store=store)
     assert "mean_iou" in metrics
+
+
+async def test_run_evaluation_reports_loss_under_default_ce_config(tmp_path: Path) -> None:
+    manifest_path, checkpoint_path = await _train_a_checkpoint(tmp_path)
+    store = DirectoryFeatureStore(tmp_path / "features")
+
+    config = EvaluationRunConfig(
+        manifest_path=str(manifest_path),
+        checkpoint_path=str(checkpoint_path),
+        num_classes=2,
+        encoder_fingerprint=_FINGERPRINT,
+    )
+    metrics = run_evaluation(config, store=store)
+
+    assert "loss" in metrics
+    assert metrics["loss"] >= 0.0
+
+
+async def test_run_evaluation_loss_config_changes_reported_loss(tmp_path: Path) -> None:
+    manifest_path, checkpoint_path = await _train_a_checkpoint(tmp_path)
+    store = DirectoryFeatureStore(tmp_path / "features")
+
+    ce_config = EvaluationRunConfig(
+        manifest_path=str(manifest_path),
+        checkpoint_path=str(checkpoint_path),
+        num_classes=2,
+        encoder_fingerprint=_FINGERPRINT,
+        loss=SegmentationLossConfig(name="ce"),
+    )
+    dice_config = EvaluationRunConfig(
+        manifest_path=str(manifest_path),
+        checkpoint_path=str(checkpoint_path),
+        num_classes=2,
+        encoder_fingerprint=_FINGERPRINT,
+        loss=SegmentationLossConfig(name="dice"),
+    )
+
+    ce_loss = run_evaluation(ce_config, store=store)["loss"]
+    dice_loss = run_evaluation(dice_config, store=store)["loss"]
+
+    assert ce_loss != pytest.approx(dice_loss)
 
 
 async def test_run_evaluation_empty_sample_set_raises(tmp_path: Path) -> None:

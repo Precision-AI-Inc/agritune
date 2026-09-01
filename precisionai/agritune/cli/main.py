@@ -77,6 +77,21 @@ def _build_features_parser(subparsers: argparse._SubParsersAction) -> None:
     build = features_subparsers.add_parser("build", help="Resumable offline feature precomputation.")
     build.add_argument("--manifest", required=True, help="Path to the dataset manifest file.")
     build.add_argument("--store", required=True, help="Directory the feature store is (or will be) built in.")
+    build.add_argument(
+        "--augmentation-config",
+        default=None,
+        help="Path to a YAML file shaped like configs/augmentation/{none,offline}.yaml (mode/variant/"
+        "geometric/photometric); omit for no augmentation. mode must be 'none' or 'offline' — online/"
+        "hybrid augmentation cannot be finitely precomputed. Point this at the exact same file the "
+        "training config's augmentation: block will use, or the feature cache keys won't match.",
+    )
+    build.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="Global seed offline augmentation derives each sample's seed from — must match the "
+        "training config's top-level seed (only consulted when --augmentation-config sets mode: offline).",
+    )
     _add_encoder_selection_arguments(build)
     build.set_defaults(handler=handlers.features_build)
 
@@ -131,6 +146,22 @@ def _add_scored_run_arguments(parser: argparse.ArgumentParser) -> None:
 def _build_evaluate_parser(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser("evaluate", help="Evaluate a trained checkpoint.")
     _add_scored_run_arguments(parser)
+    parser.add_argument(
+        "--loss-name",
+        default="ce",
+        choices=["ce", "bce", "dice", "ce_dice", "bce_dice"],
+        help="Loss to report the reconstructed 'loss' metric under — match the checkpoint's "
+        "training config, or the reported value won't be comparable (default: ce).",
+    )
+    parser.add_argument(
+        "--loss-ignore-index", type=int, default=-100, help="Pixel value excluded from the loss (default: -100)."
+    )
+    parser.add_argument(
+        "--loss-ce-weight", type=float, default=1.0, help="Weight of the CE/BCE term in a combined loss."
+    )
+    parser.add_argument(
+        "--loss-dice-weight", type=float, default=1.0, help="Weight of the Dice term in a combined loss."
+    )
     parser.set_defaults(handler=handlers.evaluate)
 
 
