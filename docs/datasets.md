@@ -16,6 +16,11 @@ even on a split produced by `random_split`. `agritune dataset validate` / `agrit
 inspect` check for missing files, duplicate IDs, image/mask dimension mismatches, invalid labels,
 and report class-pixel-count statistics. See `agritune_implementation_plan.md` §5.
 
+`agritune dataset init --output manifest.csv` writes an example manifest with a header row and a
+few placeholder samples (`sample_id`, `image_path`, `mask_path`, plus `field_id`/`farm_id`/
+`capture_date` metadata) to start from — replace the placeholder rows with your own samples, then
+point `--manifest`/`manifest_path` at the result. Pass `--force` to overwrite an existing file.
+
 ## Preparing a dataset
 
 A worked example that downloads the public Crop/Weed Field Image Dataset (CWFID), converts its

@@ -100,7 +100,7 @@ where = ["."]
 include = ["precisionai*"]
 
 [tool.setuptools.package-data]
-"precisionai.agritune" = ["configs/**/*.yaml"]
+"precisionai.agritune" = ["configs/**/*.yaml", "configs/**/*.csv"]
 
 [tool.setuptools_scm]
 version_scheme = "no-guess-dev"

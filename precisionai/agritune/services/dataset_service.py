@@ -1,7 +1,7 @@
 # Copyright 2026 Precision AI
 # SPDX-License-Identifier: Apache-2.0
 
-"""Dataset orchestration — powers ``agritune dataset validate``/``inspect`` and the API layer."""
+"""Dataset orchestration — powers ``agritune dataset validate``/``inspect``/``init`` and the API layer."""
 
 from collections import Counter
 from pathlib import Path
@@ -12,6 +12,7 @@ from PIL import Image
 
 from precisionai.agritune.data.manifest import parse_manifest_rows
 from precisionai.agritune.data.validation import ValidationReport, validate_manifest
+from precisionai.agritune.utils.scaffold import read_scaffold_template, write_scaffold_file
 
 
 def validate_dataset(
@@ -57,3 +58,36 @@ def inspect_dataset(manifest_path: str) -> dict[str, Any]:
         "metadata_columns": sorted(base_dir_columns),
         "class_pixel_counts": dict(sorted(class_pixel_counts.items())),
     }
+
+
+def render_manifest_template() -> str:
+    """Return the packaged example dataset manifest CSV's text.
+
+    Returns
+    -------
+    str
+    """
+    return read_scaffold_template("manifest.csv")
+
+
+def write_manifest_template(output_path: str | Path, *, force: bool = False) -> Path:
+    """Write the example dataset manifest CSV to ``output_path``.
+
+    Parameters
+    ----------
+    output_path : str | Path
+        Destination file path. Parent directories are created as needed.
+    force : bool, optional
+        Overwrite ``output_path`` if it already exists (default ``False``).
+
+    Returns
+    -------
+    Path
+        ``output_path``.
+
+    Raises
+    ------
+    FileExistsError
+        If ``output_path`` already exists and ``force`` is ``False``.
+    """
+    return write_scaffold_file(output_path, render_manifest_template(), force=force)

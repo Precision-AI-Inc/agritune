@@ -18,8 +18,10 @@ import torch
 import yaml
 from PIL import Image
 
+from precisionai.agritune.augmentations.feature.pipeline import FeatureAugmentationConfig, FeatureAugmentationPipeline
 from precisionai.agritune.augmentations.image.pipeline import AugmentationMode, GeometricConfig
 from precisionai.agritune.data.manifest import load_manifest
+from precisionai.agritune.data.split import random_split
 from precisionai.agritune.encoder.fake import FakeEncoderBackend
 from precisionai.agritune.features.keys import EncoderFingerprint
 from precisionai.agritune.features.store import DirectoryFeatureStore, ShardedFeatureStore
@@ -161,6 +163,104 @@ def test_run_training_with_offline_augmentation(tmp_path: Path) -> None:
     result = run_training(config, store=store)
 
     assert result.final_train_state["epoch"] == 1
+
+
+def test_feature_augmentation_defaults_to_a_no_op_config(tmp_path: Path) -> None:
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    config = _base_config(tmp_path, manifest_path, run_id="feature-aug-default-run")
+
+    assert config.feature_augmentation == FeatureAugmentationConfig()
+
+
+def test_run_training_wires_feature_augmentation_config_into_the_trainer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    store = DirectoryFeatureStore(tmp_path / "features")
+    _precompute(manifest_path, store)
+
+    captured_configs: list[FeatureAugmentationConfig | None] = []
+    real_pipeline_cls = training_service.FeatureAugmentationPipeline
+
+    class _SpyFeatureAugmentationPipeline(real_pipeline_cls):  # type: ignore[misc, valid-type]
+        def __init__(self, config: FeatureAugmentationConfig | None = None) -> None:
+            captured_configs.append(config)
+            super().__init__(config)
+
+    monkeypatch.setattr(training_service, "FeatureAugmentationPipeline", _SpyFeatureAugmentationPipeline)
+
+    config = _base_config(
+        tmp_path,
+        manifest_path,
+        run_id="feature-aug-wiring-run",
+        feature_augmentation=FeatureAugmentationConfig(patch_dropout_probability=0.3, gaussian_noise_std=0.02),
+    )
+    run_training(config, store=store)
+
+    assert len(captured_configs) == 1
+    assert captured_configs[0] == FeatureAugmentationConfig(patch_dropout_probability=0.3, gaussian_noise_std=0.02)
+
+
+def test_run_training_with_strong_feature_augmentation_does_not_crash(tmp_path: Path) -> None:
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    store = DirectoryFeatureStore(tmp_path / "features")
+    _precompute(manifest_path, store)
+
+    config = _base_config(
+        tmp_path,
+        manifest_path,
+        run_id="feature-aug-strong-run",
+        feature_augmentation=FeatureAugmentationConfig(
+            patch_dropout_probability=0.99,  # dropout/cls_dropout/channel_dropout require < 1.0
+            token_masking_probability=1.0,
+            gaussian_noise_std=5.0,
+            cls_dropout_probability=0.99,
+            channel_dropout_probability=0.9,
+        ),
+    )
+    result = run_training(config, store=store)
+
+    assert result.final_train_state["epoch"] == 1
+    assert "mean_iou" in result.train_metrics
+    assert "mean_iou" in result.val_metrics
+
+
+def test_feature_augmentation_is_applied_to_training_features_but_not_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    store = DirectoryFeatureStore(tmp_path / "features")
+    _precompute(manifest_path, store)
+
+    apply_calls = []
+    real_apply = FeatureAugmentationPipeline.apply
+
+    def _spy_apply(self, features, *, generator=None):  # type: ignore[no-untyped-def]
+        apply_calls.append(features)
+        return real_apply(self, features, generator=generator)
+
+    monkeypatch.setattr(FeatureAugmentationPipeline, "apply", _spy_apply)
+
+    val_fraction = 0.34
+    config = _base_config(
+        tmp_path,
+        manifest_path,
+        run_id="feature-aug-train-only-run",
+        feature_augmentation=FeatureAugmentationConfig(patch_dropout_probability=0.5),
+        val_fraction=val_fraction,
+        batch_size=1,
+    )
+    run_training(config, store=store)
+
+    rows = load_manifest(str(manifest_path))
+    train_fraction = max(1e-6, 1.0 - val_fraction - 1e-6)
+    split = random_split(rows, val_fraction=val_fraction, train_fraction=train_fraction, seed=config.seed)
+
+    # One training batch per training sample (batch_size=1), one epoch: feature_augmentation.apply
+    # must run exactly once per training batch, and never for the (differently sized) val split.
+    assert len(apply_calls) == len(split.train)
+    assert len(split.val) > 0
+    assert len(split.train) != len(split.val)
 
 
 def test_run_training_with_resizing_augmentation_does_not_crash_on_target_shape_mismatch(tmp_path: Path) -> None:

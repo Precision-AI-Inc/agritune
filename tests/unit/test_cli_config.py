@@ -65,6 +65,31 @@ def test_load_augmentation_selection_reads_offline_config(tmp_path: Path) -> Non
     assert selection.photometric.brightness_range == (0.8, 1.2)
 
 
+def test_feature_augmentation_defaults_to_disabled_when_omitted(tmp_path: Path) -> None:
+    path = _write_config(tmp_path, {})
+    config = load_training_run_config(str(path))
+    assert config.feature_augmentation.patch_dropout_probability == 0.0
+    assert config.feature_augmentation.gaussian_noise_std == 0.0
+
+
+def test_feature_augmentation_is_parsed_from_the_config(tmp_path: Path) -> None:
+    path = _write_config(
+        tmp_path,
+        {
+            "feature_augmentation": {
+                "patch_dropout_probability": 0.1,
+                "gaussian_noise_std": 0.02,
+                "cls_dropout_probability": 0.05,
+            }
+        },
+    )
+    config = load_training_run_config(str(path))
+    assert config.feature_augmentation.patch_dropout_probability == 0.1
+    assert config.feature_augmentation.gaussian_noise_std == 0.02
+    assert config.feature_augmentation.cls_dropout_probability == 0.05
+    assert config.feature_augmentation.token_masking_probability == 0.0
+
+
 def test_scheduler_is_built_when_given(tmp_path: Path) -> None:
     path = _write_config(tmp_path, {"scheduler": {"name": "cosine", "total_steps": 100}})
     config = load_training_run_config(str(path))

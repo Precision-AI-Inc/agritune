@@ -75,6 +75,15 @@ Point `--config` at your own copy of `config.yaml` (with different `defaults:` b
 alongside your own `configs/dataset/your_dataset.yaml` variant) to reuse named presets across
 runs instead of repeating an entire flat config file per experiment.
 
+## Generating a starter flat config
+
+`agritune config init --output my-run.yaml` writes a plain (non-Hydra) config file that spells out
+every field `TrainingRunConfig` accepts — every field already at its default value, with the
+handful of dataset-specific fields (`manifest_path`, `feature_store_dir`, `run_id`, `num_classes`)
+marked `REQUIRED` as placeholders for you to fill in. It's the same shape as
+`examples/segmentation/cwfid.yaml`, just without the CWFID-specific values. Pass `--force` to
+overwrite an existing file at `--output`.
+
 ## Group reference
 
 | Group | Variants shipped | Selects |

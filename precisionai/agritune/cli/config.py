@@ -8,7 +8,8 @@ directly — the original, flat shape every example and test in this repository 
 module's Hydra support with. A YAML file that *does* have a ``defaults:`` key (like the packaged
 ``precisionai/agritune/configs/config.yaml``) is instead resolved as a genuine Hydra config-group
 composition: ``compose()`` selects one variant per group (``dataset``/``encoder``/``augmentation``/
-``feature_provider``/``task``/``decoder``/``optimizer``/``scheduler``/``tracking``), and the same
+``feature_augmentation``/``feature_provider``/``task``/``decoder``/``optimizer``/``scheduler``/
+``tracking``), and the same
 ``overrides`` list can both override plain fields (``trainer.max_epochs=3``) and swap group
 variants (``decoder=token_fpn``, ``augmentation=online``) — see ``agritune_implementation_plan.md``
 §23 and ``docs/configuration.md``.
@@ -20,6 +21,7 @@ from typing import Any
 from hydra import compose, initialize_config_dir
 from omegaconf import DictConfig, OmegaConf
 
+from precisionai.agritune.augmentations.feature.pipeline import FeatureAugmentationConfig
 from precisionai.agritune.augmentations.image.pipeline import AugmentationMode, GeometricConfig, PhotometricConfig
 from precisionai.agritune.features.keys import EncoderFingerprint
 from precisionai.agritune.optimization.optimizers import OptimizerConfig
@@ -90,9 +92,10 @@ def _compose_config_groups(config_path: Path, overrides: list[str]) -> dict[str,
 def _flatten_composed_groups(composed: dict[str, Any]) -> dict[str, Any]:
     """Fold group-namespaced Hydra output into the flat shape :func:`_config_from_dict` expects.
 
-    ``optimizer``/``scheduler``/``augmentation``/``tracking`` are already nested dicts in that flat
-    shape, so those four groups pass through unchanged; ``dataset``/``encoder``/``decoder``/
-    ``task``/``feature_provider`` do not have a flat-shape equivalent and are unpacked here.
+    ``optimizer``/``scheduler``/``augmentation``/``feature_augmentation``/``tracking`` are already
+    nested dicts in that flat shape, so those five groups pass through unchanged; ``dataset``/
+    ``encoder``/``decoder``/``task``/``feature_provider`` do not have a flat-shape equivalent and
+    are unpacked here.
     """
     flat = dict(composed)
     dataset = flat.pop("dataset", {}) or {}
@@ -173,6 +176,17 @@ def _augmentation_from_dict(data: dict[str, Any]) -> AugmentationSelection:
     )
 
 
+def _feature_augmentation_from_dict(data: dict[str, Any]) -> FeatureAugmentationConfig:
+    return FeatureAugmentationConfig(
+        patch_dropout_probability=data.get("patch_dropout_probability", 0.0),
+        token_masking_probability=data.get("token_masking_probability", 0.0),
+        token_mask_value=data.get("token_mask_value", 0.0),
+        gaussian_noise_std=data.get("gaussian_noise_std", 0.0),
+        cls_dropout_probability=data.get("cls_dropout_probability", 0.0),
+        channel_dropout_probability=data.get("channel_dropout_probability", 0.0),
+    )
+
+
 def _tracking_from_dict(data: dict[str, Any]) -> TrackingSelection:
     return TrackingSelection(
         backends=list(data.get("backends", ["jsonl"])),
@@ -212,6 +226,7 @@ def _config_from_dict(data: dict[str, Any]) -> TrainingRunConfig:
         encoder_base_url=data.get("encoder_base_url"),
         encoder_api_key=data.get("encoder_api_key"),
         augmentation=_augmentation_from_dict(dict(data.get("augmentation") or {})),
+        feature_augmentation=_feature_augmentation_from_dict(dict(data.get("feature_augmentation") or {})),
         decoder_name=data.get("decoder_name", "mlp_probe"),
         decoder_kwargs=dict(data.get("decoder_kwargs") or {}),
         batch_size=data.get("batch_size", 4),

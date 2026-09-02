@@ -23,7 +23,12 @@ from precisionai.agritune.features.store import DirectoryFeatureStore
 from precisionai.agritune.logging import get_logger
 from precisionai.agritune.schemas.protocols import EncoderBackend
 from precisionai.agritune.services.benchmark_service import run_benchmark
-from precisionai.agritune.services.dataset_service import inspect_dataset, validate_dataset
+from precisionai.agritune.services.config_template_service import write_config_template
+from precisionai.agritune.services.dataset_service import (
+    inspect_dataset,
+    validate_dataset,
+    write_manifest_template,
+)
 from precisionai.agritune.services.encoder_selection import build_encoder, build_raw_encoder
 from precisionai.agritune.services.evaluation_service import EvaluationRunConfig, run_evaluation
 from precisionai.agritune.services.feature_service import build_features
@@ -32,6 +37,17 @@ from precisionai.agritune.services.training_service import run_training
 from precisionai.agritune.tasks.segmentation.losses import SegmentationLossConfig
 
 logger = get_logger(__name__)
+
+
+def config_init(args: argparse.Namespace) -> int:
+    """Handle ``agritune config init``."""
+    try:
+        path = write_config_template(args.output, force=args.force)
+    except FileExistsError as err:
+        print(str(err), file=sys.stderr)
+        return 1
+    print(f"wrote config template: {path}")
+    return 0
 
 
 def dataset_validate(args: argparse.Namespace) -> int:
@@ -49,6 +65,17 @@ def dataset_validate(args: argparse.Namespace) -> int:
 def dataset_inspect(args: argparse.Namespace) -> int:
     """Handle ``agritune dataset inspect``."""
     print(json.dumps(inspect_dataset(args.manifest), indent=2))
+    return 0
+
+
+def dataset_init(args: argparse.Namespace) -> int:
+    """Handle ``agritune dataset init``."""
+    try:
+        path = write_manifest_template(args.output, force=args.force)
+    except FileExistsError as err:
+        print(str(err), file=sys.stderr)
+        return 1
+    print(f"wrote manifest template: {path}")
     return 0
 
 

@@ -59,6 +59,38 @@ def _train_a_checkpoint(client: TestClient, tmp_path: Path, *, run_id: str = "ap
     return manifest_path, store_path, checkpoint_path
 
 
+def test_train_with_feature_augmentation_config_runs_full_pipeline(tmp_path: Path) -> None:
+    client = _client()
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    store_path = tmp_path / "features"
+    build_response = client.post(
+        "/features/build", json={"manifest_path": str(manifest_path), "store": str(store_path)}
+    )
+    assert build_response.status_code == 200
+
+    config = {
+        "manifest_path": str(manifest_path),
+        "feature_store_dir": str(store_path),
+        "run_root": str(tmp_path / "runs"),
+        "run_id": "api-feature-aug-run",
+        "num_classes": 2,
+        "encoder_fingerprint": {"model": "fake-encoder", "revision": "fake-v1", "preprocessing": ""},
+        "batch_size": 2,
+        "val_fraction": 0.34,
+        "optimizer": {"name": "adamw", "lr": 0.05},
+        "trainer": {"max_epochs": 1},
+        "feature_augmentation": {"patch_dropout_probability": 0.1, "gaussian_noise_std": 0.05},
+    }
+    config_path = tmp_path / "train.yaml"
+    config_path.write_text(yaml.safe_dump(config))
+
+    response = client.post("/train", json={"config_path": str(config_path)})
+
+    assert response.status_code == 200
+    assert response.json()["final_epoch"] == 1
+    assert "mean_iou" in response.json()["train_metrics"]
+
+
 def test_features_build_with_offline_augmentation_computes_the_augmented_variant_too(tmp_path: Path) -> None:
     client = _client()
     manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))

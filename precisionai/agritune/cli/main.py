@@ -37,6 +37,13 @@ def _build_dataset_parser(subparsers: argparse._SubParsersAction) -> None:
     inspect.add_argument("--manifest", required=True, help="Path to the dataset manifest file.")
     inspect.set_defaults(handler=handlers.dataset_inspect)
 
+    init = dataset_subparsers.add_parser(
+        "init", help="Write an example dataset manifest CSV (placeholder rows) to edit."
+    )
+    init.add_argument("--output", required=True, help="Destination path for the generated manifest CSV.")
+    init.add_argument("--force", action="store_true", help="Overwrite --output if it already exists.")
+    init.set_defaults(handler=handlers.dataset_init)
+
 
 def _add_encoder_selection_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--base-url", default=None, help="Hosted encoder API base URL; omit to use the fake encoder.")
@@ -49,6 +56,18 @@ def _add_encoder_selection_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--preprocessing", default="", help="A stable label for preprocessing params, for cache invalidation."
     )
+
+
+def _build_config_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser("config", help="Generate and inspect training run config files.")
+    config_subparsers = parser.add_subparsers(dest="subcommand", required=True)
+
+    init = config_subparsers.add_parser(
+        "init", help="Write a fully-commented training config template (placeholders + defaults)."
+    )
+    init.add_argument("--output", required=True, help="Destination path for the generated YAML file.")
+    init.add_argument("--force", action="store_true", help="Overwrite --output if it already exists.")
+    init.set_defaults(handler=handlers.config_init)
 
 
 def _build_encoder_parser(subparsers: argparse._SubParsersAction) -> None:
@@ -182,8 +201,8 @@ def build_parser() -> argparse.ArgumentParser:
     Returns
     -------
     argparse.ArgumentParser
-        Parser with all top-level subcommands (``dataset``, ``encoder``, ``features``, ``train``,
-        ``evaluate``, ``predict``) registered.
+        Parser with all top-level subcommands (``config``, ``dataset``, ``encoder``, ``features``,
+        ``train``, ``evaluate``, ``predict``) registered.
     """
     parser = argparse.ArgumentParser(
         prog="agritune",
@@ -196,6 +215,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Logging level for AgriTune loggers (default: INFO).",
     )
     subparsers = parser.add_subparsers(dest="command")
+    _build_config_parser(subparsers)
     _build_dataset_parser(subparsers)
     _build_encoder_parser(subparsers)
     _build_features_parser(subparsers)

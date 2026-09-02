@@ -1,0 +1,9 @@
+# A light regularizing perturbation on top of the frozen encoder's features — never touches the
+# feature cache/store (a pure runtime perturbation applied after every feature lookup, training
+# batches only), so it composes freely with any feature_provider and augmentation.mode.
+patch_dropout_probability: 0.05
+token_masking_probability: 0.0
+token_mask_value: 0.0
+gaussian_noise_std: 0.01
+cls_dropout_probability: 0.0
+channel_dropout_probability: 0.0

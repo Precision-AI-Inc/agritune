@@ -90,6 +90,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `configs/augmentation/*.yaml` — point both the build and the training config's `augmentation:`
   block at the same file so their cache keys match. New `cli.config.load_augmentation_selection`
   shares the parsing between the CLI and the API route.
+- `TrainingRunConfig.feature_augmentation` (`feature_augmentation:` in a flat YAML config, or the
+  new `feature_augmentation` Hydra group — `none`/`light` — in the composed one), closing a gap
+  where `FeatureAugmentationPipeline`/`FeatureAugmentationConfig` (patch dropout, token masking,
+  Gaussian feature noise, CLS dropout, channel dropout) were fully implemented and accepted by
+  `Trainer`'s constructor but never reachable from `agritune train`/`POST /train` — only from
+  direct Python construction. Included in the run's critical-config reproducibility fingerprint,
+  alongside image-space `augmentation`.
+- `agritune config init --output <path> [--force]`: writes a fully-commented, flat training config
+  template spelling out every field `TrainingRunConfig` accepts at its default value, with the
+  dataset-specific fields marked `REQUIRED` as placeholders — the same shape as
+  `examples/segmentation/cwfid.yaml` without the CWFID-specific values. Backed by the new
+  `services.config_template_service`.
+- `agritune dataset init --output <path> [--force]`: writes an example manifest CSV (a header row
+  plus a few placeholder samples) to start a new dataset's manifest from. Backed by
+  `services.dataset_service.write_manifest_template`, sharing its file-writing/overwrite-guard
+  logic with `config init` via the new `utils.scaffold` helper.
 
 ### Changed
 

@@ -23,6 +23,64 @@ _ROWS = [
 ]
 
 
+def test_config_init_writes_a_template_file(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    output_path = tmp_path / "config.yaml"
+    exit_code = main(["config", "init", "--output", str(output_path)])
+    assert exit_code == 0
+    assert output_path.is_file()
+    assert "wrote config template" in capsys.readouterr().out
+
+
+def test_config_init_refuses_to_overwrite_without_force(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    output_path = tmp_path / "config.yaml"
+    output_path.write_text("existing content")
+
+    exit_code = main(["config", "init", "--output", str(output_path)])
+
+    assert exit_code == 1
+    assert "already exists" in capsys.readouterr().err
+    assert output_path.read_text() == "existing content"
+
+
+def test_config_init_overwrites_with_force(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    output_path = tmp_path / "config.yaml"
+    output_path.write_text("existing content")
+
+    exit_code = main(["config", "init", "--output", str(output_path), "--force"])
+
+    assert exit_code == 0
+    assert output_path.read_text() != "existing content"
+
+
+def test_dataset_init_writes_a_manifest_template_file(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    output_path = tmp_path / "manifest.csv"
+    exit_code = main(["dataset", "init", "--output", str(output_path)])
+    assert exit_code == 0
+    assert output_path.is_file()
+    assert "wrote manifest template" in capsys.readouterr().out
+
+
+def test_dataset_init_refuses_to_overwrite_without_force(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    output_path = tmp_path / "manifest.csv"
+    output_path.write_text("existing content")
+
+    exit_code = main(["dataset", "init", "--output", str(output_path)])
+
+    assert exit_code == 1
+    assert "already exists" in capsys.readouterr().err
+    assert output_path.read_text() == "existing content"
+
+
+def test_dataset_init_overwrites_with_force(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    output_path = tmp_path / "manifest.csv"
+    output_path.write_text("existing content")
+
+    exit_code = main(["dataset", "init", "--output", str(output_path), "--force"])
+
+    assert exit_code == 0
+    assert output_path.read_text() != "existing content"
+
+
 def test_dataset_validate_reports_ok_for_clean_manifest(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     manifest_path = build_manifest(tmp_path)
     exit_code = main(["dataset", "validate", "--manifest", str(manifest_path)])
@@ -167,6 +225,45 @@ def test_train_runs_full_pipeline_from_yaml_config(tmp_path: Path, capsys: pytes
     assert "final epoch: 2" in out
     assert "train metrics" in out
     assert (tmp_path / "runs" / "cli-run" / "checkpoints" / "last.ckpt").is_file()
+
+
+def test_train_with_feature_augmentation_config_runs_full_pipeline(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    store_path = tmp_path / "features"
+
+    build_exit_code = main(["features", "build", "--manifest", str(manifest_path), "--store", str(store_path)])
+    assert build_exit_code == 0
+    capsys.readouterr()
+
+    config = {
+        "manifest_path": str(manifest_path),
+        "feature_store_dir": str(store_path),
+        "run_root": str(tmp_path / "runs"),
+        "run_id": "cli-feature-aug-run",
+        "num_classes": 2,
+        "encoder_fingerprint": {"model": "fake-encoder", "revision": "fake-v1", "preprocessing": ""},
+        "decoder_name": "mlp_probe",
+        "batch_size": 2,
+        "val_fraction": 0.34,
+        "optimizer": {"name": "adamw", "lr": 0.05},
+        "trainer": {"max_epochs": 1},
+        "feature_augmentation": {
+            "patch_dropout_probability": 0.1,
+            "gaussian_noise_std": 0.05,
+            "channel_dropout_probability": 0.05,
+        },
+    }
+    config_path = tmp_path / "train.yaml"
+    config_path.write_text(yaml.safe_dump(config))
+
+    exit_code = main(["train", "--config", str(config_path)])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "final epoch: 1" in out
+    assert (tmp_path / "runs" / "cli-feature-aug-run" / "checkpoints" / "last.ckpt").is_file()
 
 
 def test_train_applies_dotlist_overrides(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

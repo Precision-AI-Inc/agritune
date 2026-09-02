@@ -1,0 +1,8 @@
+# No feature-space augmentation — features pass through unchanged. Compatible with every
+# feature_provider and every image-space augmentation.mode.
+patch_dropout_probability: 0.0
+token_masking_probability: 0.0
+token_mask_value: 0.0
+gaussian_noise_std: 0.0
+cls_dropout_probability: 0.0
+channel_dropout_probability: 0.0

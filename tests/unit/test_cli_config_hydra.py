@@ -110,6 +110,27 @@ def test_augmentation_online_requires_a_non_cached_feature_provider_selection(tm
     assert config.feature_provider == "cached"
 
 
+def test_feature_augmentation_defaults_to_none_group(tmp_path: Path) -> None:
+    config = load_training_run_config(str(_CONFIG_PATH), _overrides(tmp_path))
+    assert config.feature_augmentation.patch_dropout_probability == 0.0
+    assert config.feature_augmentation.gaussian_noise_std == 0.0
+
+
+def test_feature_augmentation_light_group_composes(tmp_path: Path) -> None:
+    config = load_training_run_config(str(_CONFIG_PATH), _overrides(tmp_path, "feature_augmentation=light"))
+    assert config.feature_augmentation.patch_dropout_probability == 0.05
+    assert config.feature_augmentation.gaussian_noise_std == 0.01
+
+
+def test_feature_augmentation_group_field_overrides(tmp_path: Path) -> None:
+    config = load_training_run_config(
+        str(_CONFIG_PATH),
+        _overrides(tmp_path, "feature_augmentation=light", "feature_augmentation.gaussian_noise_std=0.5"),
+    )
+    assert config.feature_augmentation.patch_dropout_probability == 0.05
+    assert config.feature_augmentation.gaussian_noise_std == 0.5
+
+
 def test_feature_provider_online_and_hybrid_are_selectable(tmp_path: Path) -> None:
     online = load_training_run_config(str(_CONFIG_PATH), _overrides(tmp_path, "feature_provider=online"))
     hybrid = load_training_run_config(str(_CONFIG_PATH), _overrides(tmp_path, "feature_provider=hybrid"))

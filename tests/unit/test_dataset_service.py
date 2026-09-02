@@ -5,7 +5,15 @@
 
 from pathlib import Path
 
-from precisionai.agritune.services.dataset_service import inspect_dataset, validate_dataset
+import pytest
+
+from precisionai.agritune.data.manifest import parse_manifest_rows
+from precisionai.agritune.services.dataset_service import (
+    inspect_dataset,
+    render_manifest_template,
+    validate_dataset,
+    write_manifest_template,
+)
 from tests.fixtures.manifest_factory import build_manifest
 
 
@@ -45,3 +53,38 @@ def test_inspect_dataset_skips_unreadable_masks(tmp_path: Path) -> None:
     manifest_path = build_manifest(tmp_path, omit_mask_for="sample-1")
     result = inspect_dataset(str(manifest_path))
     assert result["num_samples"] == 4  # still counts the row, just skips its mask stats
+
+
+def test_render_manifest_template_is_a_parseable_manifest_with_placeholder_rows(tmp_path: Path) -> None:
+    path = tmp_path / "manifest.csv"
+    path.write_text(render_manifest_template(), encoding="utf-8")
+
+    rows = parse_manifest_rows(path)
+
+    assert len(rows) >= 1
+    for row in rows:
+        assert row.sample_id
+        assert row.image_path
+        assert row.mask_path
+
+
+def test_write_manifest_template_creates_the_file(tmp_path: Path) -> None:
+    output = tmp_path / "nested" / "manifest.csv"
+    result = write_manifest_template(output)
+    assert result == output
+    assert output.read_text(encoding="utf-8") == render_manifest_template()
+
+
+def test_write_manifest_template_refuses_to_overwrite_by_default(tmp_path: Path) -> None:
+    output = tmp_path / "manifest.csv"
+    output.write_text("existing content", encoding="utf-8")
+    with pytest.raises(FileExistsError, match="already exists"):
+        write_manifest_template(output)
+    assert output.read_text(encoding="utf-8") == "existing content"
+
+
+def test_write_manifest_template_overwrites_when_forced(tmp_path: Path) -> None:
+    output = tmp_path / "manifest.csv"
+    output.write_text("existing content", encoding="utf-8")
+    write_manifest_template(output, force=True)
+    assert output.read_text(encoding="utf-8") == render_manifest_template()

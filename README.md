@@ -59,6 +59,9 @@ agritune --help
 ```
 
 ```bash
+agritune config init           # write a fully-commented training config template to edit
+
+agritune dataset init          # write an example manifest CSV (placeholder rows) to edit
 agritune dataset validate      # missing files, duplicate IDs, invalid labels, dimension mismatch
 agritune dataset inspect       # dataset statistics
 
@@ -74,7 +77,7 @@ agritune evaluate
 agritune predict                # --overlays writes a colorized prediction overlay per sample
 ```
 
-The CLI, the FastAPI layer (`precisionai.agritune.api.create_app()`, one route per command above), and direct Python usage all call the same `precisionai.agritune.services.*` functions — no logic is duplicated between entry points.
+The CLI, the FastAPI layer (`precisionai.agritune.api.create_app()`, one route per command above except `config init`/`dataset init`, local file-scaffolding utilities with no server-side equivalent), and direct Python usage all call the same `precisionai.agritune.services.*` functions — no logic is duplicated between entry points.
 
 ---
 

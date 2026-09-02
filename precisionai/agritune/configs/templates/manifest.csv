@@ -1,0 +1,4 @@
+sample_id,image_path,mask_path,field_id,farm_id,capture_date
+sample-001,images/sample-001.png,masks/sample-001.png,field-a,farm-1,2026-01-01
+sample-002,images/sample-002.png,masks/sample-002.png,field-a,farm-1,2026-01-02
+sample-003,images/sample-003.png,masks/sample-003.png,field-b,farm-1,2026-01-03

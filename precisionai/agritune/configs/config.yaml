@@ -9,6 +9,7 @@ defaults:
   - dataset: agricultural_segmentation
   - encoder: fake
   - augmentation: none
+  - feature_augmentation: none
   - feature_provider: cached
   - task: segmentation
   - decoder: mlp_probe

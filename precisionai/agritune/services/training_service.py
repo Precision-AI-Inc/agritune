@@ -21,6 +21,7 @@ from typing import Any
 import numpy as np
 import torch
 
+from precisionai.agritune.augmentations.feature.pipeline import FeatureAugmentationConfig, FeatureAugmentationPipeline
 from precisionai.agritune.augmentations.image.pipeline import (
     AugmentationMode,
     AugmentationPipelineConfig,
@@ -117,6 +118,7 @@ def _critical_config(config: "TrainingRunConfig") -> dict[str, Any]:
         "feature_provider": config.feature_provider,
         "encoder_base_url": config.encoder_base_url,
         "augmentation": _jsonable(config.augmentation),
+        "feature_augmentation": _jsonable(config.feature_augmentation),
         "decoder_name": config.decoder_name,
         "decoder_kwargs": _jsonable(config.decoder_kwargs),
         "batch_size": config.batch_size,
@@ -209,6 +211,11 @@ class TrainingRunConfig:
     encoder_api_key : str | None
         Ignored when ``encoder_base_url`` is ``None``.
     augmentation : AugmentationSelection
+    feature_augmentation : FeatureAugmentationConfig
+        Applied to training batches' features only, right after ``feature_provider.get_features``
+        and before the decoder — composes with ``augmentation`` (image-space) and any
+        ``feature_provider`` freely, since it never touches the feature cache/store, just a
+        runtime perturbation. Never applied to validation.
     decoder_name : str
         ``"mlp_probe"``, ``"token_fpn"``, ``"aspp"``, ``"ppm"``, ``"segmenter"``, or
         ``"mask_former"`` — see :func:`~precisionai.agritune.services.segmentation_common.build_decoder`.
@@ -247,6 +254,7 @@ class TrainingRunConfig:
     encoder_base_url: str | None = None
     encoder_api_key: str | None = None
     augmentation: AugmentationSelection = field(default_factory=AugmentationSelection)
+    feature_augmentation: FeatureAugmentationConfig = field(default_factory=FeatureAugmentationConfig)
     decoder_name: str = "mlp_probe"
     decoder_kwargs: dict[str, Any] = field(default_factory=dict)
     batch_size: int = 4
@@ -466,6 +474,7 @@ def run_training(config: TrainingRunConfig, *, store: DirectoryFeatureStore | Sh
         config=trainer_config,
         checkpoint_manager=checkpoint_manager,
         tracker=tracker,
+        feature_augmentation=FeatureAugmentationPipeline(config.feature_augmentation),
     )
 
     if isinstance(train_batches, OnlineAugmentedBatches):
