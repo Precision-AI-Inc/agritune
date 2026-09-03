@@ -52,6 +52,17 @@ def mask_to_target_tensor(mask: Any) -> torch.Tensor:
     return torch.from_numpy(np.array(mask)).long()
 
 
+def mask_output_size(mask: Any) -> tuple[int, int]:
+    """Return a decoded mask's ``(height, width)`` as a concrete 2-tuple for :func:`build_decoder`.
+
+    ``np.ndarray.shape`` is typed as a variable-length ``tuple[int, ...]``, which does not satisfy
+    ``build_decoder``'s ``output_size: tuple[int, int]`` under static type checking even though a
+    2D mask always produces exactly two dimensions at runtime.
+    """
+    height, width = np.array(mask).shape
+    return int(height), int(width)
+
+
 def build_training_batches(dataset: ManifestDataset, *, batch_size: int) -> list[TrainingBatch]:
     """Chunk a dataset into :class:`TrainingBatch` objects of at most ``batch_size`` samples."""
     batches = []

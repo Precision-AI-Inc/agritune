@@ -11,8 +11,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-
 from precisionai.agritune.data.dataset import ManifestDataset
 from precisionai.agritune.features.keys import EncoderFingerprint
 from precisionai.agritune.logging import get_logger
@@ -22,6 +20,7 @@ from precisionai.agritune.services.segmentation_common import (
     build_cached_feature_provider,
     build_decoder,
     build_training_batches,
+    mask_output_size,
     probe_feature_dims,
 )
 from precisionai.agritune.tasks.segmentation.losses import SegmentationLoss, SegmentationLossConfig
@@ -111,7 +110,7 @@ def run_evaluation(
     first_sample = dataset[0]
     probe_sample = PreparedSample(sample_id=first_sample.sample_id, image=None, target=None)
     patch_dim, cls_dim = probe_feature_dims(provider, probe_sample)
-    output_size = tuple(np.array(first_sample.target).shape)
+    output_size = mask_output_size(first_sample.target)
 
     decoder = build_decoder(
         config.decoder_name,

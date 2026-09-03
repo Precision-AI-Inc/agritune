@@ -155,5 +155,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Log every encoder retry attempt (`EncoderGateway`) at `WARNING` instead of only counting it in
   metrics — a bounded retry-then-fail run and an actual hang were previously indistinguishable from
   the terminal, since nothing was printed during the backoff sleeps between attempts.
+- CI (`unit-test.yml`/`pre-commit.yml`): install the CPU-only `torch` wheel
+  (`--index-url https://download.pytorch.org/whl/cpu`) before `pip install -e ".[dev]"` — the
+  default Linux PyPI wheel bundles the full CUDA runtime (several GB of `nvidia-*`/`triton`
+  packages) that a CPU-only CI runner never uses, and was exhausting the runner's disk.
+- `evaluation_service.py`/`prediction_service.py`/`training_service.py`: build a decoder's
+  `output_size` via a new `segmentation_common.mask_output_size` helper that returns a concrete
+  `tuple[int, int]`, instead of `tuple(np.array(mask).shape)` (typed as a variable-length
+  `tuple[int, ...]`) — fixes a `pyright` `reportArgumentType` error that a newer `numpy` type-stub
+  resolution surfaces on some Python versions.
+- `trailing-whitespace` pre-commit hook: pass `--markdown-linebreak-ext=md` so it stops stripping
+  intentional Markdown hard-break trailing spaces (it was rewriting `examples/SANITY_CHECK.md` on
+  every run).
 
 [Unreleased]: https://github.com/Precision-AI-Inc/agritune/compare/v0.1.0...HEAD

@@ -18,7 +18,6 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import torch
 
 from precisionai.agritune.augmentations.feature.pipeline import FeatureAugmentationConfig, FeatureAugmentationPipeline
@@ -49,6 +48,7 @@ from precisionai.agritune.services.segmentation_common import (
     build_image_hash_fn,
     build_static_augmented_batches,
     build_training_batches,
+    mask_output_size,
     probe_feature_dims,
 )
 from precisionai.agritune.services.tracking_selection import TrackingSelection, build_trackers
@@ -455,7 +455,7 @@ def run_training(
     # From the *augmented* target, not first_train_sample.target directly: geometric augmentation
     # (resize/random_crop) changes the spatial size every training batch's target actually has, so
     # probing the pre-augmentation sample would build a decoder upsampling to the wrong resolution.
-    output_size = tuple(np.array(prepared_probe.target).shape)
+    output_size = mask_output_size(prepared_probe.target)
 
     decoder = build_decoder(
         config.decoder_name,
