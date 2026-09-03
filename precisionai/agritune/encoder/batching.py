@@ -6,7 +6,10 @@
 from collections.abc import Iterator, Sequence
 from typing import TypeVar
 
+from precisionai.agritune.logging import get_logger
+
 T = TypeVar("T")
+logger = get_logger(__name__)
 
 
 def batch_items(items: Sequence[T], *, max_batch_size: int) -> Iterator[list[T]]:
@@ -33,4 +36,6 @@ def batch_items(items: Sequence[T], *, max_batch_size: int) -> Iterator[list[T]]
     if max_batch_size <= 0:
         raise ValueError(f"max_batch_size must be positive; got {max_batch_size}")
     for start in range(0, len(items), max_batch_size):
-        yield list(items[start : start + max_batch_size])
+        chunk = list(items[start : start + max_batch_size])
+        logger.debug("yielding batch of %d item(s) starting at index %d", len(chunk), start)
+        yield chunk

@@ -109,6 +109,7 @@ def _build_trainer(
     checkpoint_every_n_steps: int | None = None,
     tracker: _FakeTracker | None = None,
     feature_augmentation: FeatureAugmentation | None = None,
+    show_progress: bool = False,
 ) -> tuple[Trainer, MLPProbeDecoder]:
     set_deterministic_seed(seed)  # ensures identical decoder initialization across builds
     decoder = MLPProbeDecoder(patch_dim=4, num_classes=2, output_size=(2, 2))
@@ -136,6 +137,7 @@ def _build_trainer(
         checkpoint_manager=checkpoint_manager,
         tracker=tracker,
         feature_augmentation=feature_augmentation,
+        show_progress=show_progress,
     )
     return trainer, decoder
 
@@ -146,6 +148,14 @@ def test_fit_runs_without_error_and_advances_state() -> None:
     trainer.fit([batch])
     assert trainer.state.epoch == 2
     assert trainer.state.global_optimizer_step == 2  # one optimizer step per epoch here
+
+
+def test_fit_with_show_progress_still_advances_state() -> None:
+    trainer, _ = _build_trainer(max_epochs=1, show_progress=True)
+    train_batch = TrainingBatch(samples=[_sample("a"), _sample("b")], targets=torch.randint(0, 2, (2, 2, 2)))
+    val_batch = TrainingBatch(samples=[_sample("c")], targets=torch.randint(0, 2, (1, 2, 2)))
+    trainer.fit([train_batch], [val_batch], val_metric=SegmentationMetric(num_classes=2))
+    assert trainer.state.epoch == 1
 
 
 def test_gradient_accumulation_equivalence() -> None:

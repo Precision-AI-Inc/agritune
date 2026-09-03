@@ -12,14 +12,22 @@ from PIL import Image
 
 from precisionai.agritune.data.manifest import parse_manifest_rows
 from precisionai.agritune.data.validation import ValidationReport, validate_manifest
+from precisionai.agritune.logging import get_logger
 from precisionai.agritune.utils.scaffold import read_scaffold_template, write_scaffold_file
+
+logger = get_logger(__name__)
 
 
 def validate_dataset(
     manifest_path: str, *, num_classes: int | None = None, ignore_index: int | None = None
 ) -> ValidationReport:
     """Validate a dataset manifest — see :func:`~precisionai.agritune.data.validation.validate_manifest`."""
-    return validate_manifest(manifest_path, num_classes=num_classes, ignore_index=ignore_index)
+    report = validate_manifest(manifest_path, num_classes=num_classes, ignore_index=ignore_index)
+    if report.is_valid:
+        logger.info("manifest %s is valid", manifest_path)
+    else:
+        logger.warning("manifest %s has %d issue(s)", manifest_path, len(report.issues))
+    return report
 
 
 def inspect_dataset(manifest_path: str) -> dict[str, Any]:
@@ -53,6 +61,7 @@ def inspect_dataset(manifest_path: str) -> dict[str, Any]:
             continue
         class_pixel_counts.update(dict(zip((int(label) for label in labels), (int(c) for c in counts), strict=True)))
 
+    logger.info("inspected manifest %s: %d sample(s)", manifest_path, len(rows))
     return {
         "num_samples": len(rows),
         "metadata_columns": sorted(base_dir_columns),
@@ -90,4 +99,6 @@ def write_manifest_template(output_path: str | Path, *, force: bool = False) -> 
     FileExistsError
         If ``output_path`` already exists and ``force`` is ``False``.
     """
-    return write_scaffold_file(output_path, render_manifest_template(), force=force)
+    path = write_scaffold_file(output_path, render_manifest_template(), force=force)
+    logger.info("wrote manifest template to %s", path)
+    return path

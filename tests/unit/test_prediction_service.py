@@ -64,7 +64,7 @@ async def test_run_prediction_writes_one_png_per_sample(tmp_path: Path) -> None:
         num_classes=2,
         encoder_fingerprint=_FINGERPRINT,
     )
-    written = run_prediction(config, store=store)
+    written = run_prediction(config, store=store, show_progress=True)
 
     assert len(written) == 6
     for path in written:

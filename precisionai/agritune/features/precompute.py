@@ -99,6 +99,7 @@ async def precompute_features(
         )
 
         if store.has(key):
+            logger.debug("sample %s already cached, skipping", sample.sample_id)
             stats.skipped += 1
         else:
             try:
@@ -115,4 +116,11 @@ async def precompute_features(
             on_progress(stats)
 
     store.flush()
+    logger.info(
+        "precompute complete: total=%d computed=%d skipped=%d failed=%d",
+        stats.total,
+        stats.computed,
+        stats.skipped,
+        stats.failed,
+    )
     return stats

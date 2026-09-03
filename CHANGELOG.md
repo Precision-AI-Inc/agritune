@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Info/debug/warning logging across previously-silent modules (services, encoder, evaluator),
+  plus `tqdm` progress bars over every long-running loop (training/validation batches,
+  evaluation, prediction, feature precompute, encoder benchmarking, and the CWFID/PhenoBench prep
+  scripts) via a new `precisionai.agritune.logging.progress_iter` helper. Progress bars are
+  opt-in per call (`show_progress`, default `False`) so the API stays headless; `Trainer`/
+  `evaluate()` gate them on `DistributedContext.is_main_process`, ready for the eventual DDP
+  rollout. The FastAPI app now calls `configure_logging()` on startup
+  (`AGRITUNE_LOG_LEVEL`, default `INFO`), and its Rich console handler now writes to stderr
+  instead of stdout so log lines never interleave with a CLI command's own JSON output.
 - CWFID example: `examples/datasets/prepare_cwfid.py` downloads the public Crop/Weed Field Image
   Dataset, writes an AgriTune manifest, and `examples/SANITY_CHECK.md` runs the full hosted-encoder
   pipeline against it. A `--full` flag downloads all 60 frames without needing to know the exact

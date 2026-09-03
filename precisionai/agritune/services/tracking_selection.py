@@ -12,7 +12,7 @@ fanning out to all of them.
 
 from dataclasses import dataclass, field
 
-from precisionai.agritune.logging import RunDirectory
+from precisionai.agritune.logging import RunDirectory, get_logger
 from precisionai.agritune.schemas.protocols import Tracker
 from precisionai.agritune.tracking.comet_tracker import CometTracker
 from precisionai.agritune.tracking.jsonl import JSONLTracker
@@ -24,6 +24,7 @@ from precisionai.agritune.tracking.tensorboard import TensorBoardTracker
 from precisionai.agritune.tracking.wandb_tracker import WandBTracker
 
 _KNOWN_BACKENDS = frozenset({"null", "jsonl", "tensorboard", "mlflow", "wandb", "neptune", "comet"})
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -78,8 +79,10 @@ def build_trackers(selection: TrackingSelection, *, run_dir: RunDirectory, run_i
 
     backends = [name for name in selection.backends if name != "null"]
     if not backends:
+        logger.info("using NullTracker (no tracking backend selected)")
         return NullTracker()
 
+    logger.info("using tracking backend(s): %s", backends)
     trackers = [_build_one(name, selection, run_dir=run_dir, run_id=run_id) for name in backends]
     return trackers[0] if len(trackers) == 1 else MultiTracker(trackers)
 

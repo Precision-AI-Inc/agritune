@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Structured logging setup and run provenance, re-exported for convenient import."""
 
+from precisionai.agritune.logging.progress import progress_iter
 from precisionai.agritune.logging.provenance import (
     EnvironmentInfo,
     GitInfo,
@@ -19,4 +20,5 @@ __all__ = [
     "capture_git_info",
     "configure_logging",
     "get_logger",
+    "progress_iter",
 ]

@@ -53,6 +53,7 @@ from pathlib import Path
 import httpx
 import numpy as np
 from PIL import Image
+from tqdm import tqdm
 
 _ZIP_URL = "https://www.phenobench.org/data/PhenoBench-v110.zip"
 _ZIP_MD5 = "5168bba762053725890478432cdbdb1d"
@@ -60,7 +61,6 @@ _ZIP_SIZE_BYTES = 7_630_658_167
 _ARCHIVE_ROOT = "PhenoBench"
 _N_SOURCE_IMAGES = {"train": 1407, "val": 772}
 _USER_AGENT = "pai-agritune-examples/0.0 (PhenoBench prep; research use)"
-_REPORT_EVERY_BYTES = 250_000_000
 _LABEL_LUT = np.array([0, 1, 2, 1, 2], dtype=np.uint8)  # source id -> background/crop/weed
 
 
@@ -72,29 +72,26 @@ def _download_zip(zip_path: Path) -> None:
     zip_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = zip_path.with_suffix(zip_path.suffix + ".part")
     digest = hashlib.md5(usedforsecurity=False)
-    downloaded = 0
-    next_report = _REPORT_EVERY_BYTES
     timeout = httpx.Timeout(30.0, read=300.0, write=300.0)
-    print(f"downloading {_ZIP_URL} -> {tmp_path} (~{_ZIP_SIZE_BYTES / 1e9:.1f} GB, one-time)", flush=True)
     with httpx.stream(
         "GET", _ZIP_URL, headers={"User-Agent": _USER_AGENT}, timeout=timeout, follow_redirects=True
     ) as response:
         response.raise_for_status()
         total = int(response.headers.get("content-length", _ZIP_SIZE_BYTES))
-        with tmp_path.open("wb") as handle:
+        with (
+            tmp_path.open("wb") as handle,
+            tqdm(desc="downloading PhenoBench", total=total, unit="B", unit_scale=True, unit_divisor=1024) as bar,
+        ):
             for chunk in response.iter_bytes(chunk_size=1 << 20):
                 handle.write(chunk)
                 digest.update(chunk)
-                downloaded += len(chunk)
-                if downloaded >= next_report:
-                    print(f"  downloaded {downloaded / 1e9:.2f} / {total / 1e9:.2f} GB", flush=True)
-                    next_report += _REPORT_EVERY_BYTES
+                bar.update(len(chunk))
 
     if digest.hexdigest() != _ZIP_MD5:
         tmp_path.unlink()
         raise ValueError(f"downloaded archive checksum mismatch (expected md5 {_ZIP_MD5}); deleted, re-run to retry")
     tmp_path.replace(zip_path)
-    print(f"downloaded and verified {zip_path} ({downloaded / 1e9:.2f} GB)")
+    print(f"downloaded and verified {zip_path}")
 
 
 def _list_split_samples(archive: zipfile.ZipFile, split: str) -> list[str]:
@@ -162,12 +159,13 @@ def prepare_phenobench(output_dir: Path, *, zip_path: Path, splits: list[str], m
     with zipfile.ZipFile(zip_path) as archive:
         for split in splits:
             names = _list_split_samples(archive, split)[:max_samples]
-            for index, name in enumerate(names, start=1):
+            for index, name in tqdm(
+                enumerate(names, start=1), total=len(names), desc=f"PhenoBench {split}", unit="sample"
+            ):
                 stem = Path(name).stem
                 sample_id = f"phenobench-{split}-{stem}"
                 image_rel = f"images/{split}_{stem}.png"
                 mask_rel = f"masks/{split}_{stem}.png"
-                print(f"[{split} {index}/{len(names)}] {sample_id}", flush=True)
                 image_bytes = archive.read(f"{_ARCHIVE_ROOT}/{split}/images/{name}")
                 semantics_bytes = archive.read(f"{_ARCHIVE_ROOT}/{split}/semantics/{name}")
                 _save_resized_rgb(image_bytes, image_dir / f"{split}_{stem}.png", size)

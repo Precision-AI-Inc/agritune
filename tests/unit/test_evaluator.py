@@ -39,6 +39,17 @@ def test_evaluate_accumulates_across_all_batches() -> None:
     assert metric.confusion_matrix().sum().item() == 3 * 2 * 4 * 4  # 3 batches x 2 samples x 4x4 pixels
 
 
+def test_evaluate_with_show_progress_still_computes_metrics() -> None:
+    task = _task()
+    provider = FakeFeatureProvider(patch_dim=8, cls_dim=None, patch_grid=(2, 2))
+    metric = SegmentationMetric(num_classes=3)
+
+    batches = [TrainingBatch(samples=[_sample("a")], targets=torch.randint(0, 3, (1, 4, 4)))]
+    result = evaluate(task, provider, batches, metric, show_progress=True)
+
+    assert "mean_iou" in result
+
+
 def test_evaluate_reports_loss_weighted_by_batch_size() -> None:
     task = _task()
     provider = FakeFeatureProvider(patch_dim=8, cls_dim=None, patch_grid=(2, 2))

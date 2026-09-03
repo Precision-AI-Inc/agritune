@@ -36,6 +36,7 @@ from pathlib import Path
 import httpx
 import numpy as np
 from PIL import Image
+from tqdm import tqdm
 
 _SOURCE_ROOT = "https://raw.githubusercontent.com/cwfid/dataset/master"
 _N_SOURCE_IMAGES = 60
@@ -101,12 +102,11 @@ def prepare_cwfid(output_dir: Path, *, max_samples: int, size: int) -> Path:
     mask_dir.mkdir(parents=True, exist_ok=True)
 
     rows: list[dict[str, str]] = []
-    for index in range(1, max_samples + 1):
+    for index in tqdm(range(1, max_samples + 1), desc="CWFID", unit="sample"):
         stem = f"{index:03d}"
         sample_id = f"cwfid-{stem}"
         image_rel = f"images/{stem}.png"
         mask_rel = f"masks/{stem}.png"
-        print(f"[{index}/{max_samples}] {sample_id}", flush=True)
         image_bytes = _fetch(f"{_SOURCE_ROOT}/images/{stem}_image.png")
         annotation_bytes = _fetch(f"{_SOURCE_ROOT}/annotations/{stem}_annotation.png")
         _save_resized_rgb(image_bytes, image_dir / f"{stem}.png", size)

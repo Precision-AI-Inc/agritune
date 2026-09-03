@@ -32,7 +32,10 @@ from precisionai.agritune.encoder.errors import (
     EncoderTimeoutError,
     MalformedEncoderResponseError,
 )
+from precisionai.agritune.logging import get_logger
 from precisionai.agritune.schemas.features import EncoderFeatures
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -150,6 +153,9 @@ class RemoteEncoderBackend:
         extra_body: dict[str, Any] = {"return_patch_tokens": True}
         if self._config.native_resolution is not None:
             extra_body["native_resolution"] = self._config.native_resolution
+
+        # Never log the payload/headers themselves (data URIs, Authorization) — only shapes/counts.
+        logger.debug("requesting model=%s for %d image(s), sizes=%s", self._config.model, len(images), image_sizes)
 
         try:
             response = await self._client.embeddings.create(
