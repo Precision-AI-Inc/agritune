@@ -32,6 +32,12 @@ python examples/datasets/prepare_cwfid.py \
     --size 384
 ```
 
+Pass `--full` instead of `--max-samples` to download all 60 frames:
+
+```bash
+python examples/datasets/prepare_cwfid.py --output examples/datasets/cwfid --full --size 384
+```
+
 That produces:
 
 ```text
@@ -55,6 +61,64 @@ CWFID is research-use / citation-required. If you use it, cite:
 > Computer Vision Based Precision Agriculture Tasks. *ECCV 2014 Workshops*.
 
 The prepared tree is gitignored. Re-run the script on a new machine.
+
+## Worked example: PhenoBench (bigger, real-world sugar-beet fields)
+
+[PhenoBench](https://www.phenobench.org) (Weyler et al., IEEE TPAMI 2024) is a much larger
+real-world counterpart to CWFID: 1,407 training and 772 validation UAV images (1024×1024) of
+sugar-beet fields across multiple growth stages, with the same crop/weed segmentation task. Use it
+to sanity-check a model at a scale closer to production before committing to a full training run.
+
+Unlike CWFID, PhenoBench ships as a single ~7.6 GB archive rather than per-file downloads, so the
+prep script downloads it once (cached, so a later re-run with different `--max-samples`/`--size`
+does not re-download) and converts a chosen number of samples per split:
+
+```bash
+python examples/datasets/prepare_phenobench.py \
+    --output examples/datasets/phenobench \
+    --max-samples 40 \
+    --size 384
+```
+
+Pass `--full` to convert every labeled image (1,407 train + 772 val = 2,179 samples) instead of the
+default 40-per-split subset — the archive download is the same size either way, `--full` only
+changes how many of the downloaded images get converted:
+
+```bash
+python examples/datasets/prepare_phenobench.py --output examples/datasets/phenobench --full --size 384
+```
+
+That produces the same layout as CWFID:
+
+```text
+examples/datasets/phenobench/
+├── .cache/PhenoBench-v110.zip   # cached source archive, reused across runs
+├── images/train_05-15_00028_P0030852.png …
+├── masks/train_05-15_00028_P0030852.png  …
+└── manifest.csv
+```
+
+Class map (PhenoBench's own partial-visibility labels 3/4 are collapsed into crop/weed so the
+manifest matches CWFID's convention exactly):
+
+| Index | Class |
+|---|---|
+| 0 | background |
+| 1 | crop |
+| 2 | weed |
+
+PhenoBench's `test` split annotations are withheld by the authors for their leaderboard, so this
+script only converts `train`/`val` (`--splits train val` by default).
+
+PhenoBench is licensed CC BY-SA 4.0 — derivatives (including the files this script writes) carry
+the same license. If you use it, cite:
+
+> Weyler, J., Magistri, F., Marks, E., Chong, Y.L., Sodano, M., Roggiolani, G., Chebrolu, N.,
+> Stachniss, C. and Behley, J. (2024). PhenoBench: A Large Dataset and Benchmarks for Semantic
+> Image Interpretation in the Agricultural Domain. *IEEE Transactions on Pattern Analysis and
+> Machine Intelligence*.
+
+The prepared tree (including the cached archive) is gitignored.
 
 ## Adapting this to your own data
 

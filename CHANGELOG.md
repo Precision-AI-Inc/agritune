@@ -11,7 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - CWFID example: `examples/datasets/prepare_cwfid.py` downloads the public Crop/Weed Field Image
   Dataset, writes an AgriTune manifest, and `examples/SANITY_CHECK.md` runs the full hosted-encoder
-  pipeline against it.
+  pipeline against it. A `--full` flag downloads all 60 frames without needing to know the exact
+  count.
+- PhenoBench example: `examples/datasets/prepare_phenobench.py` downloads the public PhenoBench
+  sugar-beet dataset (1,407 train / 772 val real UAV field images, vs. CWFID's 60) and writes an
+  AgriTune manifest, collapsing its 5-way partial-visibility labels into AgriTune's 3-class
+  background/crop/weed convention.
 - Optional `.env` support (`pip install pai-agritune[dotenv]`): a `.env` file is loaded into the
   environment before Hydra composition, so `${oc.env:AGRITUNE_ENCODER_API_KEY,null}` in
   `encoder/remote.yaml` resolves from it. Exported shell variables still take precedence, and

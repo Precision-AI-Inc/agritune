@@ -141,7 +141,13 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=Path("examples/datasets/cwfid"),
         help="Directory to write images/, masks/, and manifest.csv into.",
     )
-    parser.add_argument("--max-samples", type=int, default=24, help="Frames to download (1-60, default 24).")
+    sample_count = parser.add_mutually_exclusive_group()
+    sample_count.add_argument("--max-samples", type=int, default=24, help="Frames to download (1-60, default 24).")
+    sample_count.add_argument(
+        "--full",
+        action="store_true",
+        help=f"Download the complete CWFID set (all {_N_SOURCE_IMAGES} frames); overrides --max-samples.",
+    )
     parser.add_argument("--size", type=int, default=384, help="Square resize applied to image and mask (default 384).")
     return parser.parse_args(argv)
 
@@ -149,8 +155,9 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     """Download CWFID and write an AgriTune manifest."""
     args = _parse_args(argv)
+    max_samples = _N_SOURCE_IMAGES if args.full else args.max_samples
     try:
-        prepare_cwfid(args.output, max_samples=args.max_samples, size=args.size)
+        prepare_cwfid(args.output, max_samples=max_samples, size=args.size)
     except (OSError, ValueError, httpx.HTTPError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

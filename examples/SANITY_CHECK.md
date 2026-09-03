@@ -18,7 +18,7 @@ writes `examples/datasets/cwfid/manifest.csv`. See [datasets/README.md](datasets
 python examples/datasets/prepare_cwfid.py --output examples/datasets/cwfid --max-samples 24 --size 384
 ```
 
-Full 60-image set: `--max-samples 60`.
+Full 60-image set: `--full` (equivalent to `--max-samples 60`).
 
 ## 1. Validate and inspect
 

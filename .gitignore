@@ -129,6 +129,7 @@ feature_store/
 
 # Downloaded / prepared example datasets (see examples/datasets/)
 examples/datasets/cwfid/
+examples/datasets/phenobench/
 sample_data/
 
 # OS files
