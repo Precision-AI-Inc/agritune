@@ -41,6 +41,7 @@ class TestDirectoryFeatureStore:
         read_back = store.read("key1")
         assert torch.equal(read_back.patch_tokens, features.patch_tokens)
         assert read_back.cls_tokens is not None
+        assert features.cls_tokens is not None
         assert torch.equal(read_back.cls_tokens, features.cls_tokens)
         assert read_back.encoder_model == "pai-embedding"
         assert read_back.metadata == {"farm_id": "f1"}
@@ -69,6 +70,7 @@ class TestDirectoryFeatureStore:
         store.write("key1", features)
         read_back = store.read("key1")
         assert read_back.valid_patch_mask is not None
+        assert features.valid_patch_mask is not None
         assert torch.equal(read_back.valid_patch_mask, features.valid_patch_mask)
 
     def test_write_rejects_batch_size_greater_than_one(self, tmp_path: Path) -> None:
@@ -172,6 +174,7 @@ class TestShardedFeatureStore:
         read_back = store.read("key1")
         assert torch.equal(read_back.patch_tokens, original.patch_tokens)
         assert read_back.cls_tokens is not None
+        assert original.cls_tokens is not None
         assert torch.equal(read_back.cls_tokens, original.cls_tokens)
         assert read_back.metadata == {"farm_id": "f1"}
 

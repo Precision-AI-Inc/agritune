@@ -167,5 +167,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `trailing-whitespace` pre-commit hook: pass `--markdown-linebreak-ext=md` so it stops stripping
   intentional Markdown hard-break trailing spaces (it was rewriting `examples/SANITY_CHECK.md` on
   every run).
+- Fix the remaining pre-existing `pyright` errors, none introduced by recent work but all blocking
+  a clean `pre-commit`/CI run: `LossConfigRequest.name` (API schema) now uses the same `LossName`
+  literal as `SegmentationLossConfig` instead of a bare `str`; `ImageAugmentationPipeline` builds
+  its transform list typed as albumentations' own `TransformsSeqType` instead of the invariant-
+  incompatible `list[BasicTransform]`; `PrecisionContext.autocast()` is typed to yield `Any`
+  (`nullcontext`/`torch.autocast` disagree on what `__enter__` returns, but no caller binds it);
+  `cli/config.py`'s `_config_from_dict(resolved)` call gets the same `# type: ignore[arg-type]`
+  treatment the file already uses for `OmegaConf.to_container`'s deliberately-broad return type;
+  and several tests narrow an `Optional`/generic-`nn.Module` value with an `assert ... is not None`
+  / `isinstance` check before using it, instead of relying on runtime knowledge pyright can't see.
+- Untrack `.claude/scheduled_tasks.lock` (a Claude Code runtime lock file — session ID/PID/
+  timestamp, changes every session) and gitignore it; it was flapping `end-of-file-fixer` on
+  unrelated commits.
 
 [Unreleased]: https://github.com/Precision-AI-Inc/agritune/compare/v0.1.0...HEAD

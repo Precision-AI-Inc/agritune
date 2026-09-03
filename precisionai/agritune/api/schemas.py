@@ -9,6 +9,8 @@ field mirrors the equivalent CLI argument one-to-one — see ``precisionai.agrit
 
 from pydantic import BaseModel, Field
 
+from precisionai.agritune.tasks.segmentation.losses import LossName
+
 
 class EncoderSelection(BaseModel):
     """Which encoder backend to use — mirrors ``_add_encoder_selection_arguments`` in the CLI."""
@@ -160,7 +162,7 @@ class LossConfigRequest(BaseModel):
     comparable to training/validation loss from that run.
     """
 
-    name: str = Field(default="ce", description='"ce", "bce", "dice", "ce_dice", or "bce_dice".')
+    name: LossName = Field(default="ce", description='"ce", "bce", "dice", "ce_dice", or "bce_dice".')
     ignore_index: int = Field(default=-100, description="Pixel value excluded from the loss.")
     ce_weight: float = Field(default=1.0, description="Weight of the CE/BCE term in a combined loss.")
     dice_weight: float = Field(default=1.0, description="Weight of the Dice term in a combined loss.")

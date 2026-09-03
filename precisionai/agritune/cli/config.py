@@ -71,7 +71,7 @@ def load_training_run_config(config_path: str, overrides: list[str] | None = Non
         merged = OmegaConf.merge(raw, OmegaConf.from_dotlist(overrides)) if overrides else raw
         resolved = OmegaConf.to_container(merged, resolve=True)  # type: ignore[assignment]
 
-    config = _config_from_dict(resolved)
+    config = _config_from_dict(resolved)  # type: ignore[arg-type]
     config.original_config = original
     config.config_overrides = list(overrides)
     return config

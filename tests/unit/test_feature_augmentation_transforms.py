@@ -100,6 +100,7 @@ def test_gaussian_feature_noise_perturbs_patch_and_cls_tokens() -> None:
     result = gaussian_feature_noise(features, std=0.1, generator=_generator(0))
     assert not torch.equal(result.patch_tokens, features.patch_tokens)
     assert result.cls_tokens is not None
+    assert features.cls_tokens is not None
     assert not torch.equal(result.cls_tokens, features.cls_tokens)
 
 

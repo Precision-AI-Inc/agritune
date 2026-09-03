@@ -401,7 +401,9 @@ def test_grad_clip_norm_bounds_gradient_magnitude() -> None:
     batch = TrainingBatch(samples=[_sample("a"), _sample("b")], targets=torch.randint(0, 2, (2, 2, 2)))
     trainer.fit([batch])
     # A tiny clip norm keeps the single optimizer step's effect on weights very small.
-    assert decoder.mlp[0].weight.abs().max().item() < 0.5
+    first_layer = decoder.mlp[0]
+    assert isinstance(first_layer, nn.Linear)  # hidden_dims=() -> a single Linear; also narrows the type
+    assert first_layer.weight.abs().max().item() < 0.5
 
 
 class _RecordingFeatureAugmentation:
