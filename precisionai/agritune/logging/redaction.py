@@ -19,9 +19,7 @@ _REDACTED = "<redacted>"
 _SENSITIVE_LABEL = r"authorization|api\s*[_-]?\s*key|api\s*[_-]?\s*token|password|secret|token"
 _SENSITIVE_QUERY_NAME = r"authorization|api[_-]?key|api[_-]?token|password|secret|token"
 # Optional short phrase between the label and the separator covers "API key provided: <value>".
-_SENSITIVE_ASSIGNMENT = re.compile(
-    rf"(?i)([\w.-]*{_SENSITIVE_LABEL})((?:\s+\w+){{0,3}}\s*[:=]\s*)([^\s,;'\"\]]+)"
-)
+_SENSITIVE_ASSIGNMENT = re.compile(rf"(?i)([\w.-]*{_SENSITIVE_LABEL})((?:\s+\w+){{0,3}}\s*[:=]\s*)([^\s,;'\"\]]+)")
 _BEARER_TOKEN = re.compile(r"(?i)(\bbearer\s+)(\S+)")
 _URL_USERINFO = re.compile(r"(\w+://)([^/@:\s]+):([^/@\s]+)@")
 _QUERY_SECRET = re.compile(rf"(?i)([?&](?:{_SENSITIVE_QUERY_NAME})=)([^&\s]+)")

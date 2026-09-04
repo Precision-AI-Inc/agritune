@@ -100,7 +100,7 @@ precisionai/agritune/
   data/           # dataset adapters, manifests, split strategies
   encoder/        # EncoderBackend protocol, FakeEncoderBackend, RemoteEncoderBackend, gateway, rate limiter
   features/       # FeatureProvider (cached/online/hybrid/prefetching), FeatureStore, cache keys, resumable precomputation
-  logging/        # structured logging setup
+  logging/        # configure_logging (stderr), secret redaction, progress bars, run provenance
   metrics/        # pure computation (segmentation metrics, etc.)
   optimization/   # optimizer/scheduler registries
   schemas/        # EncoderFeatures, Sample, PreparedSample, and core protocols

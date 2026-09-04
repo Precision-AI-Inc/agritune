@@ -1,6 +1,6 @@
 # Copyright 2026 Precision AI
 # SPDX-License-Identifier: Apache-2.0
-"""Structured logging setup and run provenance, re-exported for convenient import."""
+"""Logging setup, secret redaction, progress bars, and run provenance re-exports."""
 
 from precisionai.agritune.logging.progress import progress_iter
 from precisionai.agritune.logging.provenance import (
