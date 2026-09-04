@@ -106,7 +106,7 @@ def test_run_training_default_config_is_backward_compatible(tmp_path: Path) -> N
     assert config.feature_provider == "cached"
     assert config.augmentation.mode is AugmentationMode.NONE
 
-    result = run_training(config, store=store)
+    result = run_training(config, store=store, show_progress=True)
 
     assert result.final_train_state["epoch"] == 1
     assert "mean_iou" in result.val_metrics

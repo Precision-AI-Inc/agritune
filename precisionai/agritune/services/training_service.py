@@ -18,7 +18,6 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import torch
 
 from precisionai.agritune.augmentations.feature.pipeline import FeatureAugmentationConfig, FeatureAugmentationPipeline
@@ -49,6 +48,7 @@ from precisionai.agritune.services.segmentation_common import (
     build_image_hash_fn,
     build_static_augmented_batches,
     build_training_batches,
+    mask_output_size,
     probe_feature_dims,
 )
 from precisionai.agritune.services.tracking_selection import TrackingSelection, build_trackers
@@ -373,7 +373,9 @@ def _build_train_batches(config: TrainingRunConfig, train_dataset: ManifestDatas
     )
 
 
-def run_training(config: TrainingRunConfig, *, store: DirectoryFeatureStore | ShardedFeatureStore) -> TrainingRunResult:
+def run_training(
+    config: TrainingRunConfig, *, store: DirectoryFeatureStore | ShardedFeatureStore, show_progress: bool = False
+) -> TrainingRunResult:
     """Run one full training job: split -> features -> (optional augmentation) -> task -> trainer.
 
     Parameters
@@ -383,6 +385,9 @@ def run_training(config: TrainingRunConfig, *, store: DirectoryFeatureStore | Sh
     store : DirectoryFeatureStore | ShardedFeatureStore
         Already exists as a directory; populated already under ``feature_provider: cached``,
         populated incrementally (write-through) under ``"hybrid"``, unused under ``"online"``.
+    show_progress : bool, optional
+        Render ``tqdm`` bars over training/validation batches — see :class:`Trainer`. Defaults to
+        ``False`` so headless callers (e.g. the API) see no terminal output.
 
     Returns
     -------
@@ -395,6 +400,13 @@ def run_training(config: TrainingRunConfig, *, store: DirectoryFeatureStore | Sh
         ``online``/``hybrid`` while ``feature_provider`` is ``cached``.
     """
     _validate_config(config)
+    logger.info(
+        "starting training run %r (decoder=%s, feature_provider=%s, max_epochs=%d)",
+        config.run_id,
+        config.decoder_name,
+        config.feature_provider,
+        config.trainer.max_epochs,
+    )
     provider, rows = _build_feature_provider(config, store=store)
 
     # random_split is a three-way (train/val/test) split; a tiny epsilon is reserved for "test"
@@ -443,7 +455,7 @@ def run_training(config: TrainingRunConfig, *, store: DirectoryFeatureStore | Sh
     # From the *augmented* target, not first_train_sample.target directly: geometric augmentation
     # (resize/random_crop) changes the spatial size every training batch's target actually has, so
     # probing the pre-augmentation sample would build a decoder upsampling to the wrong resolution.
-    output_size = tuple(np.array(prepared_probe.target).shape)
+    output_size = mask_output_size(prepared_probe.target)
 
     decoder = build_decoder(
         config.decoder_name,
@@ -475,6 +487,7 @@ def run_training(config: TrainingRunConfig, *, store: DirectoryFeatureStore | Sh
         checkpoint_manager=checkpoint_manager,
         tracker=tracker,
         feature_augmentation=FeatureAugmentationPipeline(config.feature_augmentation),
+        show_progress=show_progress,
     )
 
     if isinstance(train_batches, OnlineAugmentedBatches):
@@ -531,6 +544,12 @@ def run_training(config: TrainingRunConfig, *, store: DirectoryFeatureStore | Sh
         },
     )
 
+    logger.info(
+        "finished training run %r at epoch %d: run directory %s",
+        config.run_id,
+        trainer.state.epoch,
+        run_dir.path,
+    )
     return TrainingRunResult(
         run_directory=run_dir,
         final_train_state={

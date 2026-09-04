@@ -12,9 +12,10 @@ Shell-exported variables always take precedence: a ``.env`` file never overwrite
 is already set, so an explicitly exported key still wins over the file.
 """
 
-import logging
 import os
 from pathlib import Path
+
+from precisionai.agritune.logging import get_logger
 
 try:
     import dotenv as _dotenv
@@ -24,7 +25,7 @@ except ImportError:
     _dotenv = None
     _DOTENV_AVAILABLE = False
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 ENV_FILE_VARIABLE = "AGRITUNE_ENV_FILE"
 ENCODER_API_KEY_VARIABLE = "AGRITUNE_ENCODER_API_KEY"

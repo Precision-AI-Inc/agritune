@@ -61,7 +61,7 @@ async def test_run_evaluation_reports_metrics(tmp_path: Path) -> None:
         num_classes=2,
         encoder_fingerprint=_FINGERPRINT,
     )
-    metrics = run_evaluation(config, store=store)
+    metrics = run_evaluation(config, store=store, show_progress=True)
 
     assert "mean_iou" in metrics
     assert "pixel_accuracy" in metrics

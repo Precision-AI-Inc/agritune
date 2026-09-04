@@ -55,9 +55,9 @@ def colorize_predictions(
     numpy.ndarray
         Shape ``(H, W, 3)``, ``uint8``.
     """
-    palette = palette if palette is not None else default_palette(num_classes)
+    resolved_palette = default_palette(num_classes) if palette is None else palette
     indices = predictions.detach().cpu().numpy().astype(np.int64)
-    return palette[indices]
+    return resolved_palette[indices]
 
 
 def overlay_predictions_on_image(

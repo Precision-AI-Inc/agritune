@@ -7,8 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Pull-request CI now requests `contents: read` only, reusable unit-test/pre-commit jobs declare
+  the same, and their checkouts set `persist-credentials: false` so pull-request code cannot run
+  with a repository write token.
+- Logging redacts API keys, Authorization values, sensitive Hydra/dotlist overrides, and URL
+  userinfo/query credentials before emit, including DEBUG override dumps and encoder base URLs.
+
+### Fixed
+
+- Pyright optional-palette subscript in `colorize_predictions` and live-test API-key narrowing
+  after `pytest.skip`.
+
 ### Added
 
+- Info/debug/warning logging across previously-silent modules (services, encoder, evaluator),
+  plus `tqdm` progress bars over every long-running loop (training/validation batches,
+  evaluation, prediction, feature precompute, encoder benchmarking, and the CWFID/PhenoBench prep
+  scripts) via a new `precisionai.agritune.logging.progress_iter` helper. Progress bars are
+  opt-in per call (`show_progress`, default `False`) so the API stays headless; `Trainer`/
+  `evaluate()` gate them on `DistributedContext.is_main_process`, ready for the eventual DDP
+  rollout. The FastAPI app now calls `configure_logging()` on startup
+  (`AGRITUNE_LOG_LEVEL`, default `INFO`), and its Rich console handler now writes to stderr
+  instead of stdout so log lines never interleave with a CLI command's own JSON output.
 - CWFID example: `examples/datasets/prepare_cwfid.py` downloads the public Crop/Weed Field Image
   Dataset, writes an AgriTune manifest, and `examples/SANITY_CHECK.md` runs the full hosted-encoder
   pipeline against it. A `--full` flag downloads all 60 frames without needing to know the exact
@@ -146,5 +168,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Log every encoder retry attempt (`EncoderGateway`) at `WARNING` instead of only counting it in
   metrics — a bounded retry-then-fail run and an actual hang were previously indistinguishable from
   the terminal, since nothing was printed during the backoff sleeps between attempts.
+- CI (`unit-test.yml`/`pre-commit.yml`): install the CPU-only `torch` wheel
+  (`--index-url https://download.pytorch.org/whl/cpu`) before `pip install -e ".[dev]"` — the
+  default Linux PyPI wheel bundles the full CUDA runtime (several GB of `nvidia-*`/`triton`
+  packages) that a CPU-only CI runner never uses, and was exhausting the runner's disk.
+- `evaluation_service.py`/`prediction_service.py`/`training_service.py`: build a decoder's
+  `output_size` via a new `segmentation_common.mask_output_size` helper that returns a concrete
+  `tuple[int, int]`, instead of `tuple(np.array(mask).shape)` (typed as a variable-length
+  `tuple[int, ...]`) — fixes a `pyright` `reportArgumentType` error that a newer `numpy` type-stub
+  resolution surfaces on some Python versions.
+- `trailing-whitespace` pre-commit hook: pass `--markdown-linebreak-ext=md` so it stops stripping
+  intentional Markdown hard-break trailing spaces (it was rewriting `examples/SANITY_CHECK.md` on
+  every run).
+- Fix the remaining pre-existing `pyright` errors, none introduced by recent work but all blocking
+  a clean `pre-commit`/CI run: `LossConfigRequest.name` (API schema) now uses the same `LossName`
+  literal as `SegmentationLossConfig` instead of a bare `str`; `ImageAugmentationPipeline` builds
+  its transform list typed as albumentations' own `TransformsSeqType` instead of the invariant-
+  incompatible `list[BasicTransform]`; `PrecisionContext.autocast()` is typed to yield `Any`
+  (`nullcontext`/`torch.autocast` disagree on what `__enter__` returns, but no caller binds it);
+  `cli/config.py`'s `_config_from_dict(resolved)` call gets the same `# type: ignore[arg-type]`
+  treatment the file already uses for `OmegaConf.to_container`'s deliberately-broad return type;
+  and several tests narrow an `Optional`/generic-`nn.Module` value with an `assert ... is not None`
+  / `isinstance` check before using it, instead of relying on runtime knowledge pyright can't see.
+- Untrack `.claude/scheduled_tasks.lock` (a Claude Code runtime lock file — session ID/PID/
+  timestamp, changes every session) and gitignore it; it was flapping `end-of-file-fixer` on
+  unrelated commits.
 
 [Unreleased]: https://github.com/Precision-AI-Inc/agritune/compare/v0.1.0...HEAD

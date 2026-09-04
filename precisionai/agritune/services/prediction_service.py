@@ -16,17 +16,21 @@ from PIL import Image
 
 from precisionai.agritune.data.dataset import ManifestDataset
 from precisionai.agritune.features.keys import EncoderFingerprint
+from precisionai.agritune.logging import get_logger, progress_iter
 from precisionai.agritune.schemas.protocols import FeatureStore
 from precisionai.agritune.schemas.samples import PreparedSample
 from precisionai.agritune.services.segmentation_common import (
     build_cached_feature_provider,
     build_decoder,
     build_prediction_batches,
+    mask_output_size,
     probe_feature_dims,
 )
 from precisionai.agritune.tasks.segmentation.postprocessing import logits_to_predictions
 from precisionai.agritune.tasks.segmentation.visualization import overlay_predictions_on_image
 from precisionai.agritune.training.checkpointing import CheckpointManager
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -76,7 +80,7 @@ class PredictionRunConfig:
     overlay_alpha: float = 0.5
 
 
-def run_prediction(config: PredictionRunConfig, *, store: FeatureStore) -> list[str]:
+def run_prediction(config: PredictionRunConfig, *, store: FeatureStore, show_progress: bool = False) -> list[str]:
     """Run inference and write one prediction PNG per sample.
 
     Parameters
@@ -84,6 +88,9 @@ def run_prediction(config: PredictionRunConfig, *, store: FeatureStore) -> list[
     config : PredictionRunConfig
     store : FeatureStore
         An already-populated store (see :mod:`~precisionai.agritune.services.feature_service`).
+    show_progress : bool, optional
+        Render a ``tqdm`` bar over prediction batches. Defaults to ``False`` so headless callers
+        (e.g. the API) see no terminal output.
 
     Returns
     -------
@@ -101,11 +108,12 @@ def run_prediction(config: PredictionRunConfig, *, store: FeatureStore) -> list[
     dataset = ManifestDataset(config.manifest_path, sample_ids=config.sample_ids)
     if len(dataset) == 0:
         raise ValueError("no samples to predict")
+    logger.info("predicting with checkpoint %s over %d sample(s)", config.checkpoint_path, len(dataset))
 
     first_sample = dataset[0]
     probe_sample = PreparedSample(sample_id=first_sample.sample_id, image=None, target=None)
     patch_dim, cls_dim = probe_feature_dims(provider, probe_sample)
-    output_size = tuple(np.array(first_sample.target).shape)
+    output_size = mask_output_size(first_sample.target)
 
     decoder = build_decoder(
         config.decoder_name,
@@ -123,8 +131,9 @@ def run_prediction(config: PredictionRunConfig, *, store: FeatureStore) -> list[
     output_dir.mkdir(parents=True, exist_ok=True)
     written_paths: list[str] = []
 
+    batches = build_prediction_batches(dataset, batch_size=config.batch_size)
     with torch.no_grad():
-        for batch in build_prediction_batches(dataset, batch_size=config.batch_size):
+        for batch in progress_iter(batches, desc="predict", unit="batch", disable=not show_progress):
             features = provider.get_features(batch)
             predictions = logits_to_predictions(decoder(features))
             for sample, prediction in zip(batch, predictions, strict=True):
@@ -140,4 +149,5 @@ def run_prediction(config: PredictionRunConfig, *, store: FeatureStore) -> list[
                     overlay.save(overlay_path)
                     written_paths.append(str(overlay_path))
 
+    logger.info("wrote %d file(s) to %s", len(written_paths), output_dir)
     return written_paths

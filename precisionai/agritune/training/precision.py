@@ -46,8 +46,13 @@ class PrecisionContext:
         scaler_enabled = config.mode == "fp16" and device_type == "cuda"
         self.scaler = torch.amp.GradScaler(device_type, enabled=scaler_enabled)
 
-    def autocast(self) -> contextlib.AbstractContextManager[None]:
-        """Return the autocast context manager for the forward pass (a no-op under fp32)."""
+    def autocast(self) -> contextlib.AbstractContextManager[Any]:
+        """Return the autocast context manager for the forward pass (a no-op under fp32).
+
+        Typed to yield ``Any`` rather than ``None``: ``contextlib.nullcontext()`` (fp32) and
+        ``torch.autocast`` (fp16/bf16) disagree on what ``__enter__`` returns, but no caller binds
+        it (``with self.precision.autocast():``) so the yielded value is never actually used.
+        """
         if self._config.mode == "fp32":
             return contextlib.nullcontext()
         dtype = torch.float16 if self._config.mode == "fp16" else torch.bfloat16

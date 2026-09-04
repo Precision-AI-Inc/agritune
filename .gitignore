@@ -132,6 +132,9 @@ examples/datasets/cwfid/
 examples/datasets/phenobench/
 sample_data/
 
+# Claude Code local runtime state — session-local, changes every run
+.claude/scheduled_tasks.lock
+
 # OS files
 .DS_Store
 .DS_Store?

@@ -12,8 +12,11 @@ from dataclasses import dataclass
 
 import torch
 
+from precisionai.agritune.logging import get_logger, progress_iter
 from precisionai.agritune.schemas.protocols import FeatureProvider, Metric, Task
 from precisionai.agritune.schemas.samples import PreparedSample
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -38,6 +41,8 @@ def evaluate(
     feature_provider: FeatureProvider,
     batches: Iterable[TrainingBatch],
     metric: Metric,
+    *,
+    show_progress: bool = False,
 ) -> dict[str, float]:
     """Run ``task`` over every batch with gradients disabled, accumulating ``metric`` and loss.
 
@@ -53,6 +58,10 @@ def evaluate(
         Batches to evaluate over.
     metric : Metric
         Accumulates statistics across every batch; not reset here — callers own its lifecycle.
+    show_progress : bool, optional
+        Render a ``tqdm`` bar over ``batches``. Defaults to ``False`` so headless callers (e.g.
+        the API) see no terminal output; the caller decides (e.g. gating on
+        ``DistributedContext.is_main_process``) when this runs under multiple processes.
 
     Returns
     -------
@@ -64,7 +73,7 @@ def evaluate(
     loss_total = 0.0
     sample_count = 0
     with torch.no_grad():
-        for batch in batches:
+        for batch in progress_iter(batches, desc="evaluate", unit="batch", disable=not show_progress):
             features = feature_provider.get_features(batch.samples)
             outputs = task.forward(features)
             metric.update(outputs, batch.targets)
@@ -74,4 +83,5 @@ def evaluate(
 
     result = metric.compute()
     result["loss"] = loss_total / sample_count if sample_count > 0 else 0.0
+    logger.info("evaluated %d sample(s): %s", sample_count, result)
     return result

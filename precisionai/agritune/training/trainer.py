@@ -29,7 +29,7 @@ from torch import nn
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler, ReduceLROnPlateau
 
-from precisionai.agritune.logging import get_logger
+from precisionai.agritune.logging import get_logger, progress_iter
 from precisionai.agritune.schemas.protocols import FeatureAugmentation, FeatureProvider, Metric, Task, Tracker
 from precisionai.agritune.training.checkpointing import Checkpoint, CheckpointManager
 from precisionai.agritune.training.distributed import DistributedContext
@@ -125,6 +125,10 @@ class Trainer:
         When given, applied to every training batch's features right after
         ``feature_provider.get_features`` and before ``task.forward`` — never during validation,
         matching the usual train-only role of augmentation. ``None`` disables it entirely.
+    show_progress : bool, optional
+        Render a ``tqdm`` bar over each epoch's training batches (and the validation pass); always
+        suppressed on non-main processes. Defaults to ``False`` so headless callers (e.g. the API)
+        see no terminal output.
 
     Attributes
     ----------
@@ -150,6 +154,7 @@ class Trainer:
         tracker: Tracker | None = None,
         distributed: DistributedContext | None = None,
         feature_augmentation: FeatureAugmentation | None = None,
+        show_progress: bool = False,
     ) -> None:
         self.task = task
         self.decoder = decoder
@@ -161,6 +166,7 @@ class Trainer:
         self.tracker = tracker
         self.distributed = distributed or DistributedContext()
         self.feature_augmentation = feature_augmentation
+        self.show_progress = show_progress
         self.precision = PrecisionContext(config.precision, device_type=self._device_type())
         self.state = TrainingState()
         self.last_train_metrics: dict[str, float] | None = None
@@ -216,7 +222,13 @@ class Trainer:
 
             if val_batches is not None and val_metric is not None:
                 val_metric.reset()
-                metrics = evaluate(self.task, self.feature_provider, val_batches, val_metric)
+                metrics = evaluate(
+                    self.task,
+                    self.feature_provider,
+                    val_batches,
+                    val_metric,
+                    show_progress=self.show_progress and self.distributed.is_main_process,
+                )
                 self.last_val_metrics = metrics
                 self._after_validation(metrics, val_metric_name, higher_is_better)
 
@@ -235,7 +247,13 @@ class Trainer:
         accumulated_steps = 0
         last_loss_value = 0.0
         resume_offset = self.state.batch_in_epoch
-        for batch_index, batch in enumerate(batches):
+        display_batches = progress_iter(
+            batches,
+            desc=f"epoch {self.state.epoch}",
+            unit="batch",
+            disable=not (self.show_progress and self.distributed.is_main_process),
+        )
+        for batch_index, batch in enumerate(display_batches):
             if batch_index < resume_offset:
                 continue
             with self.precision.autocast():
@@ -268,6 +286,7 @@ class Trainer:
         metrics = train_metric.compute()
         self.last_train_metrics = metrics
         if self.distributed.is_main_process:
+            logger.info("epoch %d train metrics: %s", self.state.epoch, metrics)
             self._log_metrics(
                 {f"train_{name}": value for name, value in metrics.items()}, step=self.state.global_optimizer_step
             )
@@ -323,6 +342,7 @@ class Trainer:
             scheduler.step(-value if higher_is_better else value)
 
         if self.distributed.is_main_process:
+            logger.info("epoch %d val metrics: %s (best=%s)", self.state.epoch, metrics, is_best)
             self._log_metrics(
                 {f"val_{name}": val for name, val in metrics.items()}, step=self.state.global_optimizer_step
             )

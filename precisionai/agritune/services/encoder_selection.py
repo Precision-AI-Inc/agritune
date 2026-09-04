@@ -14,7 +14,10 @@ from precisionai.agritune.encoder.fake import FakeEncoderBackend
 from precisionai.agritune.encoder.gateway import EncoderGateway
 from precisionai.agritune.encoder.remote import RemoteEncoderBackend, RemoteEncoderConfig
 from precisionai.agritune.features.keys import EncoderFingerprint
+from precisionai.agritune.logging import get_logger, redact_text
 from precisionai.agritune.schemas.protocols import EncoderBackend
+
+logger = get_logger(__name__)
 
 
 def build_raw_encoder(
@@ -42,9 +45,11 @@ def build_raw_encoder(
             RemoteEncoderConfig(base_url=base_url, api_key=api_key or "", model=model)
         )
         fingerprint = EncoderFingerprint(model=model, revision=None, preprocessing=preprocessing)
+        logger.info("using RemoteEncoderBackend: base_url=%s model=%s", redact_text(base_url), model)
     else:
         backend = FakeEncoderBackend()
         fingerprint = EncoderFingerprint(model="fake-encoder", revision="fake-v1", preprocessing=preprocessing)
+        logger.info("using FakeEncoderBackend (no base_url configured)")
     return backend, fingerprint
 
 

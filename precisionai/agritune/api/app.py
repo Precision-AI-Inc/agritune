@@ -11,6 +11,8 @@ other translation happens — an unexpected exception still surfaces as a 500, s
 reach an uncaught traceback from the CLI.
 """
 
+import os
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
@@ -23,6 +25,7 @@ from precisionai.agritune.api.routes import (
     train_router,
 )
 from precisionai.agritune.features.errors import FeatureNotCachedError
+from precisionai.agritune.logging import configure_logging
 from precisionai.agritune.training.checkpointing import CheckpointMismatchError
 
 
@@ -36,6 +39,7 @@ def create_app() -> FastAPI:
     -------
     fastapi.FastAPI
     """
+    configure_logging(os.environ.get("AGRITUNE_LOG_LEVEL", "INFO"))
     app = FastAPI(
         title="AgriTune API",
         description="Train and evaluate agricultural segmentation decoders on frozen features "

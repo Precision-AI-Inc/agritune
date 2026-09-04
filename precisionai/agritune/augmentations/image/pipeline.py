@@ -32,6 +32,7 @@ from typing import Any
 import albumentations as alb
 import cv2
 import numpy as np
+from albumentations.core.composition import TransformsSeqType
 from PIL import Image
 
 from precisionai.agritune.augmentations.image.seeding import derive_hybrid_seed, derive_offline_seed, derive_online_seed
@@ -226,8 +227,16 @@ def _photometric_transforms(config: PhotometricConfig) -> list[alb.BasicTransfor
     return transforms
 
 
-def _build_transforms(config: AugmentationPipelineConfig) -> list[alb.BasicTransform]:
-    return _geometric_transforms(config.geometric) + _photometric_transforms(config.photometric)
+def _build_transforms(config: AugmentationPipelineConfig) -> TransformsSeqType:
+    # Annotated as TransformsSeqType (not list[alb.BasicTransform]) so this list literal is exactly
+    # what Compose.__init__ declares — list's generic parameter is invariant, so a list[BasicTransform]
+    # value does not satisfy a list[TransformType] parameter even though BasicTransform is a member
+    # of the TransformType union.
+    transforms: TransformsSeqType = [
+        *_geometric_transforms(config.geometric),
+        *_photometric_transforms(config.photometric),
+    ]
+    return transforms
 
 
 def _sanitize_params(params: dict[str, Any]) -> dict[str, Any]:

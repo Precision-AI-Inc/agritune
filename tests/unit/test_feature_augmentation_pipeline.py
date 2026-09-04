@@ -26,6 +26,8 @@ def test_default_config_is_a_no_op() -> None:
     features = _make_features()
     pipeline = FeatureAugmentationPipeline()
     result = pipeline.apply(features, generator=torch.Generator().manual_seed(0))
+    assert result.cls_tokens is not None
+    assert features.cls_tokens is not None
     assert torch.equal(result.patch_tokens, features.patch_tokens)
     assert torch.equal(result.cls_tokens, features.cls_tokens)
 

@@ -10,7 +10,10 @@ from torch.optim import SGD, Adam, AdamW
 from precisionai.agritune.optimization.optimizers import OptimizerConfig, build_optimizer
 
 
-def _model() -> nn.Module:
+def _model() -> nn.Linear:
+    # Concretely nn.Linear (not nn.Module): nn.Module's generic __getattr__ fallback types
+    # dynamic attribute access (e.g. `.weight`) as `Tensor | Module`, which the `.clone()`/
+    # `torch.equal()` calls below need narrowed to plain `Tensor`.
     return nn.Linear(4, 2)
 
 

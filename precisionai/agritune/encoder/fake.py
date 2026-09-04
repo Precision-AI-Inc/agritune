@@ -24,7 +24,10 @@ from precisionai.agritune.encoder.errors import (
     EncoderTimeoutError,
     MalformedEncoderResponseError,
 )
+from precisionai.agritune.logging import get_logger
 from precisionai.agritune.schemas.features import EncoderFeatures
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -118,6 +121,7 @@ class FakeEncoderBackend:
         """
         self._call_count += 1
         config = self._config
+        logger.debug("fake-encoding %d image(s) (call #%d)", len(images), self._call_count)
 
         if config.latency_seconds > 0:
             await asyncio.sleep(config.latency_seconds)

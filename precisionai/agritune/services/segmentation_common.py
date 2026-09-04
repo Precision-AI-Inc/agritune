@@ -26,6 +26,7 @@ from precisionai.agritune.data.dataset import ManifestDataset
 from precisionai.agritune.data.manifest import ManifestRow, load_manifest
 from precisionai.agritune.features.keys import EncoderFingerprint, hash_image_bytes
 from precisionai.agritune.features.provider import CachedFeatureProvider
+from precisionai.agritune.logging import get_logger
 from precisionai.agritune.schemas.protocols import FeatureProvider, FeatureStore
 from precisionai.agritune.schemas.samples import PreparedSample
 from precisionai.agritune.tasks.segmentation.decoders.aspp import ASPPDecoder
@@ -43,11 +44,23 @@ _DECODER_BUILDERS: dict[str, Callable[..., nn.Module]] = {
     "segmenter": SegmenterMaskTransformerDecoder,
     "mask_former": MaskFormerDecoder,
 }
+logger = get_logger(__name__)
 
 
 def mask_to_target_tensor(mask: Any) -> torch.Tensor:
     """Convert a decoded mask image to an integer class-index tensor, shape ``(H, W)``."""
     return torch.from_numpy(np.array(mask)).long()
+
+
+def mask_output_size(mask: Any) -> tuple[int, int]:
+    """Return a decoded mask's ``(height, width)`` as a concrete 2-tuple for :func:`build_decoder`.
+
+    ``np.ndarray.shape`` is typed as a variable-length ``tuple[int, ...]``, which does not satisfy
+    ``build_decoder``'s ``output_size: tuple[int, int]`` under static type checking even though a
+    2D mask always produces exactly two dimensions at runtime.
+    """
+    height, width = np.array(mask).shape
+    return int(height), int(width)
 
 
 def build_training_batches(dataset: ManifestDataset, *, batch_size: int) -> list[TrainingBatch]:
@@ -240,6 +253,14 @@ def build_decoder(
     ValueError
         If ``name`` is not one of the supported decoders.
     """
+    logger.debug(
+        "building decoder %r: patch_dim=%d cls_dim=%s num_classes=%d output_size=%s",
+        name,
+        patch_dim,
+        cls_dim,
+        num_classes,
+        output_size,
+    )
     if name == "token_fpn":
         if "cls_fusion" in kwargs:
             kwargs = {**kwargs, "cls_fusion": CLSFusion(kwargs["cls_fusion"])}

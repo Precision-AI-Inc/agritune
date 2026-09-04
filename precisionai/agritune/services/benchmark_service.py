@@ -11,12 +11,16 @@ one) since the whole point is to discover good gateway settings.
 """
 
 import asyncio
+import itertools
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from precisionai.agritune.encoder.errors import EncoderError
+from precisionai.agritune.logging import get_logger, progress_iter
 from precisionai.agritune.schemas.protocols import EncoderBackend, ImageInput
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -136,6 +140,7 @@ async def run_benchmark(
     concurrencies: list[int],
     image_factory: Callable[[], ImageInput],
     num_requests_per_combination: int = 10,
+    show_progress: bool = False,
 ) -> BenchmarkReport:
     """Measure throughput/latency for every ``(batch_size, concurrency)`` combination.
 
@@ -152,6 +157,9 @@ async def run_benchmark(
         Produces one dummy image per call, in whatever representation ``encoder`` accepts.
     num_requests_per_combination : int, optional
         Requests issued per combination — more requests give more stable percentiles.
+    show_progress : bool, optional
+        Render a ``tqdm`` bar over the ``(batch_size, concurrency)`` combinations. Defaults to
+        ``False`` so headless callers (e.g. the API) see no terminal output.
 
     Returns
     -------
@@ -164,15 +172,30 @@ async def run_benchmark(
     if num_requests_per_combination < 1:
         raise ValueError("num_requests_per_combination must be positive")
 
-    results = [
-        await _run_combination(
+    combinations = list(itertools.product(batch_sizes, concurrencies))
+    logger.info(
+        "benchmarking %d combination(s) of batch_sizes=%s concurrencies=%s",
+        len(combinations),
+        batch_sizes,
+        concurrencies,
+    )
+    results = []
+    for batch_size, concurrency in progress_iter(
+        combinations, desc="benchmark", unit="combo", disable=not show_progress
+    ):
+        result = await _run_combination(
             encoder,
             batch_size=batch_size,
             concurrency=concurrency,
             num_requests=num_requests_per_combination,
             image_factory=image_factory,
         )
-        for batch_size in batch_sizes
-        for concurrency in concurrencies
-    ]
+        logger.debug(
+            "batch_size=%d concurrency=%d -> %.2f img/s (errors=%d)",
+            batch_size,
+            concurrency,
+            result.images_per_second,
+            result.error_count,
+        )
+        results.append(result)
     return BenchmarkReport(results=results)

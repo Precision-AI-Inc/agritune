@@ -12,6 +12,7 @@ import json
 import sys
 
 from PIL import Image
+from tqdm import tqdm
 
 from precisionai.agritune.augmentations.image.pipeline import AugmentationPipelineConfig, ImageAugmentationPipeline
 from precisionai.agritune.cli.config import load_augmentation_selection, load_training_run_config
@@ -20,7 +21,7 @@ from precisionai.agritune.features.keys import EncoderFingerprint
 from precisionai.agritune.features.manifest import FeatureManifest
 from precisionai.agritune.features.precompute import PrecomputeStats
 from precisionai.agritune.features.store import DirectoryFeatureStore
-from precisionai.agritune.logging import get_logger
+from precisionai.agritune.logging import get_logger, redact_text
 from precisionai.agritune.schemas.protocols import EncoderBackend
 from precisionai.agritune.services.benchmark_service import run_benchmark
 from precisionai.agritune.services.config_template_service import write_config_template
@@ -41,6 +42,7 @@ logger = get_logger(__name__)
 
 def config_init(args: argparse.Namespace) -> int:
     """Handle ``agritune config init``."""
+    logger.debug("dispatching config init: output=%s force=%s", args.output, args.force)
     try:
         path = write_config_template(args.output, force=args.force)
     except FileExistsError as err:
@@ -52,6 +54,7 @@ def config_init(args: argparse.Namespace) -> int:
 
 def dataset_validate(args: argparse.Namespace) -> int:
     """Handle ``agritune dataset validate``."""
+    logger.debug("dispatching dataset validate: manifest=%s num_classes=%s", args.manifest, args.num_classes)
     report = validate_dataset(args.manifest, num_classes=args.num_classes, ignore_index=args.ignore_index)
     if report.is_valid:
         print("OK: no issues found.")
@@ -64,12 +67,14 @@ def dataset_validate(args: argparse.Namespace) -> int:
 
 def dataset_inspect(args: argparse.Namespace) -> int:
     """Handle ``agritune dataset inspect``."""
+    logger.debug("dispatching dataset inspect: manifest=%s", args.manifest)
     print(json.dumps(inspect_dataset(args.manifest), indent=2))
     return 0
 
 
 def dataset_init(args: argparse.Namespace) -> int:
     """Handle ``agritune dataset init``."""
+    logger.debug("dispatching dataset init: output=%s force=%s", args.output, args.force)
     try:
         path = write_manifest_template(args.output, force=args.force)
     except FileExistsError as err:
@@ -93,6 +98,7 @@ def _build_encoder(args: argparse.Namespace) -> tuple[EncoderBackend, EncoderFin
 
 def features_build(args: argparse.Namespace) -> int:
     """Handle ``agritune features build``."""
+    logger.debug("dispatching features build: manifest=%s store=%s", args.manifest, args.store)
     store = DirectoryFeatureStore(args.store)
     encoder, fingerprint = _build_encoder(args)
     augmentation = load_augmentation_selection(args.augmentation_config)
@@ -100,28 +106,30 @@ def features_build(args: argparse.Namespace) -> int:
         AugmentationPipelineConfig(geometric=augmentation.geometric, photometric=augmentation.photometric)
     )
 
-    def on_progress(stats: PrecomputeStats) -> None:
-        done = stats.computed + stats.skipped + stats.failed
-        print(
-            f"\r{done}/{stats.total} (computed={stats.computed} skipped={stats.skipped} failed={stats.failed})",
-            end="",
-            file=sys.stderr,
-        )
+    bar = tqdm(desc="features build", unit="sample", file=sys.stderr)
 
-    stats = asyncio.run(
-        build_features(
-            args.manifest,
-            store=store,
-            encoder=encoder,
-            encoder_fingerprint=fingerprint,
-            augmentation_mode=augmentation.mode,
-            augmentation_pipeline=pipeline,
-            global_seed=args.seed,
-            augmentation_variant=augmentation.variant,
-            on_progress=on_progress,
+    def on_progress(stats: PrecomputeStats) -> None:
+        if bar.total is None:
+            bar.reset(total=stats.total)
+        bar.set_postfix(computed=stats.computed, skipped=stats.skipped, failed=stats.failed)
+        bar.update(1)
+
+    try:
+        stats = asyncio.run(
+            build_features(
+                args.manifest,
+                store=store,
+                encoder=encoder,
+                encoder_fingerprint=fingerprint,
+                augmentation_mode=augmentation.mode,
+                augmentation_pipeline=pipeline,
+                global_seed=args.seed,
+                augmentation_variant=augmentation.variant,
+                on_progress=on_progress,
+            )
         )
-    )
-    print(file=sys.stderr)
+    finally:
+        bar.close()
     print(f"computed={stats.computed} skipped={stats.skipped} failed={stats.failed}")
     if stats.failed:
         print(f"failed sample_ids: {stats.failed_sample_ids}", file=sys.stderr)
@@ -131,6 +139,7 @@ def features_build(args: argparse.Namespace) -> int:
 
 def features_verify(args: argparse.Namespace) -> int:
     """Handle ``agritune features verify``."""
+    logger.debug("dispatching features verify: store=%s", args.store)
     store = DirectoryFeatureStore(args.store)
     report = verify_store(store)
     if report.is_valid:
@@ -144,6 +153,7 @@ def features_verify(args: argparse.Namespace) -> int:
 
 def features_inspect(args: argparse.Namespace) -> int:
     """Handle ``agritune features inspect``."""
+    logger.debug("dispatching features inspect: store=%s", args.store)
     store = DirectoryFeatureStore(args.store)
     manifest = FeatureManifest.from_store(store)
     result = {
@@ -157,6 +167,7 @@ def features_inspect(args: argparse.Namespace) -> int:
 
 def features_clean(args: argparse.Namespace) -> int:
     """Handle ``agritune features clean``."""
+    logger.debug("dispatching features clean: store=%s", args.store)
     store = DirectoryFeatureStore(args.store)
     removed = store.clean()
     print(f"removed {len(removed)} file(s)")
@@ -167,9 +178,10 @@ def features_clean(args: argparse.Namespace) -> int:
 
 def train(args: argparse.Namespace) -> int:
     """Handle ``agritune train``."""
+    logger.debug("dispatching train: config=%s overrides=%s", args.config, redact_text(repr(args.overrides)))
     config = load_training_run_config(args.config, args.overrides)
     store = DirectoryFeatureStore(config.feature_store_dir)
-    result = run_training(config, store=store)
+    result = run_training(config, store=store, show_progress=True)
     print(f"run directory: {result.run_directory.path}")
     print(f"final epoch: {result.final_train_state['epoch']}")
     print(f"train metrics: {result.train_metrics}")
@@ -179,6 +191,7 @@ def train(args: argparse.Namespace) -> int:
 
 def evaluate(args: argparse.Namespace) -> int:
     """Handle ``agritune evaluate``."""
+    logger.debug("dispatching evaluate: manifest=%s checkpoint=%s", args.manifest, args.checkpoint)
     store = DirectoryFeatureStore(args.store)
     config = EvaluationRunConfig(
         manifest_path=args.manifest,
@@ -197,13 +210,14 @@ def evaluate(args: argparse.Namespace) -> int:
             dice_weight=args.loss_dice_weight,
         ),
     )
-    metrics = run_evaluation(config, store=store)
+    metrics = run_evaluation(config, store=store, show_progress=True)
     print(json.dumps(metrics, indent=2))
     return 0
 
 
 def predict(args: argparse.Namespace) -> int:
     """Handle ``agritune predict``."""
+    logger.debug("dispatching predict: manifest=%s checkpoint=%s", args.manifest, args.checkpoint)
     store = DirectoryFeatureStore(args.store)
     config = PredictionRunConfig(
         manifest_path=args.manifest,
@@ -219,13 +233,14 @@ def predict(args: argparse.Namespace) -> int:
         write_overlays=args.overlays,
         overlay_alpha=args.overlay_alpha,
     )
-    written = run_prediction(config, store=store)
+    written = run_prediction(config, store=store, show_progress=True)
     print(f"wrote {len(written)} prediction(s) to {args.output}")
     return 0
 
 
 def encoder_benchmark(args: argparse.Namespace) -> int:
     """Handle ``agritune encoder benchmark``."""
+    logger.debug("dispatching encoder benchmark: base_url=%s model=%s", args.base_url, args.model)
     backend, _ = _build_raw_encoder(args)
 
     def image_factory() -> Image.Image:
@@ -238,6 +253,7 @@ def encoder_benchmark(args: argparse.Namespace) -> int:
             concurrencies=args.concurrencies,
             image_factory=image_factory,
             num_requests_per_combination=args.num_requests,
+            show_progress=True,
         )
     )
 

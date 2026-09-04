@@ -157,10 +157,12 @@ class EncoderGateway:
             raise ValueError("images must be non-empty")
 
         batches = list(batch_items(images, max_batch_size=self._config.max_batch_images))
+        logger.debug("encoding %d image(s) across %d gateway batch(es)", len(images), len(batches))
         results = await asyncio.gather(*(self._encode_batch(batch) for batch in batches))
         return concatenate_encoder_features(results)
 
     async def _encode_batch(self, batch: list[ImageInput]) -> EncoderFeatures:
+        logger.debug("dispatching encoder batch of %d image(s)", len(batch))
         async with self._rate_limiter.acquire(num_images=len(batch)):
             start = time.monotonic()
             try:

@@ -22,7 +22,7 @@ _MODEL = "pai-embedding"
 
 def _live_config() -> RemoteEncoderConfig:
     load_env_file()
-    api_key = os.environ.get(ENCODER_API_KEY_VARIABLE)
+    api_key = os.environ.get(ENCODER_API_KEY_VARIABLE) or ""
     if not api_key:
         pytest.skip(f"{ENCODER_API_KEY_VARIABLE} is not set")
     base_url = os.environ.get("AGRITUNE_ENCODER_BASE_URL", _DEFAULT_BASE_URL)

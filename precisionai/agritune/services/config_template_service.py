@@ -12,7 +12,10 @@ same shape.
 
 from pathlib import Path
 
+from precisionai.agritune.logging import get_logger
 from precisionai.agritune.utils.scaffold import read_scaffold_template, write_scaffold_file
+
+logger = get_logger(__name__)
 
 
 def render_config_template() -> str:
@@ -45,4 +48,6 @@ def write_config_template(output_path: str | Path, *, force: bool = False) -> Pa
     FileExistsError
         If ``output_path`` already exists and ``force`` is ``False``.
     """
-    return write_scaffold_file(output_path, render_config_template(), force=force)
+    path = write_scaffold_file(output_path, render_config_template(), force=force)
+    logger.info("wrote config template to %s", path)
+    return path

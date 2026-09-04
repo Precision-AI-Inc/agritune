@@ -33,6 +33,20 @@ async def test_run_benchmark_reports_plausible_throughput_and_latency() -> None:
     assert result.latency_p95_seconds >= result.latency_p50_seconds
 
 
+async def test_run_benchmark_with_show_progress_still_covers_every_combination() -> None:
+    encoder = FakeEncoderBackend()
+    report = await run_benchmark(
+        encoder,
+        batch_sizes=[1, 2],
+        concurrencies=[1],
+        image_factory=_image_factory,
+        num_requests_per_combination=2,
+        show_progress=True,
+    )
+
+    assert len(report.results) == 2
+
+
 async def test_run_benchmark_covers_every_combination() -> None:
     encoder = FakeEncoderBackend()
     report = await run_benchmark(

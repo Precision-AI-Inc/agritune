@@ -15,7 +15,10 @@ from dataclasses import dataclass
 import torch
 
 from precisionai.agritune.encoder.errors import EncoderError
+from precisionai.agritune.logging import get_logger
 from precisionai.agritune.schemas.features import EncoderFeatures
+
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -81,6 +84,9 @@ class EncoderResponseValidator:
             return
 
         if fingerprint != self._fingerprint:
+            logger.warning(
+                "encoder dimensions changed mid-run: first saw %s, now saw %s", self._fingerprint, fingerprint
+            )
             raise EncoderConsistencyError(
                 f"encoder dimensions changed mid-run: first saw {self._fingerprint}, now saw "
                 f"{fingerprint} — the server may have swapped the model behind the configured alias"

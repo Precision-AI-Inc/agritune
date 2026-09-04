@@ -23,8 +23,11 @@ from precisionai.agritune.data.manifest import load_manifest
 from precisionai.agritune.features.keys import EncoderFingerprint, hash_image_bytes
 from precisionai.agritune.features.precompute import PrecomputeStats, precompute_features
 from precisionai.agritune.features.store import DirectoryFeatureStore, ShardedFeatureStore
+from precisionai.agritune.logging import get_logger
 from precisionai.agritune.schemas.protocols import EncoderBackend
 from precisionai.agritune.schemas.samples import PreparedSample, Sample
+
+logger = get_logger(__name__)
 
 
 async def build_features(
@@ -82,6 +85,9 @@ async def build_features(
         allowed = set(sample_ids)
         rows = [row for row in rows if row.sample_id in allowed]
 
+    logger.info(
+        "building features for %d sample(s): store=%s augmentation_mode=%s", len(rows), store, augmentation_mode.value
+    )
     image_bytes_by_sample: dict[str, bytes] = {}
     samples: list[PreparedSample] = []
     for row in rows:

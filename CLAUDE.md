@@ -46,7 +46,7 @@ precisionai/agritune/
   features/          # FeatureProvider (Cached/Online/Hybrid/Prefetching), FeatureStore
                      # (Directory/Sharded), cache keys/fingerprints, manifest, resumable precompute,
                      # integrity (verify/clean)
-  logging/           # structured logging setup (stdlib logging, JSON-capable)
+  logging/           # configure_logging (stderr Rich), RedactingFilter, progress_iter, run provenance
   metrics/           # pure computation (segmentation metrics — no I/O)
   optimization/      # optimizer/scheduler registries
   schemas/           # EncoderFeatures, Sample, PreparedSample, AugmentationRecord, core Protocols
@@ -89,7 +89,7 @@ The real encoder is served behind an OpenAI-SDK-compatible embeddings API with `
 
 ### Secrets
 
-Never log the encoder API key, the `Authorization` header, or full request/response bodies at INFO level or above. Redact before logging at DEBUG.
+Never log the encoder API key, the `Authorization` header, URL userinfo/query credentials, sensitive Hydra/dotlist overrides, or full request/response bodies. Call sites still must not put raw secrets into log messages; `configure_logging` also attaches `RedactingFilter` so those values (and exception-chain text that embeds them) are scrubbed before emit at every level, including DEBUG.
 
 ### Configuration
 
