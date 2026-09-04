@@ -13,14 +13,14 @@ _WORKFLOWS = _ROOT / ".github" / "workflows"
 _PULL_REQUEST_WORKFLOWS = ("ci.yml", "unit-test.yml", "pre-commit.yml")
 
 
-def _load_workflow(name: str) -> dict[str, Any]:
+def _load_workflow(name: str) -> dict[Any, Any]:
     with (_WORKFLOWS / name).open(encoding="utf-8") as handle:
         loaded = yaml.safe_load(handle)
     assert isinstance(loaded, dict)
     return loaded
 
 
-def _workflow_on(workflow: dict[str, Any]) -> Any:
+def _workflow_on(workflow: dict[Any, Any]) -> Any:
     """Return the workflow trigger block.
 
     PyYAML 1.1 may parse the unquoted key ``on`` as boolean ``True``.
@@ -67,7 +67,7 @@ def _assert_trigger_includes_pull_request(on_block: Any, *, label: str) -> None:
     assert "pull_request" in on_block, f"{label} triggers omit pull_request"
 
 
-def _checkout_steps(workflow: dict[str, Any]) -> list[dict[str, Any]]:
+def _checkout_steps(workflow: dict[Any, Any]) -> list[dict[str, Any]]:
     steps: list[dict[str, Any]] = []
     for job in workflow.get("jobs", {}).values():
         if not isinstance(job, dict):
