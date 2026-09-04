@@ -10,15 +10,18 @@ from precisionai.agritune.logging.provenance import (
     capture_environment_info,
     capture_git_info,
 )
+from precisionai.agritune.logging.redaction import RedactingFilter, redact_text
 from precisionai.agritune.logging.setup import configure_logging, get_logger
 
 __all__ = [
     "EnvironmentInfo",
     "GitInfo",
+    "RedactingFilter",
     "RunDirectory",
     "capture_environment_info",
     "capture_git_info",
     "configure_logging",
     "get_logger",
     "progress_iter",
+    "redact_text",
 ]

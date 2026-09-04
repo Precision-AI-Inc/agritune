@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Pull-request CI now requests `contents: read` only, reusable unit-test/pre-commit jobs declare
+  the same, and their checkouts set `persist-credentials: false` so pull-request code cannot run
+  with a repository write token.
+- Logging redacts API keys, Authorization values, sensitive Hydra/dotlist overrides, and URL
+  userinfo/query credentials before emit, including DEBUG override dumps and encoder base URLs.
+
+### Fixed
+
+- Pyright optional-palette subscript in `colorize_predictions` and live-test API-key narrowing
+  after `pytest.skip`.
+
 ### Added
 
 - Info/debug/warning logging across previously-silent modules (services, encoder, evaluator),

@@ -26,6 +26,7 @@ from precisionai.agritune.tasks.segmentation.losses import SegmentationLoss, Seg
 from precisionai.agritune.tasks.segmentation.metrics import SegmentationMetric
 from precisionai.agritune.tasks.segmentation.task import SegmentationTask
 from precisionai.agritune.training.checkpointing import CheckpointManager
+from precisionai.agritune.training.distributed import DistributedContext
 from precisionai.agritune.training.evaluator import TrainingBatch
 from precisionai.agritune.training.state import set_deterministic_seed
 from precisionai.agritune.training.trainer import Trainer, TrainerConfig
@@ -110,6 +111,7 @@ def _build_trainer(
     tracker: _FakeTracker | None = None,
     feature_augmentation: FeatureAugmentation | None = None,
     show_progress: bool = False,
+    distributed: DistributedContext | None = None,
 ) -> tuple[Trainer, MLPProbeDecoder]:
     set_deterministic_seed(seed)  # ensures identical decoder initialization across builds
     decoder = MLPProbeDecoder(patch_dim=4, num_classes=2, output_size=(2, 2))
@@ -138,6 +140,7 @@ def _build_trainer(
         tracker=tracker,
         feature_augmentation=feature_augmentation,
         show_progress=show_progress,
+        distributed=distributed,
     )
     return trainer, decoder
 
@@ -156,6 +159,40 @@ def test_fit_with_show_progress_still_advances_state() -> None:
     val_batch = TrainingBatch(samples=[_sample("c")], targets=torch.randint(0, 2, (1, 2, 2)))
     trainer.fit([train_batch], [val_batch], val_metric=SegmentationMetric(num_classes=2))
     assert trainer.state.epoch == 1
+
+
+def test_fit_enables_progress_on_main_rank(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[dict[str, object]] = []
+
+    def fake_progress_iter(iterable: object, *, desc: str | None = None, unit: str = "it", disable: bool = False):
+        seen.append({"desc": desc, "unit": unit, "disable": disable})
+        return iterable
+
+    monkeypatch.setattr("precisionai.agritune.training.trainer.progress_iter", fake_progress_iter)
+    monkeypatch.setattr("precisionai.agritune.training.evaluator.progress_iter", fake_progress_iter)
+    trainer, _ = _build_trainer(max_epochs=1, show_progress=True)
+    train_batch = TrainingBatch(samples=[_sample("a")], targets=torch.randint(0, 2, (1, 2, 2)))
+    val_batch = TrainingBatch(samples=[_sample("b")], targets=torch.randint(0, 2, (1, 2, 2)))
+    trainer.fit([train_batch], [val_batch], val_metric=SegmentationMetric(num_classes=2))
+    assert {"desc": "epoch 0", "unit": "batch", "disable": False} in seen
+    assert {"desc": "evaluate", "unit": "batch", "disable": False} in seen
+
+
+def test_fit_suppresses_progress_on_non_main_rank(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[dict[str, object]] = []
+
+    def fake_progress_iter(iterable: object, *, desc: str | None = None, unit: str = "it", disable: bool = False):
+        seen.append({"desc": desc, "unit": unit, "disable": disable})
+        return iterable
+
+    monkeypatch.setattr("precisionai.agritune.training.trainer.progress_iter", fake_progress_iter)
+    monkeypatch.setattr("precisionai.agritune.training.evaluator.progress_iter", fake_progress_iter)
+    trainer, _ = _build_trainer(max_epochs=1, show_progress=True, distributed=DistributedContext(rank=1, world_size=2))
+    train_batch = TrainingBatch(samples=[_sample("a")], targets=torch.randint(0, 2, (1, 2, 2)))
+    val_batch = TrainingBatch(samples=[_sample("b")], targets=torch.randint(0, 2, (1, 2, 2)))
+    trainer.fit([train_batch], [val_batch], val_metric=SegmentationMetric(num_classes=2))
+    assert seen
+    assert all(call["disable"] is True for call in seen)
 
 
 def test_gradient_accumulation_equivalence() -> None:

@@ -21,7 +21,7 @@ from precisionai.agritune.features.keys import EncoderFingerprint
 from precisionai.agritune.features.manifest import FeatureManifest
 from precisionai.agritune.features.precompute import PrecomputeStats
 from precisionai.agritune.features.store import DirectoryFeatureStore
-from precisionai.agritune.logging import get_logger
+from precisionai.agritune.logging import get_logger, redact_text
 from precisionai.agritune.schemas.protocols import EncoderBackend
 from precisionai.agritune.services.benchmark_service import run_benchmark
 from precisionai.agritune.services.config_template_service import write_config_template
@@ -178,7 +178,7 @@ def features_clean(args: argparse.Namespace) -> int:
 
 def train(args: argparse.Namespace) -> int:
     """Handle ``agritune train``."""
-    logger.debug("dispatching train: config=%s overrides=%s", args.config, args.overrides)
+    logger.debug("dispatching train: config=%s overrides=%s", args.config, redact_text(repr(args.overrides)))
     config = load_training_run_config(args.config, args.overrides)
     store = DirectoryFeatureStore(config.feature_store_dir)
     result = run_training(config, store=store, show_progress=True)
