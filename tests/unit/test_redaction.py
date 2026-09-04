@@ -25,6 +25,12 @@ def test_redact_text_replaces_api_key_assignments() -> None:
     assert "<redacted>" in text
 
 
+def test_redact_text_replaces_spaced_api_key_phrases() -> None:
+    text = redact_text(f"Incorrect API key provided: {_SENTINEL_API_KEY}")
+    assert _SENTINEL_API_KEY not in text
+    assert "<redacted>" in text
+
+
 def test_redact_text_replaces_authorization_bearer_values() -> None:
     text = redact_text(f"Authorization: Bearer {_SENTINEL_AUTH}")
     assert _SENTINEL_AUTH not in text
@@ -112,6 +118,41 @@ def test_configure_logging_redacts_sentinels_at_every_level(level: str, capsys: 
     assert _SENTINEL_API_KEY not in combined
     assert _SENTINEL_AUTH not in combined
     assert _SENTINEL_PASSWORD not in combined
+
+
+def test_configure_logging_redacts_gateway_style_api_key_message(capsys: pytest.CaptureFixture[str]) -> None:
+    configure_logging("WARNING")
+    logger = get_logger("encoder.gateway")
+    error = RuntimeError(f"Incorrect API key provided: {_SENTINEL_API_KEY}")
+    logger.warning(
+        "encoder request failed on attempt %d (%s: %s); retrying with backoff",
+        1,
+        type(error).__name__,
+        error,
+    )
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert _SENTINEL_API_KEY not in combined
+    assert "API key" in captured.err
+    assert "<redacted>" in captured.err
+
+
+def test_configure_logging_redacts_sentinel_from_logger_exception(capsys: pytest.CaptureFixture[str]) -> None:
+    configure_logging("ERROR")
+    logger = get_logger("features.precompute")
+    try:
+        raise RuntimeError(
+            f"Authorization: Bearer {_SENTINEL_AUTH}; "
+            f"https://user:{_SENTINEL_PASSWORD}@encoder.example/v1?api_key={_SENTINEL_API_KEY}"
+        )
+    except RuntimeError:
+        logger.exception("failed to encode sample %s", "sample-1")
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert _SENTINEL_API_KEY not in combined
+    assert _SENTINEL_AUTH not in combined
+    assert _SENTINEL_PASSWORD not in combined
+    assert "failed to encode sample" in captured.err
 
 
 def test_configure_logging_installs_redacting_filter_on_the_console_handler() -> None:
