@@ -6,8 +6,8 @@
 patch tokens -> stack of per-patch linear (+ ReLU) layers -> per-patch class logits -> reshape via
 patch_grid -> upsample. With ``hidden_dims=()`` (the default) this is architecturally identical to
 the former ``LinearProbeDecoder`` — a single linear projection and nothing else — so it still
-serves as the diagnostic baseline described in ``agritune_implementation_plan.md`` §11: if a more
-complex decoder does not beat it, something upstream is wrong.
+serves as the diagnostic baseline: if a more complex decoder does not beat it, something upstream
+is wrong.
 """
 
 from collections.abc import Sequence

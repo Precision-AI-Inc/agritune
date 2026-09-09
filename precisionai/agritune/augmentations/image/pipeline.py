@@ -21,7 +21,7 @@ actually fired (e.g. a flip whose probability didn't trigger is omitted, not rec
 Supported modes: ``none`` (pass the sample through unchanged), ``offline`` (a fixed number of
 precomputed variants per sample, seeded by sample + variant), ``online`` (re-augmented every
 epoch, seeded by sample + epoch + occurrence), and ``hybrid`` (mostly reuses an offline variant,
-occasionally derives a fresh online seed — see ``agritune_implementation_plan.md`` §6 and
+occasionally derives a fresh online seed — see
 :func:`~precisionai.agritune.augmentations.image.seeding.derive_hybrid_seed`).
 """
 

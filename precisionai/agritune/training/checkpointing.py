@@ -6,7 +6,7 @@
 Decoder, optimizer, and scheduler state; the gradient scaler; full training progress and RNG
 state; and fingerprints of the configuration, dataset, and encoder used to produce it. Resuming
 warns or fails when critical fingerprints differ (encoder revision changed, class count changed,
-decoder architecture changed) — see ``agritune_implementation_plan.md`` §14.
+decoder architecture changed).
 """
 
 from dataclasses import asdict, dataclass, field, fields

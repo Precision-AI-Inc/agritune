@@ -75,8 +75,7 @@ FeatureStore ← FeatureProvider
 
 If this separation stays clean, AgriTune can grow from an agricultural segmentation repo into a
 general agricultural downstream-training framework (classification, regression, depth, detection)
-without a rewrite of the training engine — see `agritune_implementation_plan.md` §26 for the
-release roadmap this repository follows.
+without a rewrite of the training engine.
 
 ## Orchestration layering
 

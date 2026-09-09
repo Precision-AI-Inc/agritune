@@ -20,4 +20,4 @@ exact transformed image/mask can be reproduced from an `AugmentationRecord`. Mod
 Feature-space augmentation (patch dropout, token masking, Gaussian feature noise, CLS dropout,
 channel dropout — `precisionai.agritune.augmentations.feature`) is independent, requires no extra
 encoder calls, and is applied by `Trainer` as an optional train-only step (never during
-validation). See `agritune_implementation_plan.md` §6, §21.
+validation).

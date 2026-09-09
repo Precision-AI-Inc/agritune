@@ -7,7 +7,7 @@ authoritative. `DirectoryFeatureStore` is the development-scale store; `ShardedF
 production store (buffered writes, auto-flushed by shard size). Both support `verify()` (checksum
 comparison against `agritune features verify`) and `clean()` (orphaned tensor/meta file removal,
 `agritune features clean`). Precomputation (`agritune features build`) is resumable — restarting
-after a partial run only encodes the missing samples. See `agritune_implementation_plan.md` §9–10.
+after a partial run only encodes the missing samples.
 
 For cached training with `augmentation.mode: offline`, precompute the same deterministic variant
 (and its unaugmented validation features) through the service API:
@@ -47,6 +47,6 @@ Three `FeatureProvider` implementations (`precisionai.agritune.features.provider
 
 `PrefetchingFeatureProvider` (`precisionai.agritune.features.prefetch`) wraps an online/hybrid
 provider with a bounded background-thread queue, so the encoder's network latency is hidden behind
-the GPU training step instead of blocking it (per `agritune_implementation_plan.md` §19) — it must
+the GPU training step instead of blocking it — it must
 be given the full, ordered sequence of upcoming batches up front, and `close()` cancels cleanly
 even if consumption stopped early (e.g. early stopping).

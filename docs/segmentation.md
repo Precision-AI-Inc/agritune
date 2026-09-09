@@ -30,7 +30,7 @@ tensor `(B, num_classes, H, W)`:
 
 Losses: CrossEntropy, BCEWithLogits, Dice, and CE/BCE + Dice combinations, with `ignore_index` and
 class-weight support. Metrics (`SegmentationMetric`): mean/per-class IoU, precision, recall,
-Dice/F1, pixel accuracy, and a confusion matrix. See `agritune_implementation_plan.md` §11.
+Dice/F1, pixel accuracy, and a confusion matrix.
 
 ## Visualization
 

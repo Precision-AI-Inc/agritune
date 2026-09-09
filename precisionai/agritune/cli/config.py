@@ -11,8 +11,7 @@ composition: ``compose()`` selects one variant per group (``dataset``/``encoder`
 ``feature_augmentation``/``feature_provider``/``task``/``decoder``/``optimizer``/``scheduler``/
 ``tracking``), and the same
 ``overrides`` list can both override plain fields (``trainer.max_epochs=3``) and swap group
-variants (``decoder=token_fpn``, ``augmentation=online``) — see ``agritune_implementation_plan.md``
-§23 and ``docs/configuration.md``.
+variants (``decoder=token_fpn``, ``augmentation=online``) — see ``docs/configuration.md``.
 """
 
 from pathlib import Path

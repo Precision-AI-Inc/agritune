@@ -65,6 +65,5 @@ deployment.
 - The server does not enforce a request timeout; `RemoteEncoderBackend` must always set an
   explicit client-side timeout (`encoder.timeout.request_seconds`).
 
-See `agritune_implementation_plan.md` §7–8 for the `EncoderGateway`/rate-limiter design this module
-implements, and [feature-caching.md](feature-caching.md) for how the encoder fingerprint feeds the
+See [feature-caching.md](feature-caching.md) for how the encoder fingerprint feeds the
 feature cache key.

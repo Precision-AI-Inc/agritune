@@ -3,7 +3,7 @@
 # Usage: agritune train --config precisionai/agritune/configs/config.yaml decoder=token_fpn ...
 # (or point --config at your own copy with different defaults/overrides baked in).
 #
-# See agritune_implementation_plan.md §23 and docs/configuration.md.
+# See docs/configuration.md.
 
 defaults:
   - dataset: agricultural_segmentation

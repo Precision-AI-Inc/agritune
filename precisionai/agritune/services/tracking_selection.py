@@ -3,8 +3,8 @@
 
 """Tracking backend selection shared by the CLI, API layer, and Hydra ``tracking`` config group.
 
-Turns a plain ``backends`` list (``["jsonl", "tensorboard"]``, matching
-``agritune_implementation_plan.md`` §23's ``tracking.backends`` example) plus a handful of
+Turns a plain ``backends`` list (``["jsonl", "tensorboard"]``, matching the Hydra
+``tracking.backends`` config field) plus a handful of
 per-backend settings into a single :class:`~precisionai.agritune.schemas.protocols.Tracker` —
 ``NullTracker`` if empty, the one tracker directly if there is exactly one, or a ``MultiTracker``
 fanning out to all of them.

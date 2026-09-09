@@ -33,7 +33,7 @@ agritune train --config precisionai/agritune/configs/config.yaml \
 
 `augmentation=online`/`hybrid` combined with `feature_provider=cached` is rejected before training
 starts — a cached provider's key would only ever match the first epoch's augmentation
-fingerprint. `agritune_implementation_plan.md` §23's own example of an invalid combination.
+fingerprint.
 
 ## Secrets and `.env` files
 

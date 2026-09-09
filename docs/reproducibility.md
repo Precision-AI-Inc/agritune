@@ -30,8 +30,7 @@ encoder model, encoder revision (see docs/encoder.md — opaque unless pinned), 
 feature cache fingerprint
 ```
 
-This is a core v1 requirement, not an optional enhancement — see `agritune_implementation_plan.md`
-§16.
+This is a core v1 requirement, not an optional enhancement.
 
 ## Checkpoints carry more than weights
 
@@ -40,7 +39,7 @@ position within the epoch, micro step, global optimizer step, best metric, and f
 (Python, NumPy, PyTorch CPU, CUDA) —
 so training resumes bit-for-bit, not just "close enough." Resume warns or fails when critical
 configuration differs (encoder revision changed, class count changed, decoder architecture
-changed) — see `agritune_implementation_plan.md` §14. `last.ckpt`/`best.ckpt` are always written;
+changed). `last.ckpt`/`best.ckpt` are always written;
 periodic checkpoints ranked by the validation metric are also kept, up to a configurable
 `checkpoint_top_k` (`0` keeps every one).
 

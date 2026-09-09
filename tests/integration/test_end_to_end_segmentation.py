@@ -1,7 +1,7 @@
 # Copyright 2026 Precision AI
 # SPDX-License-Identifier: Apache-2.0
 
-"""The main end-to-end integration test (``agritune_implementation_plan.md`` §22):
+"""The main end-to-end integration test:
 
 tiny dataset -> fake encoder -> feature precompute -> segmentation decoder -> train ->
 checkpoint -> resume -> evaluate.

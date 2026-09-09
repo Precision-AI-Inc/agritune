@@ -3,9 +3,9 @@
 
 """Scheduler registry.
 
-Every scheduler here steps per **optimizer step**, not per micro-batch — see
-``agritune_implementation_plan.md`` §12: gradient accumulation tracks ``micro_step`` and
-``global_optimizer_step`` separately, and schedulers must be driven by the latter.
+Every scheduler here steps per **optimizer step**, not per micro-batch: gradient accumulation
+tracks ``micro_step`` and ``global_optimizer_step`` separately, and schedulers must be driven by
+the latter.
 """
 
 import math

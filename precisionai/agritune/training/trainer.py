@@ -3,7 +3,7 @@
 
 """``Trainer`` — orchestrates training; contains no task-specific logic.
 
-Pseudo-flow (see ``agritune_implementation_plan.md`` §12)::
+Pseudo-flow::
 
     for batch in loader:
         features = feature_provider.get_features(batch.samples)

@@ -3,9 +3,8 @@
 
 """Unit tests for precisionai.agritune.training.trainer.Trainer.
 
-Covers definition-of-done items from ``agritune_implementation_plan.md`` §22: gradient
-accumulation equivalence, scheduler stepping (per optimizer step, not per micro-batch), and exact
-checkpoint resume.
+Covers gradient accumulation equivalence, scheduler stepping (per optimizer step, not per
+micro-batch), and exact checkpoint resume.
 """
 
 from collections.abc import Sequence

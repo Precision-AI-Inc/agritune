@@ -1,7 +1,7 @@
 # Copyright 2026 Precision AI
 # SPDX-License-Identifier: Apache-2.0
 
-"""Optimizer registry. Default: AdamW — see ``agritune_implementation_plan.md`` §13."""
+"""Optimizer registry. Default: AdamW."""
 
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass

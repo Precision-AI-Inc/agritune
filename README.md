@@ -20,13 +20,13 @@ AgriTune never trains or fine-tunes the encoder itself — it consumes features 
 Dataset → Augmentation → FeatureProvider → EncoderFeatures → SegmentationTask → Decoder → Loss/Metrics → Trainer
 ```
 
-Coding standards, naming conventions, and tooling configuration are governed by [CLAUDE.md](CLAUDE.md). See [agritune_implementation_plan.md](agritune_implementation_plan.md) for the full phased build-out this repository follows.
+Coding standards, naming conventions, and tooling configuration are governed by [CLAUDE.md](CLAUDE.md).
 
 ---
 
 ## Status
 
-This repository is under active build-out following the phased plan in [agritune_implementation_plan.md](agritune_implementation_plan.md). The `v0.1.0` target ("first usable release") — offline/no augmentation → remote encoder precomputation → local feature store → linear + TokenFPN decoders → AdamW + cosine schedule → AMP + gradient accumulation → checkpoint/resume → mIoU/Dice metrics → JSONL + TensorBoard tracking → a fully reproducible run directory — is complete. Most of `v0.2` has landed too: `OnlineFeatureProvider`/`HybridFeatureProvider`, a background-thread prefetch queue that overlaps encoding with training, `augmentation.mode: hybrid`, feature-space augmentation, an albumentations-based augmentation engine with agricultural domain-specific transforms, and a thin FastAPI layer alongside the CLI. Configuration now composes via Hydra/OmegaConf config groups (`dataset`, `encoder`, `augmentation`, `feature_provider`, `task`, `decoder`, `optimizer`, `scheduler`, `tracking`), and the decoder lineup has grown to six: `mlp_probe`, `token_fpn`, `aspp`, `ppm`, `segmenter`, and `mask_former`. Distributed (multi-GPU) training remains `v0.3`.
+This repository is under active build-out. The `v0.1.0` target ("first usable release") — offline/no augmentation → remote encoder precomputation → local feature store → linear + TokenFPN decoders → AdamW + cosine schedule → AMP + gradient accumulation → checkpoint/resume → mIoU/Dice metrics → JSONL + TensorBoard tracking → a fully reproducible run directory — is complete. Most of `v0.2` has landed too: `OnlineFeatureProvider`/`HybridFeatureProvider`, a background-thread prefetch queue that overlaps encoding with training, `augmentation.mode: hybrid`, feature-space augmentation, an albumentations-based augmentation engine with agricultural domain-specific transforms, and a thin FastAPI layer alongside the CLI. Configuration now composes via Hydra/OmegaConf config groups (`dataset`, `encoder`, `augmentation`, `feature_provider`, `task`, `decoder`, `optimizer`, `scheduler`, `tracking`), and the decoder lineup has grown to six: `mlp_probe`, `token_fpn`, `aspp`, `ppm`, `segmenter`, and `mask_former`. Distributed (multi-GPU) training remains `v0.3`.
 
 ---
 
