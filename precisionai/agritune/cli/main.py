@@ -145,6 +145,13 @@ def _add_scored_run_arguments(parser: argparse.ArgumentParser) -> None:
         choices=["mlp_probe", "token_fpn", "aspp", "ppm", "segmenter", "mask_former"],
         help="Decoder architecture.",
     )
+    parser.add_argument(
+        "--decoder-kwargs",
+        default="{}",
+        help="JSON object of extra decoder constructor kwargs — must match the training run's "
+        'decoder_kwargs exactly (see its config.resolved.yaml), e.g. \'{"cls_fusion": "film"}\' '
+        "for token_fpn, or the checkpoint's state dict will not load.",
+    )
     parser.add_argument("--batch-size", type=int, default=4, help="Batch size.")
     parser.add_argument(
         "--sample-ids", nargs="*", default=None, help="Restrict to these sample IDs; omit for the whole manifest."
