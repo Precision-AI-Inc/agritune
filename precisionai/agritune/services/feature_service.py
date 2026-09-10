@@ -169,8 +169,15 @@ async def build_features(
         "building features for %d sample(s): store=%s augmentation_mode=%s", total, store, augmentation_mode.value
     )
 
+    total_chunks = (len(rows) + _BUILD_CHUNK_SIZE - 1) // _BUILD_CHUNK_SIZE
     aggregate = PrecomputeStats(total=total)
-    for chunk_rows in _iter_chunks(rows, _BUILD_CHUNK_SIZE):
+    for chunk_index, chunk_rows in enumerate(_iter_chunks(rows, _BUILD_CHUNK_SIZE), start=1):
+        logger.info(
+            "reading and decoding chunk %d/%d (%d row(s)) before encoding",
+            chunk_index,
+            total_chunks,
+            len(chunk_rows),
+        )
         samples, image_hash_by_sample = _prepare_chunk(
             chunk_rows,
             manifest_dir,

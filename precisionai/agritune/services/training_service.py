@@ -35,7 +35,7 @@ from precisionai.agritune.data.split import SplitAssignment, random_split
 from precisionai.agritune.features.keys import EncoderFingerprint
 from precisionai.agritune.features.provider import HybridFeatureProvider, OnlineFeatureProvider
 from precisionai.agritune.features.store import DirectoryFeatureStore, ShardedFeatureStore
-from precisionai.agritune.logging import RunDirectory, get_logger
+from precisionai.agritune.logging import RunDirectory, get_logger, progress_iter
 from precisionai.agritune.optimization.optimizers import OptimizerConfig, build_optimizer
 from precisionai.agritune.optimization.schedulers import SchedulerConfig, build_scheduler
 from precisionai.agritune.schemas.protocols import FeatureProvider
@@ -99,10 +99,18 @@ def _stable_fingerprint(value: Any) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _dataset_fingerprint(manifest_path: str, rows: list[ManifestRow]) -> str:
+def _dataset_fingerprint(manifest_path: str, rows: list[ManifestRow], *, show_progress: bool = False) -> str:
+    """Hash the manifest plus every row's image/mask bytes, in ``sample_id`` order.
+
+    Reads every file in ``rows`` off disk synchronously — for a large manifest this can take
+    a while, so progress is logged up front and (optionally) rendered as a bar rather than
+    running silently.
+    """
     manifest = Path(manifest_path)
+    sorted_rows = sorted(rows, key=lambda item: item.sample_id)
+    logger.info("computing dataset fingerprint over %d sample(s); this reads every file once", len(sorted_rows))
     digest = hashlib.sha256(manifest.read_bytes())
-    for row in sorted(rows, key=lambda item: item.sample_id):
+    for row in progress_iter(sorted_rows, desc="fingerprinting dataset", unit="sample", disable=not show_progress):
         digest.update(row.sample_id.encode("utf-8"))
         digest.update((manifest.parent / row.image_path).read_bytes())
         digest.update((manifest.parent / row.mask_path).read_bytes())
@@ -417,7 +425,7 @@ def run_training(
     )
     if not split.train:
         raise ValueError("training split is empty; adjust val_fraction/seed or add more samples")
-    dataset_fingerprint = _dataset_fingerprint(config.manifest_path, rows)
+    dataset_fingerprint = _dataset_fingerprint(config.manifest_path, rows, show_progress=show_progress)
     split_fingerprint = _stable_fingerprint(asdict(split))
     encoder_fingerprint = _stable_fingerprint(
         {"encoder": asdict(config.encoder_fingerprint), "base_url": config.encoder_base_url}
