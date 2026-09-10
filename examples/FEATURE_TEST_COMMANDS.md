@@ -164,7 +164,7 @@ agritune train --config $cfg @enc @dataArgs run_id=cwfid-should-fail augmentatio
 
 ```powershell
 $ckpt = "$data/runs/cwfid-cached-mlp/checkpoints/best.ckpt"
-if (-not (Test-Path $ckpt)) { $ckpt = "$data/runs/cwfid-sanity/checkpoints/best.ckpt" }
+if (-not (Test-Path $ckpt)) { $ckpt = "$data/runs/cwfid-sanity-mlp_probe-feature_aug/checkpoints/best.ckpt" }
 
 agritune evaluate `
   --manifest "$data/manifest.csv" --store "$data/features" --checkpoint $ckpt `
