@@ -9,7 +9,7 @@ building batches, decoders, and a
 what ``agritune features build`` wrote.
 """
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +19,8 @@ from torch import nn
 
 from precisionai.agritune.augmentations.image.pipeline import (
     AugmentationMode,
+    AugmentationPipelineConfig,
+    GeometricConfig,
     ImageAugmentationPipeline,
     prepare_sample,
 )
@@ -26,7 +28,7 @@ from precisionai.agritune.data.dataset import ManifestDataset
 from precisionai.agritune.data.manifest import ManifestRow, load_manifest
 from precisionai.agritune.features.keys import EncoderFingerprint, hash_image_bytes
 from precisionai.agritune.features.provider import CachedFeatureProvider
-from precisionai.agritune.logging import get_logger
+from precisionai.agritune.logging import get_logger, progress_iter
 from precisionai.agritune.schemas.protocols import FeatureProvider, FeatureStore
 from precisionai.agritune.schemas.samples import PreparedSample
 from precisionai.agritune.tasks.segmentation.decoders.aspp import ASPPDecoder
@@ -63,15 +65,130 @@ def mask_output_size(mask: Any) -> tuple[int, int]:
     return int(height), int(width)
 
 
-def build_training_batches(dataset: ManifestDataset, *, batch_size: int) -> list[TrainingBatch]:
-    """Chunk a dataset into :class:`TrainingBatch` objects of at most ``batch_size`` samples."""
-    batches = []
-    for start in range(0, len(dataset), batch_size):
-        chunk = [dataset[i] for i in range(start, min(start + batch_size, len(dataset)))]
-        samples = [PreparedSample(sample_id=sample.sample_id, image=sample.image, target=None) for sample in chunk]
-        targets = torch.stack([mask_to_target_tensor(sample.target) for sample in chunk])
-        batches.append(TrainingBatch(samples=samples, targets=targets))
-    return batches
+class _ResizedBatches:
+    """``TrainingBatch`` iterable produced by :func:`build_training_batches`; see its docstring."""
+
+    def __init__(
+        self,
+        dataset: ManifestDataset,
+        *,
+        batch_size: int,
+        resize: tuple[int, int] | None,
+        show_progress: bool,
+    ) -> None:
+        self._dataset = dataset
+        self._batch_size = batch_size
+        self._resize_pipeline = (
+            ImageAugmentationPipeline(AugmentationPipelineConfig(geometric=GeometricConfig(resize=resize)))
+            if resize is not None
+            else None
+        )
+        self._show_progress = show_progress
+
+    def __iter__(self) -> Iterator[TrainingBatch]:
+        starts = progress_iter(
+            range(0, len(self._dataset), self._batch_size),
+            desc="building batches",
+            unit="batch",
+            disable=not self._show_progress,
+        )
+        for start in starts:
+            chunk = [self._dataset[i] for i in range(start, min(start + self._batch_size, len(self._dataset)))]
+            if self._resize_pipeline is not None:
+                chunk = [self._resize_pipeline.apply(sample, seed=0) for sample in chunk]
+            samples = [PreparedSample(sample_id=sample.sample_id, image=sample.image, target=None) for sample in chunk]
+            targets = torch.stack([mask_to_target_tensor(sample.target) for sample in chunk])
+            yield TrainingBatch(samples=samples, targets=targets)
+
+
+def build_training_batches(
+    dataset: ManifestDataset,
+    *,
+    batch_size: int,
+    resize: tuple[int, int] | None = None,
+    show_progress: bool = False,
+) -> Iterable[TrainingBatch]:
+    """Return a :class:`TrainingBatch` iterable, chunked to at most ``batch_size`` samples.
+
+    Every image/mask is read from disk (and resized, if requested) lazily, one chunk at a time, on
+    every iteration — nothing is decoded up front, and nothing from a previous chunk is held once
+    the next one is yielded, so a dataset of any size can be iterated without loading it into
+    memory all at once. The returned object can be iterated more than once (each ``__iter__`` call
+    starts a fresh pass reading from disk): :class:`~precisionai.agritune.training.trainer.Trainer`
+    relies on that to re-walk the same training/validation batches every epoch. Pass
+    ``show_progress=True`` to render a bar over each pass rather than leaving the caller looking
+    frozen while it reads.
+
+    Parameters
+    ----------
+    dataset : ManifestDataset
+    batch_size : int
+    resize : tuple[int, int] | None, optional
+        ``(width, height)`` every sample's image and mask are deterministically resized to before
+        stacking — dimensional normalization, not augmentation, so it applies unconditionally (no
+        flips/crops/photometric transforms are involved). Required whenever the dataset's own
+        images/masks do not already share one native size, since :func:`torch.stack` cannot batch
+        unequal-size targets together. ``None`` (the default) stacks each sample's native-size mask
+        as-is, which only succeeds if every sample in the dataset already shares one size.
+    show_progress : bool, optional
+        Render a ``tqdm`` bar over each pass. Defaults to ``False`` so headless callers (e.g. the
+        API) see no terminal output.
+    """
+    return _ResizedBatches(dataset, batch_size=batch_size, resize=resize, show_progress=show_progress)
+
+
+class _StaticAugmentedBatches:
+    """``TrainingBatch`` iterable produced by :func:`build_static_augmented_batches`; see its docstring."""
+
+    def __init__(
+        self,
+        dataset: ManifestDataset,
+        *,
+        pipeline: ImageAugmentationPipeline,
+        mode: AugmentationMode,
+        global_seed: int,
+        batch_size: int,
+        variant: int,
+        show_progress: bool,
+    ) -> None:
+        self._dataset = dataset
+        self._pipeline = pipeline
+        self._mode = mode
+        self._global_seed = global_seed
+        self._batch_size = batch_size
+        self._variant = variant
+        self._show_progress = show_progress
+
+    def __iter__(self) -> Iterator[TrainingBatch]:
+        starts = progress_iter(
+            range(0, len(self._dataset), self._batch_size),
+            desc="building batches",
+            unit="batch",
+            disable=not self._show_progress,
+        )
+        for start in starts:
+            chunk = [self._dataset[i] for i in range(start, min(start + self._batch_size, len(self._dataset)))]
+            prepared = [
+                prepare_sample(
+                    sample,
+                    mode=self._mode,
+                    pipeline=self._pipeline,
+                    global_seed=self._global_seed,
+                    variant=self._variant,
+                )
+                for sample in chunk
+            ]
+            samples = [
+                PreparedSample(
+                    sample_id=p.sample_id,
+                    image=p.image,
+                    target=None,
+                    augmentation_metadata=p.augmentation_metadata,
+                )
+                for p in prepared
+            ]
+            targets = torch.stack([mask_to_target_tensor(p.target) for p in prepared])
+            yield TrainingBatch(samples=samples, targets=targets)
 
 
 def build_static_augmented_batches(
@@ -82,13 +199,23 @@ def build_static_augmented_batches(
     global_seed: int,
     batch_size: int,
     variant: int = 0,
-) -> list[TrainingBatch]:
-    """Chunk a dataset into batches, applying a fixed (non-epoch-varying) augmentation pass.
+    show_progress: bool = False,
+) -> Iterable[TrainingBatch]:
+    """Return a batches iterable applying a fixed (non-epoch-varying) augmentation pass.
 
     Suitable for ``AugmentationMode.NONE`` (a no-op passthrough) and ``AugmentationMode.OFFLINE``
-    (one fixed ``variant`` per sample) — every batch is computed once and reused every epoch, same
-    as :func:`build_training_batches`. Use :class:`OnlineAugmentedBatches` instead for
-    ``ONLINE``/``HYBRID``, which must re-augment every epoch.
+    (one fixed ``variant`` per sample) — the same deterministic augmentation is recomputed every
+    epoch, same as :func:`build_training_batches`. Use :class:`OnlineAugmentedBatches` instead for
+    ``ONLINE``/``HYBRID``, which must re-augment differently every epoch.
+
+    Every image/mask is read from disk and augmented lazily, one chunk at a time, on every
+    iteration — nothing is decoded up front, and nothing from a previous chunk is held once the
+    next one is yielded, so a dataset of any size can be iterated without loading it into memory
+    all at once. The returned object can be iterated more than once (each ``__iter__`` call starts
+    a fresh pass reading from disk, recomputing the same deterministic augmentation):
+    :class:`~precisionai.agritune.training.trainer.Trainer` relies on that to re-walk the same
+    training batches every epoch. Pass ``show_progress=True`` to render a bar over each pass rather
+    than leaving the caller looking frozen while it reads.
 
     Parameters
     ----------
@@ -101,30 +228,23 @@ def build_static_augmented_batches(
     batch_size : int
     variant : int, optional
         Offline variant index; ignored under ``NONE``.
+    show_progress : bool, optional
+        Render a ``tqdm`` bar over each pass. Defaults to ``False`` so headless callers (e.g. the
+        API) see no terminal output.
 
     Returns
     -------
-    list[TrainingBatch]
+    Iterable[TrainingBatch]
     """
-    batches = []
-    for start in range(0, len(dataset), batch_size):
-        chunk = [dataset[i] for i in range(start, min(start + batch_size, len(dataset)))]
-        prepared = [
-            prepare_sample(sample, mode=mode, pipeline=pipeline, global_seed=global_seed, variant=variant)
-            for sample in chunk
-        ]
-        samples = [
-            PreparedSample(
-                sample_id=p.sample_id,
-                image=p.image,
-                target=None,
-                augmentation_metadata=p.augmentation_metadata,
-            )
-            for p in prepared
-        ]
-        targets = torch.stack([mask_to_target_tensor(p.target) for p in prepared])
-        batches.append(TrainingBatch(samples=samples, targets=targets))
-    return batches
+    return _StaticAugmentedBatches(
+        dataset,
+        pipeline=pipeline,
+        mode=mode,
+        global_seed=global_seed,
+        batch_size=batch_size,
+        variant=variant,
+        show_progress=show_progress,
+    )
 
 
 class OnlineAugmentedBatches:
@@ -204,15 +324,19 @@ class OnlineAugmentedBatches:
             yield TrainingBatch(samples=samples, targets=targets)
 
 
-def build_prediction_batches(dataset: ManifestDataset, *, batch_size: int) -> list[list[PreparedSample]]:
-    """Chunk a dataset into sample batches with no target tensor required (for inference)."""
-    batches = []
+def build_prediction_batches(dataset: ManifestDataset, *, batch_size: int) -> Iterator[list[PreparedSample]]:
+    """Yield sample batches with no target tensor required (for inference), one chunk at a time.
+
+    Unlike :func:`build_training_batches`/:func:`build_static_augmented_batches` — which return a
+    materialized list because training reuses the same batches every epoch — prediction consumes
+    each batch exactly once and writes its output immediately, so this yields lazily instead of
+    decoding every sample's image into memory up front. That matters at prediction scale: a
+    dataset of hundreds of thousands of samples would otherwise hold every decoded image
+    simultaneously before the first prediction is even written.
+    """
     for start in range(0, len(dataset), batch_size):
         chunk = [dataset[i] for i in range(start, min(start + batch_size, len(dataset)))]
-        batches.append(
-            [PreparedSample(sample_id=sample.sample_id, image=sample.image, target=None) for sample in chunk]
-        )
-    return batches
+        yield [PreparedSample(sample_id=sample.sample_id, image=sample.image, target=None) for sample in chunk]
 
 
 def build_decoder(

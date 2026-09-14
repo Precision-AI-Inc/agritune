@@ -3,6 +3,7 @@
 
 """Unit tests for precisionai.agritune.services.segmentation_common."""
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import numpy as np
@@ -112,12 +113,65 @@ def test_build_training_batches_chunks_correctly(tmp_path: Path) -> None:
     assert [len(batch.samples) for batch in batches] == [3, 1]
 
 
+def test_build_training_batches_is_reiterable(tmp_path: Path) -> None:
+    """Trainer.fit() walks train/val batches once per epoch — a one-shot generator would silently
+    yield nothing from epoch 2 onward, so every pass must independently re-read from disk."""
+    manifest_path = build_manifest(tmp_path)
+    dataset = ManifestDataset(manifest_path)
+    batches = build_training_batches(dataset, batch_size=3)
+
+    first_pass = [len(batch.samples) for batch in batches]
+    second_pass = [len(batch.samples) for batch in batches]
+
+    assert first_pass == second_pass == [3, 1]
+
+
+def test_build_training_batches_without_resize_rejects_varying_native_sizes(tmp_path: Path) -> None:
+    """Reproduces the bug: unequal native mask sizes cannot be torch.stack-ed without a resize."""
+    make_image((8, 6)).save(tmp_path / "s0_image.png")
+    make_mask((8, 6)).save(tmp_path / "s0_mask.png")
+    make_image((10, 7)).save(tmp_path / "s1_image.png")
+    make_mask((10, 7)).save(tmp_path / "s1_mask.png")
+    manifest_path = tmp_path / "manifest.csv"
+    manifest_path.write_text(
+        "sample_id,image_path,mask_path\ns0,s0_image.png,s0_mask.png\ns1,s1_image.png,s1_mask.png\n"
+    )
+    dataset = ManifestDataset(manifest_path)
+
+    with pytest.raises(RuntimeError, match="stack expects each tensor to be equal size"):
+        list(build_training_batches(dataset, batch_size=2))
+
+
+def test_build_training_batches_resize_normalizes_varying_native_sizes(tmp_path: Path) -> None:
+    make_image((8, 6)).save(tmp_path / "s0_image.png")
+    make_mask((8, 6)).save(tmp_path / "s0_mask.png")
+    make_image((10, 7)).save(tmp_path / "s1_image.png")
+    make_mask((10, 7)).save(tmp_path / "s1_mask.png")
+    manifest_path = tmp_path / "manifest.csv"
+    manifest_path.write_text(
+        "sample_id,image_path,mask_path\ns0,s0_image.png,s0_mask.png\ns1,s1_image.png,s1_mask.png\n"
+    )
+    dataset = ManifestDataset(manifest_path)
+
+    batches = list(build_training_batches(dataset, batch_size=2, resize=(8, 6)))
+
+    assert batches[0].targets.shape == (2, 6, 8)
+
+
 def test_build_prediction_batches_have_no_targets(tmp_path: Path) -> None:
     manifest_path = build_manifest(tmp_path)
     dataset = ManifestDataset(manifest_path)
-    batches = build_prediction_batches(dataset, batch_size=2)
+    batches = list(build_prediction_batches(dataset, batch_size=2))
     assert [len(batch) for batch in batches] == [2, 2]
     assert all(sample.target is None for batch in batches for sample in batch)
+
+
+def test_build_prediction_batches_is_lazy(tmp_path: Path) -> None:
+    manifest_path = build_manifest(tmp_path)
+    dataset = ManifestDataset(manifest_path)
+    batches = build_prediction_batches(dataset, batch_size=2)
+    assert next(batches) is not None
+    assert isinstance(batches, Iterator)
 
 
 async def test_build_cached_feature_provider_reads_what_was_precomputed(tmp_path: Path) -> None:
@@ -182,9 +236,11 @@ def test_build_static_augmented_batches_none_mode_matches_build_training_batches
     dataset = ManifestDataset(manifest_path)
     pipeline = ImageAugmentationPipeline()
 
-    plain = build_training_batches(dataset, batch_size=2)
-    augmented = build_static_augmented_batches(
-        dataset, pipeline=pipeline, mode=AugmentationMode.NONE, global_seed=0, batch_size=2
+    plain = list(build_training_batches(dataset, batch_size=2))
+    augmented = list(
+        build_static_augmented_batches(
+            dataset, pipeline=pipeline, mode=AugmentationMode.NONE, global_seed=0, batch_size=2
+        )
     )
 
     assert torch.equal(plain[0].targets, augmented[0].targets)
@@ -199,8 +255,10 @@ def test_build_static_augmented_batches_offline_applies_augmentation(tmp_path: P
         AugmentationPipelineConfig(geometric=GeometricConfig(horizontal_flip_probability=1.0))
     )
 
-    batches = build_static_augmented_batches(
-        dataset, pipeline=pipeline, mode=AugmentationMode.OFFLINE, global_seed=0, batch_size=2, variant=0
+    batches = list(
+        build_static_augmented_batches(
+            dataset, pipeline=pipeline, mode=AugmentationMode.OFFLINE, global_seed=0, batch_size=2, variant=0
+        )
     )
 
     original = dataset[0].image
@@ -216,14 +274,36 @@ def test_build_static_augmented_batches_offline_is_deterministic(tmp_path: Path)
         AugmentationPipelineConfig(geometric=GeometricConfig(rotation_max_degrees=30.0))
     )
 
-    first = build_static_augmented_batches(
-        dataset, pipeline=pipeline, mode=AugmentationMode.OFFLINE, global_seed=7, batch_size=2, variant=0
+    first = list(
+        build_static_augmented_batches(
+            dataset, pipeline=pipeline, mode=AugmentationMode.OFFLINE, global_seed=7, batch_size=2, variant=0
+        )
     )
-    second = build_static_augmented_batches(
-        dataset, pipeline=pipeline, mode=AugmentationMode.OFFLINE, global_seed=7, batch_size=2, variant=0
+    second = list(
+        build_static_augmented_batches(
+            dataset, pipeline=pipeline, mode=AugmentationMode.OFFLINE, global_seed=7, batch_size=2, variant=0
+        )
     )
 
     for first_sample, second_sample in zip(first[0].samples, second[0].samples, strict=True):
+        assert np.array_equal(np.array(first_sample.image), np.array(second_sample.image))
+
+
+def test_build_static_augmented_batches_is_reiterable(tmp_path: Path) -> None:
+    """Same re-iterability requirement as build_training_batches — see that test's docstring."""
+    manifest_path = _build_gradient_manifest(tmp_path)
+    dataset = ManifestDataset(manifest_path)
+    pipeline = ImageAugmentationPipeline(
+        AugmentationPipelineConfig(geometric=GeometricConfig(rotation_max_degrees=30.0))
+    )
+    batches = build_static_augmented_batches(
+        dataset, pipeline=pipeline, mode=AugmentationMode.OFFLINE, global_seed=7, batch_size=2, variant=0
+    )
+
+    first_pass = list(batches)
+    second_pass = list(batches)
+
+    for first_sample, second_sample in zip(first_pass[0].samples, second_pass[0].samples, strict=True):
         assert np.array_equal(np.array(first_sample.image), np.array(second_sample.image))
 
 

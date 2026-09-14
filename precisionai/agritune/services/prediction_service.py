@@ -132,8 +132,11 @@ def run_prediction(config: PredictionRunConfig, *, store: FeatureStore, show_pro
     written_paths: list[str] = []
 
     batches = build_prediction_batches(dataset, batch_size=config.batch_size)
+    total_batches = -(-len(dataset) // config.batch_size)
     with torch.no_grad():
-        for batch in progress_iter(batches, desc="predict", unit="batch", disable=not show_progress):
+        for batch in progress_iter(
+            batches, desc="predict", unit="batch", disable=not show_progress, total=total_batches
+        ):
             features = provider.get_features(batch)
             predictions = logits_to_predictions(decoder(features))
             for sample, prediction in zip(batch, predictions, strict=True):

@@ -210,6 +210,7 @@ def evaluate(args: argparse.Namespace) -> int:
             ce_weight=args.loss_ce_weight,
             dice_weight=args.loss_dice_weight,
         ),
+        resize=tuple(args.resize) if args.resize else None,
     )
     metrics = run_evaluation(config, store=store, show_progress=True)
     print(json.dumps(metrics, indent=2))

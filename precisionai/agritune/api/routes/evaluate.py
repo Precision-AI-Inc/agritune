@@ -36,5 +36,6 @@ def evaluate(request: EvaluateRequest) -> EvaluateResponse:
             ce_weight=request.loss.ce_weight,
             dice_weight=request.loss.dice_weight,
         ),
+        resize=request.resize,
     )
     return EvaluateResponse(metrics=run_evaluation(config, store=store))

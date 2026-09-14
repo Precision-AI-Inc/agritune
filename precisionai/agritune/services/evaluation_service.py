@@ -58,6 +58,11 @@ class EvaluationRunConfig:
     loss : SegmentationLossConfig
         Should match the loss the checkpoint was trained under, or the reported ``"loss"`` value
         won't be comparable to training/validation loss from that run.
+    resize : tuple[int, int] | None
+        ``(width, height)`` every sample's image and mask are deterministically resized to before
+        batching. Must match whatever the checkpoint's training run resized to (its
+        ``augmentation.geometric.resize``), and is required whenever the dataset's own
+        images/masks do not already share one native size — otherwise batching them fails.
     """
 
     manifest_path: str
@@ -69,6 +74,7 @@ class EvaluationRunConfig:
     batch_size: int = 4
     sample_ids: list[str] | None = None
     loss: SegmentationLossConfig = field(default_factory=SegmentationLossConfig)
+    resize: tuple[int, int] | None = None
 
 
 def run_evaluation(
@@ -105,12 +111,19 @@ def run_evaluation(
         raise ValueError("no samples to evaluate")
     logger.info("evaluating checkpoint %s over %d sample(s)", config.checkpoint_path, len(dataset))
 
-    batches = build_training_batches(dataset, batch_size=config.batch_size)
+    batches = build_training_batches(
+        dataset, batch_size=config.batch_size, resize=config.resize, show_progress=show_progress
+    )
 
     first_sample = dataset[0]
     probe_sample = PreparedSample(sample_id=first_sample.sample_id, image=None, target=None)
     patch_dim, cls_dim = probe_feature_dims(provider, probe_sample)
-    output_size = mask_output_size(first_sample.target)
+    # From the first prepared batch, not first_sample.target directly: config.resize (when set)
+    # changes the spatial size every evaluation batch's target actually has, so probing the
+    # pre-resize sample would build a decoder upsampling to the wrong resolution. `batches` is a
+    # lazily re-iterable object (not a list), so this reads one extra chunk from disk rather than
+    # indexing — negligible next to the dataset-wide pass `evaluate()` makes below.
+    output_size = mask_output_size(next(iter(batches)).targets[0])
 
     decoder = build_decoder(
         config.decoder_name,

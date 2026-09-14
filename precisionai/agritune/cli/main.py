@@ -173,6 +173,16 @@ def _build_evaluate_parser(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser("evaluate", help="Evaluate a trained checkpoint.")
     _add_scored_run_arguments(parser)
     parser.add_argument(
+        "--resize",
+        type=int,
+        nargs=2,
+        default=None,
+        metavar=("WIDTH", "HEIGHT"),
+        help="Deterministically resize every image/mask to this size before batching — must match "
+        "the checkpoint's training run (its augmentation.geometric.resize). Required whenever the "
+        "dataset's images/masks do not already share one native size.",
+    )
+    parser.add_argument(
         "--loss-name",
         default="ce",
         choices=["ce", "bce", "dice", "ce_dice", "bce_dice"],

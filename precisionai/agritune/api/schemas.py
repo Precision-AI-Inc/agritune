@@ -172,6 +172,12 @@ class EvaluateRequest(ScoredRunRequest):
     """Body for ``POST /evaluate``."""
 
     loss: LossConfigRequest = Field(default_factory=LossConfigRequest)
+    resize: tuple[int, int] | None = Field(
+        default=None,
+        description="(width, height) every image/mask is deterministically resized to before "
+        "batching — must match the checkpoint's training run (its augmentation.geometric.resize). "
+        "Required whenever the dataset's images/masks do not already share one native size.",
+    )
 
 
 class EvaluateResponse(BaseModel):

@@ -356,9 +356,11 @@ def _build_augmentation_pipeline(config: TrainingRunConfig) -> ImageAugmentation
     )
 
 
-def _build_train_batches(config: TrainingRunConfig, train_dataset: ManifestDataset) -> Any:
+def _build_train_batches(
+    config: TrainingRunConfig, train_dataset: ManifestDataset, *, show_progress: bool = False
+) -> Any:
     if config.augmentation.mode is AugmentationMode.NONE:
-        return build_training_batches(train_dataset, batch_size=config.batch_size)
+        return build_training_batches(train_dataset, batch_size=config.batch_size, show_progress=show_progress)
 
     pipeline = _build_augmentation_pipeline(config)
     if config.augmentation.mode is AugmentationMode.OFFLINE:
@@ -369,6 +371,7 @@ def _build_train_batches(config: TrainingRunConfig, train_dataset: ManifestDatas
             global_seed=config.seed,
             batch_size=config.batch_size,
             variant=config.augmentation.variant,
+            show_progress=show_progress,
         )
 
     return OnlineAugmentedBatches(
@@ -440,8 +443,17 @@ def run_training(
     train_dataset = ManifestDataset(config.manifest_path, sample_ids=split.train)
     val_dataset = ManifestDataset(config.manifest_path, sample_ids=split.val or split.train)
 
-    train_batches = _build_train_batches(config, train_dataset)
-    val_batches = build_training_batches(val_dataset, batch_size=config.batch_size)
+    train_batches = _build_train_batches(config, train_dataset, show_progress=show_progress)
+    # Validation is never augmented (see docs/augmentation.md), but it still needs every sample's
+    # image/mask resized to one common size before torch.stack — so it reuses the configured
+    # geometric.resize (deterministic dimensional normalization, not augmentation) regardless of
+    # config.augmentation.mode.
+    val_batches = build_training_batches(
+        val_dataset,
+        batch_size=config.batch_size,
+        resize=config.augmentation.geometric.resize,
+        show_progress=show_progress,
+    )
 
     first_train_sample = train_dataset[0]
     prepared_probe = prepare_sample(
