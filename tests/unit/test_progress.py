@@ -92,6 +92,7 @@ def test_cli_train_enables_progress(monkeypatch: pytest.MonkeyPatch, tmp_path: P
 
 
 def test_api_train_evaluate_and_predict_stay_headless(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("AGRITUNE_API_ROOT", str(tmp_path))
     seen: dict[str, bool] = {}
 
     def fake_run_training(_config: object, *, store: object, show_progress: bool = False) -> SimpleNamespace:

@@ -60,6 +60,7 @@ tracking = [
 ]
 api = [
     "fastapi>=0.110",
+    "uvicorn>=0.30",
 ]
 dotenv = [
     "python-dotenv>=1.0",

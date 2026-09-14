@@ -5,11 +5,18 @@
 
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from precisionai.agritune.api import create_app
 from precisionai.agritune.features.store import DirectoryFeatureStore
 from tests.fixtures.manifest_factory import build_manifest
+
+
+@pytest.fixture(autouse=True)
+def _api_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Scope the API's path-containment root to this test's ``tmp_path``."""
+    monkeypatch.setenv("AGRITUNE_API_ROOT", str(tmp_path))
 
 
 def _client() -> TestClient:
@@ -96,3 +103,26 @@ def test_clean_lists_removed_files(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     assert response.json()["removed"] == [f"{key}.safetensors"]
+
+
+def test_build_rejects_a_store_path_outside_the_api_root(
+    tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    manifest_path = build_manifest(tmp_path)
+    outside_store = tmp_path_factory.mktemp("outside") / "features"
+
+    response = _client().post(
+        "/features/build", json={"manifest_path": str(manifest_path), "store": str(outside_store)}
+    )
+
+    assert response.status_code == 400
+    assert "store" in response.json()["detail"]
+
+
+def test_build_rejects_a_manifest_path_that_escapes_the_api_root_with_dotdot(tmp_path: Path) -> None:
+    response = _client().post(
+        "/features/build", json={"manifest_path": "../escaped.csv", "store": str(tmp_path / "features")}
+    )
+
+    assert response.status_code == 400
+    assert "manifest_path" in response.json()["detail"]
