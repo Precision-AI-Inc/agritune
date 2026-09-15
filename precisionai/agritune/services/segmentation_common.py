@@ -11,11 +11,12 @@ what ``agritune features build`` wrote.
 
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import numpy as np
 import torch
 from torch import nn
+from torch.utils.data import DataLoader, Dataset
 
 from precisionai.agritune.augmentations.image.pipeline import (
     AugmentationMode,
@@ -54,6 +55,66 @@ def mask_to_target_tensor(mask: Any) -> torch.Tensor:
     return torch.from_numpy(np.array(mask)).long()
 
 
+_T = TypeVar("_T")
+
+
+class _IndexDataset(Dataset[_T]):
+    """Adapts an ``index -> item`` callable to :class:`torch.utils.data.Dataset`.
+
+    Each batches class below already knows how to load and (optionally) augment one sample given
+    its index; this only supplies the ``__len__``/``__getitem__`` shape a :class:`DataLoader` needs
+    to farm those per-index calls out across ``num_workers`` worker processes.
+    """
+
+    def __init__(self, length: int, item_fn: Callable[[int], _T]) -> None:
+        self._length = length
+        self._item_fn = item_fn
+
+    def __len__(self) -> int:
+        return self._length
+
+    def __getitem__(self, index: int) -> _T:
+        return self._item_fn(index)
+
+
+def _collate_training_batch(items: list[tuple[PreparedSample, torch.Tensor]]) -> TrainingBatch:
+    samples, targets = zip(*items, strict=True)
+    return TrainingBatch(samples=list(samples), targets=torch.stack(targets))
+
+
+def _training_batch_loader(
+    length: int,
+    item_fn: Callable[[int], tuple[PreparedSample, torch.Tensor]],
+    *,
+    batch_size: int,
+    num_workers: int,
+    pin_memory: bool,
+    prefetch_factor: int | None = None,
+) -> DataLoader[tuple[PreparedSample, torch.Tensor]]:
+    """Build the :class:`DataLoader` shared by every ``TrainingBatch``-producing batches class.
+
+    ``shuffle`` is always ``False``: sample order must stay exactly what the dataset provides, both
+    for offline-augmentation cache-key stability and for reproducibility
+    (``docs/reproducibility.md``). ``num_workers``/``pin_memory``/``prefetch_factor`` are the same
+    knobs :class:`~precisionai.agritune.services.training_service.TrainingRunConfig` exposes,
+    forwarded here unchanged.
+
+    Each worker buffers up to ``prefetch_factor`` whole *batches* ahead (``DataLoader`` assigns
+    entire batches to workers, not individual samples), so peak memory scales with
+    ``num_workers * prefetch_factor * batch_size`` — worth capping explicitly at a large
+    ``batch_size``, rather than relying on ``DataLoader``'s own default of ``2``.
+    """
+    return DataLoader(
+        _IndexDataset(length, item_fn),
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        prefetch_factor=prefetch_factor,
+        collate_fn=_collate_training_batch,
+    )
+
+
 def mask_output_size(mask: Any) -> tuple[int, int]:
     """Return a decoded mask's ``(height, width)`` as a concrete 2-tuple for :func:`build_decoder`.
 
@@ -75,6 +136,9 @@ class _ResizedBatches:
         batch_size: int,
         resize: tuple[int, int] | None,
         show_progress: bool,
+        num_workers: int = 0,
+        pin_memory: bool = False,
+        prefetch_factor: int | None = None,
     ) -> None:
         self._dataset = dataset
         self._batch_size = batch_size
@@ -84,21 +148,29 @@ class _ResizedBatches:
             else None
         )
         self._show_progress = show_progress
+        self._num_workers = num_workers
+        self._pin_memory = pin_memory
+        self._prefetch_factor = prefetch_factor
+
+    def _item(self, index: int) -> tuple[PreparedSample, torch.Tensor]:
+        sample = self._dataset[index]
+        if self._resize_pipeline is not None:
+            sample = self._resize_pipeline.apply(sample, seed=0)
+        return (
+            PreparedSample(sample_id=sample.sample_id, image=sample.image, target=None),
+            mask_to_target_tensor(sample.target),
+        )
 
     def __iter__(self) -> Iterator[TrainingBatch]:
-        starts = progress_iter(
-            range(0, len(self._dataset), self._batch_size),
-            desc="building batches",
-            unit="batch",
-            disable=not self._show_progress,
+        loader = _training_batch_loader(
+            len(self._dataset),
+            self._item,
+            batch_size=self._batch_size,
+            num_workers=self._num_workers,
+            pin_memory=self._pin_memory,
+            prefetch_factor=self._prefetch_factor,
         )
-        for start in starts:
-            chunk = [self._dataset[i] for i in range(start, min(start + self._batch_size, len(self._dataset)))]
-            if self._resize_pipeline is not None:
-                chunk = [self._resize_pipeline.apply(sample, seed=0) for sample in chunk]
-            samples = [PreparedSample(sample_id=sample.sample_id, image=sample.image, target=None) for sample in chunk]
-            targets = torch.stack([mask_to_target_tensor(sample.target) for sample in chunk])
-            yield TrainingBatch(samples=samples, targets=targets)
+        yield from progress_iter(loader, desc="building batches", unit="batch", disable=not self._show_progress)
 
 
 def build_training_batches(
@@ -107,17 +179,21 @@ def build_training_batches(
     batch_size: int,
     resize: tuple[int, int] | None = None,
     show_progress: bool = False,
+    num_workers: int = 0,
+    pin_memory: bool = False,
+    prefetch_factor: int | None = None,
 ) -> Iterable[TrainingBatch]:
     """Return a :class:`TrainingBatch` iterable, chunked to at most ``batch_size`` samples.
 
-    Every image/mask is read from disk (and resized, if requested) lazily, one chunk at a time, on
-    every iteration — nothing is decoded up front, and nothing from a previous chunk is held once
-    the next one is yielded, so a dataset of any size can be iterated without loading it into
-    memory all at once. The returned object can be iterated more than once (each ``__iter__`` call
-    starts a fresh pass reading from disk): :class:`~precisionai.agritune.training.trainer.Trainer`
-    relies on that to re-walk the same training/validation batches every epoch. Pass
-    ``show_progress=True`` to render a bar over each pass rather than leaving the caller looking
-    frozen while it reads.
+    Every image/mask is read from disk (and resized, if requested) lazily, one batch at a time, on
+    every iteration — nothing is decoded up front, and nothing from a previous batch is held once
+    the next one is yielded, so a dataset of any size can be iterated without loading it into memory
+    all at once. Loading is delegated to a :class:`torch.utils.data.DataLoader`, so ``num_workers``
+    controls how many worker processes decode/resize samples in parallel. The returned object can
+    be iterated more than once (each ``__iter__`` call starts a fresh pass reading from disk):
+    :class:`~precisionai.agritune.training.trainer.Trainer` relies on that to re-walk the same
+    training/validation batches every epoch. Pass ``show_progress=True`` to render a bar over each
+    pass rather than leaving the caller looking frozen while it reads.
 
     Parameters
     ----------
@@ -133,8 +209,29 @@ def build_training_batches(
     show_progress : bool, optional
         Render a ``tqdm`` bar over each pass. Defaults to ``False`` so headless callers (e.g. the
         API) see no terminal output.
+    num_workers : int, optional
+        Forwarded to the underlying ``DataLoader``. ``0`` (the default) decodes/resizes every
+        sample in the main process; a larger value spreads that work across subprocesses, which
+        matters most at large ``batch_size`` values or slow storage.
+    pin_memory : bool, optional
+        Forwarded to the underlying ``DataLoader``. Speeds up the eventual host-to-device copy of
+        ``targets`` when training on a CUDA device; has no effect on CPU-only runs.
+    prefetch_factor : int | None, optional
+        Batches each worker buffers ahead of time; ignored when ``num_workers`` is ``0``. Peak
+        memory scales with ``num_workers * prefetch_factor * batch_size``, so at a large
+        ``batch_size`` it is worth capping explicitly (e.g. ``1``) rather than relying on
+        ``DataLoader``'s own default of ``2`` — a high ``num_workers`` combined with that default
+        can buffer enough whole batches at once to exhaust memory.
     """
-    return _ResizedBatches(dataset, batch_size=batch_size, resize=resize, show_progress=show_progress)
+    return _ResizedBatches(
+        dataset,
+        batch_size=batch_size,
+        resize=resize,
+        show_progress=show_progress,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        prefetch_factor=prefetch_factor,
+    )
 
 
 class _StaticAugmentedBatches:
@@ -150,6 +247,9 @@ class _StaticAugmentedBatches:
         batch_size: int,
         variant: int,
         show_progress: bool,
+        num_workers: int = 0,
+        pin_memory: bool = False,
+        prefetch_factor: int | None = None,
     ) -> None:
         self._dataset = dataset
         self._pipeline = pipeline
@@ -158,37 +258,38 @@ class _StaticAugmentedBatches:
         self._batch_size = batch_size
         self._variant = variant
         self._show_progress = show_progress
+        self._num_workers = num_workers
+        self._pin_memory = pin_memory
+        self._prefetch_factor = prefetch_factor
+
+    def _item(self, index: int) -> tuple[PreparedSample, torch.Tensor]:
+        prepared = prepare_sample(
+            self._dataset[index],
+            mode=self._mode,
+            pipeline=self._pipeline,
+            global_seed=self._global_seed,
+            variant=self._variant,
+        )
+        return (
+            PreparedSample(
+                sample_id=prepared.sample_id,
+                image=prepared.image,
+                target=None,
+                augmentation_metadata=prepared.augmentation_metadata,
+            ),
+            mask_to_target_tensor(prepared.target),
+        )
 
     def __iter__(self) -> Iterator[TrainingBatch]:
-        starts = progress_iter(
-            range(0, len(self._dataset), self._batch_size),
-            desc="building batches",
-            unit="batch",
-            disable=not self._show_progress,
+        loader = _training_batch_loader(
+            len(self._dataset),
+            self._item,
+            batch_size=self._batch_size,
+            num_workers=self._num_workers,
+            pin_memory=self._pin_memory,
+            prefetch_factor=self._prefetch_factor,
         )
-        for start in starts:
-            chunk = [self._dataset[i] for i in range(start, min(start + self._batch_size, len(self._dataset)))]
-            prepared = [
-                prepare_sample(
-                    sample,
-                    mode=self._mode,
-                    pipeline=self._pipeline,
-                    global_seed=self._global_seed,
-                    variant=self._variant,
-                )
-                for sample in chunk
-            ]
-            samples = [
-                PreparedSample(
-                    sample_id=p.sample_id,
-                    image=p.image,
-                    target=None,
-                    augmentation_metadata=p.augmentation_metadata,
-                )
-                for p in prepared
-            ]
-            targets = torch.stack([mask_to_target_tensor(p.target) for p in prepared])
-            yield TrainingBatch(samples=samples, targets=targets)
+        yield from progress_iter(loader, desc="building batches", unit="batch", disable=not self._show_progress)
 
 
 def build_static_augmented_batches(
@@ -200,6 +301,9 @@ def build_static_augmented_batches(
     batch_size: int,
     variant: int = 0,
     show_progress: bool = False,
+    num_workers: int = 0,
+    pin_memory: bool = False,
+    prefetch_factor: int | None = None,
 ) -> Iterable[TrainingBatch]:
     """Return a batches iterable applying a fixed (non-epoch-varying) augmentation pass.
 
@@ -208,11 +312,13 @@ def build_static_augmented_batches(
     epoch, same as :func:`build_training_batches`. Use :class:`OnlineAugmentedBatches` instead for
     ``ONLINE``/``HYBRID``, which must re-augment differently every epoch.
 
-    Every image/mask is read from disk and augmented lazily, one chunk at a time, on every
-    iteration — nothing is decoded up front, and nothing from a previous chunk is held once the
-    next one is yielded, so a dataset of any size can be iterated without loading it into memory
-    all at once. The returned object can be iterated more than once (each ``__iter__`` call starts
-    a fresh pass reading from disk, recomputing the same deterministic augmentation):
+    Every image/mask is read from disk and augmented lazily, one batch at a time, on every
+    iteration — nothing is decoded up front, and nothing from a previous batch is held once the
+    next one is yielded, so a dataset of any size can be iterated without loading it into memory all
+    at once. Loading is delegated to a :class:`torch.utils.data.DataLoader`, so ``num_workers``
+    controls how many worker processes decode/augment samples in parallel. The returned object can
+    be iterated more than once (each ``__iter__`` call starts a fresh pass reading from disk,
+    recomputing the same deterministic augmentation):
     :class:`~precisionai.agritune.training.trainer.Trainer` relies on that to re-walk the same
     training batches every epoch. Pass ``show_progress=True`` to render a bar over each pass rather
     than leaving the caller looking frozen while it reads.
@@ -231,6 +337,19 @@ def build_static_augmented_batches(
     show_progress : bool, optional
         Render a ``tqdm`` bar over each pass. Defaults to ``False`` so headless callers (e.g. the
         API) see no terminal output.
+    num_workers : int, optional
+        Forwarded to the underlying ``DataLoader``. ``0`` (the default) decodes/augments every
+        sample in the main process; a larger value spreads that work across subprocesses, which
+        matters most at large ``batch_size`` values or slow storage.
+    pin_memory : bool, optional
+        Forwarded to the underlying ``DataLoader``. Speeds up the eventual host-to-device copy of
+        ``targets`` when training on a CUDA device; has no effect on CPU-only runs.
+    prefetch_factor : int | None, optional
+        Batches each worker buffers ahead of time; ignored when ``num_workers`` is ``0``. Peak
+        memory scales with ``num_workers * prefetch_factor * batch_size``, so at a large
+        ``batch_size`` it is worth capping explicitly (e.g. ``1``) rather than relying on
+        ``DataLoader``'s own default of ``2`` — a high ``num_workers`` combined with that default
+        can buffer enough whole batches at once to exhaust memory.
 
     Returns
     -------
@@ -244,6 +363,9 @@ def build_static_augmented_batches(
         batch_size=batch_size,
         variant=variant,
         show_progress=show_progress,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        prefetch_factor=prefetch_factor,
     )
 
 
@@ -267,6 +389,19 @@ class OnlineAugmentedBatches:
     hybrid_online_probability : float, optional
         Forwarded to :func:`~precisionai.agritune.augmentations.image.pipeline.prepare_sample`;
         ignored under ``ONLINE``.
+    num_workers : int, optional
+        Forwarded to the underlying ``DataLoader``. ``0`` (the default) decodes/augments every
+        sample in the main process; a larger value spreads that work across subprocesses, which
+        matters most at large ``batch_size`` values or slow storage.
+    pin_memory : bool, optional
+        Forwarded to the underlying ``DataLoader``. Speeds up the eventual host-to-device copy of
+        ``targets`` when training on a CUDA device; has no effect on CPU-only runs.
+    prefetch_factor : int | None, optional
+        Batches each worker buffers ahead of time; ignored when ``num_workers`` is ``0``. Peak
+        memory scales with ``num_workers * prefetch_factor * batch_size``, so at a large
+        ``batch_size`` it is worth capping explicitly (e.g. ``1``) rather than relying on
+        ``DataLoader``'s own default of ``2`` — a high ``num_workers`` combined with that default
+        can buffer enough whole batches at once to exhaust memory.
     """
 
     def __init__(
@@ -278,6 +413,9 @@ class OnlineAugmentedBatches:
         global_seed: int,
         batch_size: int,
         hybrid_online_probability: float = 0.3,
+        num_workers: int = 0,
+        pin_memory: bool = False,
+        prefetch_factor: int | None = None,
     ) -> None:
         self._dataset = dataset
         self._pipeline = pipeline
@@ -285,6 +423,9 @@ class OnlineAugmentedBatches:
         self._global_seed = global_seed
         self._batch_size = batch_size
         self._hybrid_online_probability = hybrid_online_probability
+        self._num_workers = num_workers
+        self._pin_memory = pin_memory
+        self._prefetch_factor = prefetch_factor
         self._epoch = 0
 
     def set_epoch(self, epoch: int) -> None:
@@ -297,46 +438,72 @@ class OnlineAugmentedBatches:
         """Yield one freshly re-augmented pass over the dataset, advancing the epoch counter."""
         epoch = self._epoch
         self._epoch += 1
-        for start in range(0, len(self._dataset), self._batch_size):
-            chunk = [self._dataset[i] for i in range(start, min(start + self._batch_size, len(self._dataset)))]
-            prepared = [
-                prepare_sample(
-                    sample,
-                    mode=self._mode,
-                    pipeline=self._pipeline,
-                    global_seed=self._global_seed,
-                    epoch=epoch,
-                    occurrence=0,
-                    hybrid_online_probability=self._hybrid_online_probability,
-                )
-                for sample in chunk
-            ]
-            samples = [
+
+        def item(index: int) -> tuple[PreparedSample, torch.Tensor]:
+            prepared = prepare_sample(
+                self._dataset[index],
+                mode=self._mode,
+                pipeline=self._pipeline,
+                global_seed=self._global_seed,
+                epoch=epoch,
+                occurrence=0,
+                hybrid_online_probability=self._hybrid_online_probability,
+            )
+            return (
                 PreparedSample(
-                    sample_id=p.sample_id,
-                    image=p.image,
+                    sample_id=prepared.sample_id,
+                    image=prepared.image,
                     target=None,
-                    augmentation_metadata=p.augmentation_metadata,
-                )
-                for p in prepared
-            ]
-            targets = torch.stack([mask_to_target_tensor(p.target) for p in prepared])
-            yield TrainingBatch(samples=samples, targets=targets)
+                    augmentation_metadata=prepared.augmentation_metadata,
+                ),
+                mask_to_target_tensor(prepared.target),
+            )
+
+        loader = _training_batch_loader(
+            len(self._dataset),
+            item,
+            batch_size=self._batch_size,
+            num_workers=self._num_workers,
+            pin_memory=self._pin_memory,
+            prefetch_factor=self._prefetch_factor,
+        )
+        yield from loader
 
 
-def build_prediction_batches(dataset: ManifestDataset, *, batch_size: int) -> Iterator[list[PreparedSample]]:
-    """Yield sample batches with no target tensor required (for inference), one chunk at a time.
+def build_prediction_batches(
+    dataset: ManifestDataset,
+    *,
+    batch_size: int,
+    num_workers: int = 0,
+    pin_memory: bool = False,
+    prefetch_factor: int | None = None,
+) -> Iterator[list[PreparedSample]]:
+    """Yield sample batches with no target tensor required (for inference), one batch at a time.
 
     Unlike :func:`build_training_batches`/:func:`build_static_augmented_batches` — which return a
     materialized list because training reuses the same batches every epoch — prediction consumes
     each batch exactly once and writes its output immediately, so this yields lazily instead of
     decoding every sample's image into memory up front. That matters at prediction scale: a
     dataset of hundreds of thousands of samples would otherwise hold every decoded image
-    simultaneously before the first prediction is even written.
+    simultaneously before the first prediction is even written. Loading is delegated to a
+    :class:`torch.utils.data.DataLoader`, so ``num_workers``/``pin_memory``/``prefetch_factor``
+    behave exactly as they do for :func:`build_training_batches`.
     """
-    for start in range(0, len(dataset), batch_size):
-        chunk = [dataset[i] for i in range(start, min(start + batch_size, len(dataset)))]
-        yield [PreparedSample(sample_id=sample.sample_id, image=sample.image, target=None) for sample in chunk]
+
+    def item(index: int) -> PreparedSample:
+        sample = dataset[index]
+        return PreparedSample(sample_id=sample.sample_id, image=sample.image, target=None)
+
+    loader = DataLoader(
+        _IndexDataset(len(dataset), item),
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        prefetch_factor=prefetch_factor,
+        collate_fn=list,
+    )
+    yield from loader
 
 
 def build_decoder(

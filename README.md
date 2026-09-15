@@ -53,11 +53,13 @@ No encoder access yet? Swap the `features build` command for `--model fake-encod
 `--base-url`) to dry-run the same pipeline against synthetic features — every unit test and CI run
 does exactly that via `FakeEncoderBackend`, no network or API key required.
 
-See [examples/SANITY_CHECK.md](examples/SANITY_CHECK.md) for the full walkthrough (encoder
-benchmarking, decoder swaps, resuming, predicting with overlays, and what a run directory
-contains), [examples/FEATURE_TEST_COMMANDS.md](examples/FEATURE_TEST_COMMANDS.md) to exercise
-every decoder/provider/augmentation combination, [CLI](#cli) below for the full command list, and
-[docs/](docs/) for architecture, configuration, and dataset format guides.
+See [examples/README.md](examples/README.md) for task-oriented tutorials (training with
+`none`/`offline`/`online` augmentation, evaluation, prediction, and resize-only normalization vs.
+the full augmentation pipeline), [examples/SANITY_CHECK.md](examples/SANITY_CHECK.md) for the full
+walkthrough (encoder benchmarking, decoder swaps, resuming, predicting with overlays, and what a
+run directory contains), [examples/FEATURE_TEST_COMMANDS.md](examples/FEATURE_TEST_COMMANDS.md) to
+exercise every decoder/provider/augmentation combination, [CLI](#cli) below for the full command
+list, and [docs/](docs/) for architecture, configuration, and dataset format guides.
 
 ---
 

@@ -13,10 +13,10 @@
 #   agritune train --config examples/segmentation/cwfid.yaml trainer.max_epochs=10 optimizer.lr=1e-4
 
 # --- Dataset / run identity -------------------------------------------------
-manifest_path: examples/datasets/cwfid/manifest.csv
-feature_store_dir: examples/datasets/cwfid/features
-run_root: examples/datasets/cwfid/runs   # runs/<run_id>/ is created here
-run_id: cwfid-sanity-mlp_probe-feature_aug
+manifest_path: examples/datasets/phenobench/manifest.csv
+feature_store_dir: examples/datasets/phenobench/features
+run_root: examples/datasets/phenobench/runs   # runs/<run_id>/ is created here
+run_id: phenobench-sanity-token_fpn
 num_classes: 3
 seed: 0                                  # global seed; trainer.seed falls back to this when unset
 
@@ -74,12 +74,12 @@ augmentation:
 # with any feature_provider and any augmentation.mode above. A 0.0 probability/std disables that
 # transform; all zero (the default) is a no-op.
 feature_augmentation:
-  patch_dropout_probability: 0.05         # drop probability per patch, in [0, 1)
-  token_masking_probability: 0.02         # mask probability per patch, in [0, 1]
-  token_mask_value: 0.01                  # constant value masked patches are set to
-  gaussian_noise_std: 0.01                # std of additive Gaussian noise on patch/CLS tokens
-  cls_dropout_probability: 0.03           # drop probability per sample's CLS token, in [0, 1)
-  channel_dropout_probability: 0.03       # drop probability per embedding channel, in [0, 1)
+  patch_dropout_probability: 0         # drop probability per patch, in [0, 1)
+  token_masking_probability: 0         # mask probability per patch, in [0, 1]
+  token_mask_value: 0                  # constant value masked patches are set to
+  gaussian_noise_std: 0                # std of additive Gaussian noise on patch/CLS tokens
+  cls_dropout_probability: 0           # drop probability per sample's CLS token, in [0, 1)
+  channel_dropout_probability: 0       # drop probability per embedding channel, in [0, 1)
 
 # --- Decoder -------------------------------------------------------------------
 # decoder_name: mlp_probe | token_fpn | aspp | ppm | segmenter | mask_former
@@ -87,13 +87,11 @@ feature_augmentation:
 # mlp_probe's own kwargs (matching its defaults); swapping decoder_name requires swapping these
 # keys too (e.g. atrous_rates/hidden_dim for aspp, pool_sizes for ppm, num_queries for
 # mask_former, cls_fusion/hidden_dim for token_fpn).
-decoder_name: mlp_probe
+decoder_name: token_fpn
 decoder_kwargs:
-  hidden_dims: []                        # empty = a single nn.Linear(patch_dim, num_classes)
-  dropout: 0.0                           # applied after each hidden layer; never after the last one
-
+  cls_fusion: "film"                     # how to fuse the CLS token with patch tokens, e.g., "concat" or "add"
 # --- Batching / split ------------------------------------------------------------
-batch_size: 4
+batch_size: 32
 num_workers: 0                           # DataLoader worker subprocesses for batch decode/augmentation;
                                           # 0 runs everything in the main process. Raise this (e.g. 4-8)
                                           # if "building batches" is slow at your batch_size/storage speed.
@@ -108,7 +106,7 @@ val_fraction: 0.25                       # fraction of samples held out for vali
 
 # --- Optimizer -------------------------------------------------------------------
 optimizer:
-  name: adam                              # adamw | adam | sgd
+  name: adamw                              # adamw | adam | sgd
   lr: 0.001
   weight_decay: 0.01
   betas: [0.9, 0.999]                    # ignored for sgd
@@ -120,7 +118,7 @@ optimizer:
 # scheduler at all — included here only to document every field.
 scheduler:
   enabled: false                          # false disables the scheduler regardless of the fields below
-  name: polynomial                         # constant | cosine | linear_warmup | polynomial | plateau
+  name: linear_warmup                         # constant | cosine | linear_warmup | polynomial | plateau
   warmup_steps: 10                        # ignored by constant/plateau
   total_steps: 20                      # required by cosine/linear_warmup/polynomial
   polynomial_power: 1.0                  # only used by polynomial
@@ -132,22 +130,22 @@ trainer:
   max_epochs: 100
   accumulation_steps: 1                 # micro-batches accumulated before each optimizer step
   grad_clip_norm: null                   # max gradient norm for clipping; null disables clipping
-  precision: fp32                        # fp32 | fp16 | bf16
+  precision: fp16                        # fp32 | fp16 | bf16
   seed: 0                                # defaults to the top-level seed when omitted
   early_stopping_patience: null          # stop after this many validation passes with no improvement
   checkpoint_every_n_steps: null         # also checkpoint periodically, in addition to end-of-epoch/best
 
 # --- Loss ------------------------------------------------------------------------
 loss:
-  name: ce                               # ce | bce | dice | ce_dice | bce_dice
+  name: dice                               # ce | bce | dice | ce_dice | bce_dice
   ignore_index: -100                     # pixel value excluded from every term
   class_weights: null                    # per-class weights (CE "weight" / BCE "pos_weight")
   ce_weight: 1.0                         # weight applied to the CE/BCE term in a combined loss
   dice_weight: 1.0                       # weight applied to the Dice term in a combined loss
 
 # --- Validation / checkpointing ---------------------------------------------------
-val_metric_name: mean_iou
-higher_is_better: true
+val_metric_name: loss
+higher_is_better: false
 checkpoint_top_k: 3                      # best-by-val-metric checkpoints retained; 0 keeps every one
 
 # --- Tracking ----------------------------------------------------------------------

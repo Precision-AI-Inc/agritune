@@ -224,6 +224,7 @@ class ShardedFeatureStore:
             json.loads(self._index_path.read_text()) if self._index_path.is_file() else {}
         )
         self._pending: dict[str, EncoderFeatures] = {}
+        self._shard_cache: tuple[str, dict[str, torch.Tensor]] | None = None
 
     def has(self, key: str) -> bool:
         """Return whether an entry exists for ``key`` (flushed, or buffered in this process)."""
@@ -236,7 +237,7 @@ class ShardedFeatureStore:
         if key not in self._index:
             raise KeyError(key)
         entry = self._index[key]
-        tensors = load_file(str(self._root / entry["shard"]))
+        tensors = self._load_shard(entry["shard"])
         prefixed = {name[len(key) + 2 :]: tensor for name, tensor in tensors.items() if name.startswith(f"{key}::")}
         return _features_from_tensors(
             prefixed,
@@ -327,6 +328,20 @@ class ShardedFeatureStore:
 
     def _known_shards(self) -> set[str]:
         return {entry["shard"] for entry in self._index.values()}
+
+    def _load_shard(self, shard_name: str) -> dict[str, torch.Tensor]:
+        """Load ``shard_name``'s tensors, reusing the most-recently loaded shard when possible.
+
+        Reads within one batch typically land on runs of keys from the same shard (samples are
+        packed into shards in stable order), so caching only the single most-recently loaded shard
+        avoids re-reading it from disk for every sample it contains, without holding multiple
+        shards' tensors in memory at once.
+        """
+        if self._shard_cache is not None and self._shard_cache[0] == shard_name:
+            return self._shard_cache[1]
+        tensors = load_file(str(self._root / shard_name))
+        self._shard_cache = (shard_name, tensors)
+        return tensors
 
     def __enter__(self) -> "ShardedFeatureStore":
         """Return ``self`` for use as a context manager."""

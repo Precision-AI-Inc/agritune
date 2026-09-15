@@ -231,6 +231,20 @@ class TrainingRunConfig:
         Extra keyword arguments forwarded to the decoder's constructor (e.g. ``hidden_dims`` for
         ``"mlp_probe"``, ``atrous_rates`` for ``"aspp"``).
     batch_size : int
+    num_workers : int
+        Forwarded to the ``DataLoader`` backing every train/validation batches iterable — worker
+        subprocesses to decode/augment samples in parallel. ``0`` runs everything in the main
+        process; purely a performance knob, so it is excluded from ``_critical_config`` and never
+        affects a run's reproducibility.
+    pin_memory : bool
+        Forwarded to the same ``DataLoader``. Speeds up the host-to-device copy of batch targets
+        when training on a CUDA device; has no effect on CPU-only runs.
+    prefetch_factor : int | None
+        Forwarded to the same ``DataLoader`` — batches each worker buffers ahead of time; ``None``
+        defers to ``DataLoader``'s own default (``2``) and requires ``num_workers > 0``. Peak
+        memory scales with ``num_workers * prefetch_factor * batch_size``, so a large ``batch_size``
+        combined with many workers at the default of ``2`` can buffer enough whole batches at once
+        to exhaust memory — cap this explicitly (e.g. ``1``) in that case.
     val_fraction : float
         Fraction of samples held out for validation (via a random split). Validation always uses
         unaugmented samples, regardless of ``augmentation.mode``.
@@ -266,6 +280,9 @@ class TrainingRunConfig:
     decoder_name: str = "mlp_probe"
     decoder_kwargs: dict[str, Any] = field(default_factory=dict)
     batch_size: int = 4
+    num_workers: int = 0
+    pin_memory: bool = False
+    prefetch_factor: int | None = None
     val_fraction: float = 0.2
     seed: int = 0
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
@@ -306,6 +323,12 @@ def _validate_config(config: TrainingRunConfig) -> None:
         raise ValueError(f"num_classes must be positive; got {config.num_classes}")
     if config.batch_size < 1:
         raise ValueError(f"batch_size must be positive; got {config.batch_size}")
+    if config.num_workers < 0:
+        raise ValueError(f"num_workers must be non-negative; got {config.num_workers}")
+    if config.prefetch_factor is not None and config.num_workers == 0:
+        raise ValueError(f"prefetch_factor={config.prefetch_factor} requires num_workers > 0; got num_workers=0")
+    if config.prefetch_factor is not None and config.prefetch_factor < 1:
+        raise ValueError(f"prefetch_factor must be positive; got {config.prefetch_factor}")
     if config.trainer.max_epochs < 1:
         raise ValueError(f"trainer.max_epochs must be positive; got {config.trainer.max_epochs}")
     if config.checkpoint_top_k < 0:
@@ -360,7 +383,14 @@ def _build_train_batches(
     config: TrainingRunConfig, train_dataset: ManifestDataset, *, show_progress: bool = False
 ) -> Any:
     if config.augmentation.mode is AugmentationMode.NONE:
-        return build_training_batches(train_dataset, batch_size=config.batch_size, show_progress=show_progress)
+        return build_training_batches(
+            train_dataset,
+            batch_size=config.batch_size,
+            show_progress=show_progress,
+            num_workers=config.num_workers,
+            pin_memory=config.pin_memory,
+            prefetch_factor=config.prefetch_factor,
+        )
 
     pipeline = _build_augmentation_pipeline(config)
     if config.augmentation.mode is AugmentationMode.OFFLINE:
@@ -372,6 +402,9 @@ def _build_train_batches(
             batch_size=config.batch_size,
             variant=config.augmentation.variant,
             show_progress=show_progress,
+            num_workers=config.num_workers,
+            pin_memory=config.pin_memory,
+            prefetch_factor=config.prefetch_factor,
         )
 
     return OnlineAugmentedBatches(
@@ -381,6 +414,9 @@ def _build_train_batches(
         global_seed=config.seed,
         batch_size=config.batch_size,
         hybrid_online_probability=config.augmentation.hybrid_online_probability,
+        num_workers=config.num_workers,
+        pin_memory=config.pin_memory,
+        prefetch_factor=config.prefetch_factor,
     )
 
 
@@ -453,6 +489,9 @@ def run_training(
         batch_size=config.batch_size,
         resize=config.augmentation.geometric.resize,
         show_progress=show_progress,
+        num_workers=config.num_workers,
+        pin_memory=config.pin_memory,
+        prefetch_factor=config.prefetch_factor,
     )
 
     first_train_sample = train_dataset[0]

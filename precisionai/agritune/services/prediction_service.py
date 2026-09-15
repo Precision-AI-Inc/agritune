@@ -6,6 +6,7 @@
 Loads a trained decoder from a checkpoint and writes one per-pixel class-index PNG per sample.
 """
 
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,11 @@ import numpy as np
 import torch
 from PIL import Image
 
+from precisionai.agritune.augmentations.image.pipeline import (
+    AugmentationMode,
+    ImageAugmentationPipeline,
+    prepare_sample,
+)
 from precisionai.agritune.data.dataset import ManifestDataset
 from precisionai.agritune.features.keys import EncoderFingerprint
 from precisionai.agritune.logging import get_logger, progress_iter
@@ -23,6 +29,7 @@ from precisionai.agritune.services.segmentation_common import (
     build_cached_feature_provider,
     build_decoder,
     build_prediction_batches,
+    build_static_augmented_batches,
     mask_output_size,
     probe_feature_dims,
 )
@@ -65,6 +72,27 @@ class PredictionRunConfig:
         Overlay opacity in ``[0, 1]``, passed to
         :func:`~precisionai.agritune.tasks.segmentation.visualization.overlay_predictions_on_image`.
         Ignored unless ``write_overlays`` is set.
+    augmentation_mode : AugmentationMode
+        ``NONE`` (default) predicts on each sample's native, unaugmented image — the original
+        behavior. ``OFFLINE`` instead reapplies the same deterministic ``augmentation_pipeline``
+        (typically a ``resize``/``random_crop``) the checkpoint's decoder was actually trained
+        under, and reads features from the matching offline-augmented cache entry rather than the
+        native one. Required whenever training used ``augmentation.mode: offline`` with a
+        ``random_crop``: a decoder trained only on small, fixed-size crops has no spatial context
+        beyond a single patch (see ``mlp_probe``) and generalizes poorly to a much larger, native,
+        differently-shaped patch grid it never saw during training — this is not merely lower
+        accuracy, it can produce content-independent, purely position-driven artifacts. ``ONLINE``
+        and ``HYBRID`` are not supported (predicting against a live-changing augmentation makes no
+        sense for a fixed inference pass).
+    augmentation_pipeline : ImageAugmentationPipeline
+        Ignored under ``NONE``. Must be built from the exact same config as the training run's
+        ``augmentation:`` block (e.g. via ``agritune features build``'s own
+        ``--augmentation-config`` file), or the derived cache key won't match what was cached.
+    global_seed : int
+        Ignored under ``NONE``. Must match the training run's seed, or the derived per-sample
+        augmentation (and so the cache key) won't match.
+    augmentation_variant : int
+        Ignored under ``NONE``. Must match the training run's offline variant index.
     """
 
     manifest_path: str
@@ -78,6 +106,37 @@ class PredictionRunConfig:
     sample_ids: list[str] | None = None
     write_overlays: bool = False
     overlay_alpha: float = 0.5
+    augmentation_mode: AugmentationMode = AugmentationMode.NONE
+    augmentation_pipeline: ImageAugmentationPipeline = field(default_factory=ImageAugmentationPipeline)
+    global_seed: int = 0
+    augmentation_variant: int = 0
+
+    def __post_init__(self) -> None:
+        """Reject augmentation modes a fixed inference pass cannot meaningfully use."""
+        if self.augmentation_mode not in (AugmentationMode.NONE, AugmentationMode.OFFLINE):
+            raise ValueError(
+                f"prediction supports augmentation_mode 'none' or 'offline'; got {self.augmentation_mode.value!r}"
+            )
+
+
+def _build_sample_batches(
+    dataset: ManifestDataset, config: PredictionRunConfig, *, show_progress: bool
+) -> Iterable[Sequence[PreparedSample]]:
+    """Return the per-batch sample lists ``run_prediction`` reads features and images from."""
+    if config.augmentation_mode is AugmentationMode.NONE:
+        return build_prediction_batches(dataset, batch_size=config.batch_size)
+    return (
+        batch.samples
+        for batch in build_static_augmented_batches(
+            dataset,
+            pipeline=config.augmentation_pipeline,
+            mode=config.augmentation_mode,
+            global_seed=config.global_seed,
+            batch_size=config.batch_size,
+            variant=config.augmentation_variant,
+            show_progress=show_progress,
+        )
+    )
 
 
 def run_prediction(config: PredictionRunConfig, *, store: FeatureStore, show_progress: bool = False) -> list[str]:
@@ -111,9 +170,29 @@ def run_prediction(config: PredictionRunConfig, *, store: FeatureStore, show_pro
     logger.info("predicting with checkpoint %s over %d sample(s)", config.checkpoint_path, len(dataset))
 
     first_sample = dataset[0]
-    probe_sample = PreparedSample(sample_id=first_sample.sample_id, image=None, target=None)
+    if config.augmentation_mode is AugmentationMode.NONE:
+        probe_sample = PreparedSample(sample_id=first_sample.sample_id, image=None, target=None)
+        output_size = mask_output_size(first_sample.target)
+    else:
+        prepared_probe = prepare_sample(
+            first_sample,
+            mode=config.augmentation_mode,
+            pipeline=config.augmentation_pipeline,
+            global_seed=config.global_seed,
+            variant=config.augmentation_variant,
+        )
+        probe_sample = PreparedSample(
+            sample_id=prepared_probe.sample_id,
+            image=prepared_probe.image,
+            target=None,
+            augmentation_metadata=prepared_probe.augmentation_metadata,
+        )
+        # From the augmented target, not first_sample.target directly: the augmentation pipeline
+        # (resize/random_crop) changes the spatial size every batch's samples actually have, so
+        # probing the pre-augmentation sample would build a decoder upsampling to the wrong
+        # resolution — see training_service.run_training's identical probe for why.
+        output_size = mask_output_size(prepared_probe.target)
     patch_dim, cls_dim = probe_feature_dims(provider, probe_sample)
-    output_size = mask_output_size(first_sample.target)
 
     decoder = build_decoder(
         config.decoder_name,
@@ -131,7 +210,7 @@ def run_prediction(config: PredictionRunConfig, *, store: FeatureStore, show_pro
     output_dir.mkdir(parents=True, exist_ok=True)
     written_paths: list[str] = []
 
-    batches = build_prediction_batches(dataset, batch_size=config.batch_size)
+    batches = _build_sample_batches(dataset, config, show_progress=show_progress)
     total_batches = -(-len(dataset) // config.batch_size)
     with torch.no_grad():
         for batch in progress_iter(

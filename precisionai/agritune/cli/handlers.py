@@ -193,6 +193,10 @@ def evaluate(args: argparse.Namespace) -> int:
     """Handle ``agritune evaluate``."""
     logger.debug("dispatching evaluate: manifest=%s checkpoint=%s", args.manifest, args.checkpoint)
     store = DirectoryFeatureStore(args.store)
+    augmentation = load_augmentation_selection(args.augmentation_config)
+    pipeline = ImageAugmentationPipeline(
+        AugmentationPipelineConfig(geometric=augmentation.geometric, photometric=augmentation.photometric)
+    )
     config = EvaluationRunConfig(
         manifest_path=args.manifest,
         checkpoint_path=args.checkpoint,
@@ -211,6 +215,10 @@ def evaluate(args: argparse.Namespace) -> int:
             dice_weight=args.loss_dice_weight,
         ),
         resize=tuple(args.resize) if args.resize else None,
+        augmentation_mode=augmentation.mode,
+        augmentation_pipeline=pipeline,
+        global_seed=args.seed,
+        augmentation_variant=augmentation.variant,
     )
     metrics = run_evaluation(config, store=store, show_progress=True)
     print(json.dumps(metrics, indent=2))
@@ -221,6 +229,10 @@ def predict(args: argparse.Namespace) -> int:
     """Handle ``agritune predict``."""
     logger.debug("dispatching predict: manifest=%s checkpoint=%s", args.manifest, args.checkpoint)
     store = DirectoryFeatureStore(args.store)
+    augmentation = load_augmentation_selection(args.augmentation_config)
+    pipeline = ImageAugmentationPipeline(
+        AugmentationPipelineConfig(geometric=augmentation.geometric, photometric=augmentation.photometric)
+    )
     config = PredictionRunConfig(
         manifest_path=args.manifest,
         checkpoint_path=args.checkpoint,
@@ -235,6 +247,10 @@ def predict(args: argparse.Namespace) -> int:
         sample_ids=args.sample_ids or None,
         write_overlays=args.overlays,
         overlay_alpha=args.overlay_alpha,
+        augmentation_mode=augmentation.mode,
+        augmentation_pipeline=pipeline,
+        global_seed=args.seed,
+        augmentation_variant=augmentation.variant,
     )
     written = run_prediction(config, store=store, show_progress=True)
     print(f"wrote {len(written)} prediction(s) to {args.output}")

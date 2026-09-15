@@ -469,6 +469,9 @@ def test_run_training_rejects_unknown_feature_provider(tmp_path: Path) -> None:
     [
         ({"num_classes": 0}, "num_classes must be positive"),
         ({"batch_size": 0}, "batch_size must be positive"),
+        ({"num_workers": -1}, "num_workers must be non-negative"),
+        ({"prefetch_factor": 1}, "prefetch_factor=1 requires num_workers > 0"),
+        ({"num_workers": 2, "prefetch_factor": 0}, "prefetch_factor must be positive"),
         ({"trainer": TrainerConfig(max_epochs=0)}, "trainer.max_epochs must be positive"),
         ({"checkpoint_top_k": -1}, "checkpoint_top_k must be non-negative"),
     ],

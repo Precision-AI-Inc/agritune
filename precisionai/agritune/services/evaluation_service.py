@@ -7,10 +7,16 @@ Loads a trained decoder from a checkpoint and scores it against a dataset (or a 
 sample IDs, e.g. a held-out test split).
 """
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from precisionai.agritune.augmentations.image.pipeline import (
+    AugmentationMode,
+    ImageAugmentationPipeline,
+    prepare_sample,
+)
 from precisionai.agritune.data.dataset import ManifestDataset
 from precisionai.agritune.features.keys import EncoderFingerprint
 from precisionai.agritune.logging import get_logger
@@ -19,6 +25,7 @@ from precisionai.agritune.schemas.samples import PreparedSample
 from precisionai.agritune.services.segmentation_common import (
     build_cached_feature_provider,
     build_decoder,
+    build_static_augmented_batches,
     build_training_batches,
     mask_output_size,
     probe_feature_dims,
@@ -27,7 +34,7 @@ from precisionai.agritune.tasks.segmentation.losses import SegmentationLoss, Seg
 from precisionai.agritune.tasks.segmentation.metrics import SegmentationMetric
 from precisionai.agritune.tasks.segmentation.task import SegmentationTask
 from precisionai.agritune.training.checkpointing import CheckpointManager
-from precisionai.agritune.training.evaluator import evaluate
+from precisionai.agritune.training.evaluator import TrainingBatch, evaluate
 
 logger = get_logger(__name__)
 
@@ -62,7 +69,28 @@ class EvaluationRunConfig:
         ``(width, height)`` every sample's image and mask are deterministically resized to before
         batching. Must match whatever the checkpoint's training run resized to (its
         ``augmentation.geometric.resize``), and is required whenever the dataset's own
-        images/masks do not already share one native size — otherwise batching them fails.
+        images/masks do not already share one native size — otherwise batching them fails. Ignored
+        under ``augmentation_mode: offline``, where ``augmentation_pipeline`` governs sizing.
+    augmentation_mode : AugmentationMode
+        ``NONE`` (default) evaluates on each sample's native, unaugmented image (optionally
+        resized via ``resize``) — the original behavior. ``OFFLINE`` instead reapplies the same
+        deterministic ``augmentation_pipeline`` (typically a ``resize``/``random_crop``) the
+        checkpoint's decoder was actually trained under, and reads features from the matching
+        offline-augmented cache entry rather than the native one. Required whenever training used
+        ``augmentation.mode: offline`` with a ``random_crop``: a decoder trained only on small,
+        fixed-size crops has no spatial context beyond a single patch (e.g. ``mlp_probe``) and
+        generalizes poorly to a much larger, native, differently-shaped patch grid it never saw
+        during training — see :mod:`~precisionai.agritune.services.prediction_service` for the
+        identical concern on the predict side. ``ONLINE``/``HYBRID`` are not supported (evaluating
+        against a live-changing augmentation makes no sense for a fixed, reproducible pass).
+    augmentation_pipeline : ImageAugmentationPipeline
+        Ignored under ``NONE``. Must be built from the exact same config as the training run's
+        ``augmentation:`` block, or the derived cache key won't match what was cached.
+    global_seed : int
+        Ignored under ``NONE``. Must match the training run's seed, or the derived per-sample
+        augmentation (and so the cache key) won't match.
+    augmentation_variant : int
+        Ignored under ``NONE``. Must match the training run's offline variant index.
     """
 
     manifest_path: str
@@ -75,6 +103,36 @@ class EvaluationRunConfig:
     sample_ids: list[str] | None = None
     loss: SegmentationLossConfig = field(default_factory=SegmentationLossConfig)
     resize: tuple[int, int] | None = None
+    augmentation_mode: AugmentationMode = AugmentationMode.NONE
+    augmentation_pipeline: ImageAugmentationPipeline = field(default_factory=ImageAugmentationPipeline)
+    global_seed: int = 0
+    augmentation_variant: int = 0
+
+    def __post_init__(self) -> None:
+        """Reject augmentation modes a fixed evaluation pass cannot meaningfully use."""
+        if self.augmentation_mode not in (AugmentationMode.NONE, AugmentationMode.OFFLINE):
+            raise ValueError(
+                f"evaluation supports augmentation_mode 'none' or 'offline'; got {self.augmentation_mode.value!r}"
+            )
+
+
+def _build_batches(
+    dataset: ManifestDataset, config: EvaluationRunConfig, *, show_progress: bool
+) -> Iterable[TrainingBatch]:
+    """Return the batches ``run_evaluation`` reads features and targets from."""
+    if config.augmentation_mode is AugmentationMode.NONE:
+        return build_training_batches(
+            dataset, batch_size=config.batch_size, resize=config.resize, show_progress=show_progress
+        )
+    return build_static_augmented_batches(
+        dataset,
+        pipeline=config.augmentation_pipeline,
+        mode=config.augmentation_mode,
+        global_seed=config.global_seed,
+        batch_size=config.batch_size,
+        variant=config.augmentation_variant,
+        show_progress=show_progress,
+    )
 
 
 def run_evaluation(
@@ -111,12 +169,25 @@ def run_evaluation(
         raise ValueError("no samples to evaluate")
     logger.info("evaluating checkpoint %s over %d sample(s)", config.checkpoint_path, len(dataset))
 
-    batches = build_training_batches(
-        dataset, batch_size=config.batch_size, resize=config.resize, show_progress=show_progress
-    )
+    batches = _build_batches(dataset, config, show_progress=show_progress)
 
     first_sample = dataset[0]
-    probe_sample = PreparedSample(sample_id=first_sample.sample_id, image=None, target=None)
+    if config.augmentation_mode is AugmentationMode.NONE:
+        probe_sample = PreparedSample(sample_id=first_sample.sample_id, image=None, target=None)
+    else:
+        prepared_probe = prepare_sample(
+            first_sample,
+            mode=config.augmentation_mode,
+            pipeline=config.augmentation_pipeline,
+            global_seed=config.global_seed,
+            variant=config.augmentation_variant,
+        )
+        probe_sample = PreparedSample(
+            sample_id=prepared_probe.sample_id,
+            image=None,
+            target=None,
+            augmentation_metadata=prepared_probe.augmentation_metadata,
+        )
     patch_dim, cls_dim = probe_feature_dims(provider, probe_sample)
     # From the first prepared batch, not first_sample.target directly: config.resize (when set)
     # changes the spatial size every evaluation batch's target actually has, so probing the

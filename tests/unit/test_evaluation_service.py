@@ -7,7 +7,14 @@ from pathlib import Path
 
 import pytest
 
+from precisionai.agritune.augmentations.image.pipeline import (
+    AugmentationMode,
+    AugmentationPipelineConfig,
+    GeometricConfig,
+    ImageAugmentationPipeline,
+)
 from precisionai.agritune.encoder.fake import FakeEncoderBackend, FakeEncoderConfig
+from precisionai.agritune.features.errors import FeatureNotCachedError
 from precisionai.agritune.features.keys import EncoderFingerprint
 from precisionai.agritune.features.store import DirectoryFeatureStore
 from precisionai.agritune.optimization.optimizers import OptimizerConfig
@@ -121,6 +128,65 @@ async def test_run_evaluation_loss_config_changes_reported_loss(tmp_path: Path) 
     dice_loss = run_evaluation(dice_config, store=store)["loss"]
 
     assert ce_loss != pytest.approx(dice_loss)
+
+
+async def test_run_evaluation_offline_mode_requires_matching_augmented_cache(tmp_path: Path) -> None:
+    """A checkpoint trained on offline-augmented features must not silently fall back to native
+    (unaugmented) cached features at evaluation time — see evaluation_service's augmentation_mode."""
+    manifest_path, checkpoint_path = await _train_a_checkpoint(tmp_path)
+    store = DirectoryFeatureStore(tmp_path / "features")
+    pipeline = ImageAugmentationPipeline(AugmentationPipelineConfig(geometric=GeometricConfig(resize=(4, 4))))
+
+    config = EvaluationRunConfig(
+        manifest_path=str(manifest_path),
+        checkpoint_path=str(checkpoint_path),
+        num_classes=2,
+        encoder_fingerprint=_FINGERPRINT,
+        sample_ids=["sample-0"],
+        augmentation_mode=AugmentationMode.OFFLINE,
+        augmentation_pipeline=pipeline,
+    )
+    with pytest.raises(FeatureNotCachedError):
+        run_evaluation(config, store=store)
+
+
+async def test_run_evaluation_offline_mode_reads_matching_augmented_cache(tmp_path: Path) -> None:
+    manifest_path, checkpoint_path = await _train_a_checkpoint(tmp_path)
+    store = DirectoryFeatureStore(tmp_path / "features")
+    encoder = FakeEncoderBackend(FakeEncoderConfig(patch_dim=8, cls_dim=None, patch_grid=(2, 2)))
+    pipeline = ImageAugmentationPipeline(AugmentationPipelineConfig(geometric=GeometricConfig(resize=(4, 4))))
+    await build_features(
+        str(manifest_path),
+        store=store,
+        encoder=encoder,
+        encoder_fingerprint=_FINGERPRINT,
+        augmentation_mode=AugmentationMode.OFFLINE,
+        augmentation_pipeline=pipeline,
+    )
+
+    config = EvaluationRunConfig(
+        manifest_path=str(manifest_path),
+        checkpoint_path=str(checkpoint_path),
+        num_classes=2,
+        encoder_fingerprint=_FINGERPRINT,
+        sample_ids=["sample-0"],
+        augmentation_mode=AugmentationMode.OFFLINE,
+        augmentation_pipeline=pipeline,
+    )
+    metrics = run_evaluation(config, store=store)
+
+    assert "mean_iou" in metrics
+
+
+async def test_run_evaluation_rejects_online_augmentation_mode(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="augmentation_mode"):
+        EvaluationRunConfig(
+            manifest_path=str(tmp_path / "manifest.csv"),
+            checkpoint_path=str(tmp_path / "last.ckpt"),
+            num_classes=2,
+            encoder_fingerprint=_FINGERPRINT,
+            augmentation_mode=AugmentationMode.ONLINE,
+        )
 
 
 async def test_run_evaluation_empty_sample_set_raises(tmp_path: Path) -> None:

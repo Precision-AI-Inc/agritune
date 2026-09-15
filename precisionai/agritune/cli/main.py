@@ -198,6 +198,24 @@ def _build_evaluate_parser(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument(
         "--loss-dice-weight", type=float, default=1.0, help="Weight of the Dice term in a combined loss."
     )
+    parser.add_argument(
+        "--augmentation-config",
+        default=None,
+        help="Path to a YAML file shaped like configs/augmentation/{none,offline}.yaml; omit to evaluate "
+        "on each sample's native, unaugmented (optionally --resize'd) image (the default). Set this — "
+        "pointed at the exact same file the training run's augmentation: block used — whenever that run "
+        "used 'augmentation.mode: offline' with a random_crop: a decoder trained only on small fixed-size "
+        "crops has no spatial context beyond a single patch and generalizes poorly to a much larger, "
+        "differently-shaped native patch grid it never saw in training, which shows up as "
+        "content-independent prediction artifacts, not just lower accuracy.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="Global seed offline augmentation derives each sample's seed from — must match the "
+        "training run's top-level seed (only consulted when --augmentation-config sets mode: offline).",
+    )
     parser.set_defaults(handler=handlers.evaluate)
 
 
@@ -209,6 +227,24 @@ def _build_predict_parser(subparsers: argparse._SubParsersAction) -> None:
         "--overlays", action="store_true", help="Also write a {sample_id}_overlay.png visualization per sample."
     )
     parser.add_argument("--overlay-alpha", type=float, default=0.5, help="Overlay opacity in [0, 1] (default: 0.5).")
+    parser.add_argument(
+        "--augmentation-config",
+        default=None,
+        help="Path to a YAML file shaped like configs/augmentation/{none,offline}.yaml; omit to predict "
+        "on each sample's native, unaugmented image (the default). Set this — pointed at the exact same "
+        "file the training run's augmentation: block used — whenever that run used 'augmentation.mode: "
+        "offline' with a random_crop: a decoder trained only on small fixed-size crops has no spatial "
+        "context beyond a single patch and generalizes poorly to a much larger, differently-shaped native "
+        "patch grid it never saw in training, which shows up as content-independent prediction artifacts, "
+        "not just lower accuracy.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="Global seed offline augmentation derives each sample's seed from — must match the "
+        "training run's top-level seed (only consulted when --augmentation-config sets mode: offline).",
+    )
     parser.set_defaults(handler=handlers.predict)
 
 

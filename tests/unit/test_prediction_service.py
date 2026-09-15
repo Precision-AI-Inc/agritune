@@ -9,7 +9,14 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from precisionai.agritune.augmentations.image.pipeline import (
+    AugmentationMode,
+    AugmentationPipelineConfig,
+    GeometricConfig,
+    ImageAugmentationPipeline,
+)
 from precisionai.agritune.encoder.fake import FakeEncoderBackend, FakeEncoderConfig
+from precisionai.agritune.features.errors import FeatureNotCachedError
 from precisionai.agritune.features.keys import EncoderFingerprint
 from precisionai.agritune.features.store import DirectoryFeatureStore
 from precisionai.agritune.optimization.optimizers import OptimizerConfig
@@ -145,6 +152,69 @@ async def test_run_prediction_omits_overlays_by_default(tmp_path: Path) -> None:
 
     assert written == [str(output_dir / "sample-0.png")]
     assert not (output_dir / "sample-0_overlay.png").exists()
+
+
+async def test_run_prediction_offline_mode_requires_matching_augmented_cache(tmp_path: Path) -> None:
+    """A checkpoint trained on offline-augmented features must not silently fall back to native
+    (unaugmented) cached features at predict time — see prediction_service's augmentation_mode."""
+    manifest_path, checkpoint_path = await _train_a_checkpoint(tmp_path)
+    store = DirectoryFeatureStore(tmp_path / "features")
+    pipeline = ImageAugmentationPipeline(AugmentationPipelineConfig(geometric=GeometricConfig(resize=(4, 4))))
+
+    config = PredictionRunConfig(
+        manifest_path=str(manifest_path),
+        checkpoint_path=str(checkpoint_path),
+        output_dir=str(tmp_path / "predictions"),
+        num_classes=2,
+        encoder_fingerprint=_FINGERPRINT,
+        sample_ids=["sample-0"],
+        augmentation_mode=AugmentationMode.OFFLINE,
+        augmentation_pipeline=pipeline,
+    )
+    with pytest.raises(FeatureNotCachedError):
+        run_prediction(config, store=store)
+
+
+async def test_run_prediction_offline_mode_reads_matching_augmented_cache(tmp_path: Path) -> None:
+    manifest_path, checkpoint_path = await _train_a_checkpoint(tmp_path)
+    store = DirectoryFeatureStore(tmp_path / "features")
+    encoder = FakeEncoderBackend(FakeEncoderConfig(patch_dim=8, cls_dim=None, patch_grid=(2, 2)))
+    pipeline = ImageAugmentationPipeline(AugmentationPipelineConfig(geometric=GeometricConfig(resize=(4, 4))))
+    await build_features(
+        str(manifest_path),
+        store=store,
+        encoder=encoder,
+        encoder_fingerprint=_FINGERPRINT,
+        augmentation_mode=AugmentationMode.OFFLINE,
+        augmentation_pipeline=pipeline,
+    )
+
+    config = PredictionRunConfig(
+        manifest_path=str(manifest_path),
+        checkpoint_path=str(checkpoint_path),
+        output_dir=str(tmp_path / "predictions"),
+        num_classes=2,
+        encoder_fingerprint=_FINGERPRINT,
+        sample_ids=["sample-0"],
+        augmentation_mode=AugmentationMode.OFFLINE,
+        augmentation_pipeline=pipeline,
+    )
+    written = run_prediction(config, store=store)
+
+    array = np.array(Image.open(written[0]))
+    assert array.shape == (4, 4)  # the resized (offline) shape, not the 8x8 native one
+
+
+async def test_run_prediction_rejects_online_augmentation_mode(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="augmentation_mode"):
+        PredictionRunConfig(
+            manifest_path=str(tmp_path / "manifest.csv"),
+            checkpoint_path=str(tmp_path / "last.ckpt"),
+            output_dir=str(tmp_path / "predictions"),
+            num_classes=2,
+            encoder_fingerprint=_FINGERPRINT,
+            augmentation_mode=AugmentationMode.ONLINE,
+        )
 
 
 async def test_run_prediction_empty_sample_set_raises(tmp_path: Path) -> None:

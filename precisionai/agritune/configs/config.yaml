@@ -22,6 +22,11 @@ run_root: runs
 run_id: ???
 feature_store_dir: ???
 batch_size: 4
+num_workers: 0  # DataLoader worker subprocesses for batch decode/augmentation; 0 = main process only
+pin_memory: false  # DataLoader pinned-memory batches; speeds up host-to-device copies on CUDA, no-op on CPU
+prefetch_factor: null  # batches each worker buffers ahead; null defers to DataLoader's default (2),
+                        # only meaningful when num_workers > 0 — cap it at a large batch_size to bound
+                        # memory (num_workers * prefetch_factor * batch_size)
 val_fraction: 0.2
 seed: 0
 checkpoint_top_k: 3

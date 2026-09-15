@@ -35,6 +35,16 @@ class TrainingBatch:
     samples: Sequence[PreparedSample]
     targets: torch.Tensor
 
+    def pin_memory(self) -> "TrainingBatch":
+        """Return a copy with ``targets`` in pinned memory, for a ``DataLoader(pin_memory=True)``.
+
+        ``DataLoader`` only knows how to pin plain tensors/mappings/sequences out of the box; a
+        custom collated type like this one must implement this method itself, or ``pin_memory``
+        silently pins nothing. ``samples`` holds PIL images, not tensors, so there is nothing in it
+        to pin.
+        """
+        return TrainingBatch(samples=self.samples, targets=self.targets.pin_memory())
+
 
 def evaluate(
     task: Task,

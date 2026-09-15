@@ -126,6 +126,34 @@ def test_build_training_batches_is_reiterable(tmp_path: Path) -> None:
     assert first_pass == second_pass == [3, 1]
 
 
+def test_build_training_batches_supports_multiple_dataloader_workers(tmp_path: Path) -> None:
+    manifest_path = build_manifest(tmp_path)
+    dataset = ManifestDataset(manifest_path)
+    batches = build_training_batches(dataset, batch_size=3, num_workers=2)
+    assert [len(batch.samples) for batch in batches] == [3, 1]
+
+
+def test_build_training_batches_supports_prefetch_factor_with_workers(tmp_path: Path) -> None:
+    manifest_path = build_manifest(tmp_path)
+    dataset = ManifestDataset(manifest_path)
+    batches = build_training_batches(dataset, batch_size=3, num_workers=2, prefetch_factor=1)
+    assert [len(batch.samples) for batch in batches] == [3, 1]
+
+
+def test_build_training_batches_rejects_prefetch_factor_without_workers(tmp_path: Path) -> None:
+    manifest_path = build_manifest(tmp_path)
+    dataset = ManifestDataset(manifest_path)
+    with pytest.raises(ValueError, match="prefetch_factor"):
+        list(build_training_batches(dataset, batch_size=3, num_workers=0, prefetch_factor=1))
+
+
+def test_build_training_batches_pin_memory_does_not_error(tmp_path: Path) -> None:
+    manifest_path = build_manifest(tmp_path)
+    dataset = ManifestDataset(manifest_path)
+    batches = list(build_training_batches(dataset, batch_size=3, pin_memory=True))
+    assert [len(batch.samples) for batch in batches] == [3, 1]
+
+
 def test_build_training_batches_without_resize_rejects_varying_native_sizes(tmp_path: Path) -> None:
     """Reproduces the bug: unequal native mask sizes cannot be torch.stack-ed without a resize."""
     make_image((8, 6)).save(tmp_path / "s0_image.png")

@@ -115,3 +115,17 @@ def test_checkpoint_top_k_is_configurable(tmp_path: Path) -> None:
     path = _write_config(tmp_path, {"checkpoint_top_k": 1})
     config = load_training_run_config(str(path))
     assert config.checkpoint_top_k == 1
+
+
+def test_num_workers_and_pin_memory_default_to_main_process_only(tmp_path: Path) -> None:
+    path = _write_config(tmp_path, {})
+    config = load_training_run_config(str(path))
+    assert config.num_workers == 0
+    assert config.pin_memory is False
+
+
+def test_num_workers_and_pin_memory_are_configurable(tmp_path: Path) -> None:
+    path = _write_config(tmp_path, {"num_workers": 4, "pin_memory": True})
+    config = load_training_run_config(str(path))
+    assert config.num_workers == 4
+    assert config.pin_memory is True

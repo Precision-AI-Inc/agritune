@@ -15,6 +15,7 @@ feature access goes through a ``FeatureProvider`` like these.
 
 import asyncio
 from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 
 from precisionai.agritune.encoder.gateway import EncoderGateway
 from precisionai.agritune.features.errors import FeatureNotCachedError
@@ -23,6 +24,8 @@ from precisionai.agritune.features.store import DirectoryFeatureStore, ShardedFe
 from precisionai.agritune.schemas.features import EncoderFeatures, concatenate_encoder_features, select_one
 from precisionai.agritune.schemas.protocols import FeatureStore
 from precisionai.agritune.schemas.samples import PreparedSample
+
+_MAX_READ_WORKERS = 32
 
 
 class CachedFeatureProvider:
@@ -57,6 +60,11 @@ class CachedFeatureProvider:
     def get_features(self, samples: Sequence[PreparedSample]) -> EncoderFeatures:
         """Return cached features for every sample in ``samples``, in order.
 
+        Reads are issued from a thread pool rather than sequentially: each is a file open plus a
+        safetensors deserialization, which releases the GIL for the actual I/O, so concurrent reads
+        overlap disk/filesystem latency instead of paying it once per sample in series — the
+        dominant cost at the batch sizes this is called with.
+
         Parameters
         ----------
         samples : Sequence[PreparedSample]
@@ -78,7 +86,9 @@ class CachedFeatureProvider:
         if not samples:
             raise ValueError("samples must be non-empty")
 
-        per_sample_features = [self._read_one(sample) for sample in samples]
+        workers = min(_MAX_READ_WORKERS, len(samples))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            per_sample_features = list(executor.map(self._read_one, samples))
         return concatenate_encoder_features(per_sample_features)
 
     def _read_one(self, sample: PreparedSample) -> EncoderFeatures:
