@@ -16,7 +16,7 @@
 manifest_path: examples/datasets/phenobench/manifest.csv
 feature_store_dir: examples/datasets/phenobench/features
 run_root: examples/datasets/phenobench/runs   # runs/<run_id>/ is created here
-run_id: phenobench-sanity-token_fpn
+run_id: phenobench-sanity-token_fpn_1
 num_classes: 3
 seed: 0                                  # global seed; trainer.seed falls back to this when unset
 
@@ -85,11 +85,14 @@ feature_augmentation:
 # decoder_name: mlp_probe | token_fpn | aspp | ppm | segmenter | mask_former
 # decoder_kwargs is forwarded verbatim to the selected decoder's constructor — shown below are
 # mlp_probe's own kwargs (matching its defaults); swapping decoder_name requires swapping these
-# keys too (e.g. atrous_rates/hidden_dim for aspp, pool_sizes for ppm, num_queries for
-# mask_former, cls_fusion/hidden_dim for token_fpn).
+# keys too (e.g. atrous_rates/hidden_dim/num_layers for aspp, pool_sizes/hidden_dim/num_layers for
+# ppm, num_queries/hidden_dim/num_layers/num_heads/mlp_ratio/dropout for mask_former,
+# cls_fusion/hidden_dim/num_layers for token_fpn).
 decoder_name: token_fpn
 decoder_kwargs:
   cls_fusion: "film"                     # how to fuse the CLS token with patch tokens, e.g., "concat" or "add"
+  hidden_dim: 128                        # channel width used throughout the refinement stack
+  num_layers: 2                          # stacked 3x3 conv + ReLU blocks in the refinement stack
 # --- Batching / split ------------------------------------------------------------
 batch_size: 32
 num_workers: 0                           # DataLoader worker subprocesses for batch decode/augmentation;
@@ -97,7 +100,7 @@ num_workers: 0                           # DataLoader worker subprocesses for ba
                                           # if "building batches" is slow at your batch_size/storage speed.
 pin_memory: false                        # pins batch tensors in host memory for a faster host->device
                                           # copy; only helps when training on a CUDA device, no-op on CPU.
-prefetch_factor: null                    # batches each worker buffers ahead; null defers to DataLoader's
+prefetch_factor: 1                    # batches each worker buffers ahead; null defers to DataLoader's
                                           # own default (2), only meaningful when num_workers > 0. Peak
                                           # memory scales with num_workers * prefetch_factor * batch_size
                                           # — cap this (e.g. 1) if a high num_workers gets killed (OOM)

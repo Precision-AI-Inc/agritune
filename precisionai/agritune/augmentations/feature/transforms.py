@@ -51,7 +51,10 @@ def patch_dropout(
         return features
 
     batch_size, num_patches, _ = features.patch_tokens.shape
-    keep = torch.rand(batch_size, num_patches, generator=generator) >= probability
+    # torch.rand always draws on the generator's own device (CPU, for the shared global/checkpointed
+    # RNG this defaults to) — moved to match patch_tokens explicitly, since that may be a CUDA
+    # device once Trainer starts moving batches there.
+    keep = (torch.rand(batch_size, num_patches, generator=generator) >= probability).to(features.patch_tokens.device)
     scaled = features.patch_tokens * keep.unsqueeze(-1) / (1.0 - probability)
     return _replace(features, patch_tokens=scaled)
 
@@ -91,7 +94,7 @@ def token_masking(
         return features
 
     batch_size, num_patches, _ = features.patch_tokens.shape
-    mask = torch.rand(batch_size, num_patches, generator=generator) < probability
+    mask = (torch.rand(batch_size, num_patches, generator=generator) < probability).to(features.patch_tokens.device)
     masked = features.patch_tokens.clone()
     masked[mask] = mask_value
     return _replace(features, patch_tokens=masked)
@@ -125,10 +128,12 @@ def gaussian_feature_noise(
     if std == 0.0:
         return features
 
-    noisy_patch = features.patch_tokens + torch.randn(features.patch_tokens.shape, generator=generator) * std
+    patch_noise = torch.randn(features.patch_tokens.shape, generator=generator).to(features.patch_tokens.device)
+    noisy_patch = features.patch_tokens + patch_noise * std
     noisy_cls = features.cls_tokens
     if features.cls_tokens is not None:
-        noisy_cls = features.cls_tokens + torch.randn(features.cls_tokens.shape, generator=generator) * std
+        cls_noise = torch.randn(features.cls_tokens.shape, generator=generator).to(features.cls_tokens.device)
+        noisy_cls = features.cls_tokens + cls_noise * std
     return _replace(features, patch_tokens=noisy_patch, cls_tokens=noisy_cls)
 
 
@@ -157,7 +162,7 @@ def cls_dropout(
         return features
 
     batch_size = features.cls_tokens.shape[0]
-    keep = torch.rand(batch_size, generator=generator) >= probability
+    keep = (torch.rand(batch_size, generator=generator) >= probability).to(features.cls_tokens.device)
     scaled = features.cls_tokens * keep.unsqueeze(-1) / (1.0 - probability)
     return _replace(features, cls_tokens=scaled)
 
@@ -188,13 +193,17 @@ def feature_channel_dropout(
         return features
 
     patch_dim = features.patch_tokens.shape[-1]
-    keep_patch = (torch.rand(patch_dim, generator=generator) >= probability).to(features.patch_tokens.dtype)
+    keep_patch = (torch.rand(patch_dim, generator=generator) >= probability).to(
+        device=features.patch_tokens.device, dtype=features.patch_tokens.dtype
+    )
     scaled_patch = features.patch_tokens * keep_patch / (1.0 - probability)
 
     scaled_cls = features.cls_tokens
     if features.cls_tokens is not None:
         cls_dim = features.cls_tokens.shape[-1]
-        keep_cls = (torch.rand(cls_dim, generator=generator) >= probability).to(features.cls_tokens.dtype)
+        keep_cls = (torch.rand(cls_dim, generator=generator) >= probability).to(
+            device=features.cls_tokens.device, dtype=features.cls_tokens.dtype
+        )
         scaled_cls = features.cls_tokens * keep_cls / (1.0 - probability)
 
     return _replace(features, patch_tokens=scaled_patch, cls_tokens=scaled_cls)

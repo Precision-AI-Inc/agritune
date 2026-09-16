@@ -34,7 +34,7 @@ from precisionai.agritune.data.manifest import ManifestRow, load_manifest
 from precisionai.agritune.data.split import SplitAssignment, random_split
 from precisionai.agritune.features.keys import EncoderFingerprint
 from precisionai.agritune.features.provider import HybridFeatureProvider, OnlineFeatureProvider
-from precisionai.agritune.features.store import DirectoryFeatureStore, ShardedFeatureStore
+from precisionai.agritune.features.store import FEATURE_STORE_TYPES, DirectoryFeatureStore, ShardedFeatureStore
 from precisionai.agritune.logging import RunDirectory, get_logger, progress_iter
 from precisionai.agritune.optimization.optimizers import OptimizerConfig, build_optimizer
 from precisionai.agritune.optimization.schedulers import SchedulerConfig, build_scheduler
@@ -197,10 +197,16 @@ class TrainingRunConfig:
     manifest_path : str
         Dataset manifest CSV.
     feature_store_dir : str
-        Directory a :class:`~precisionai.agritune.features.store.DirectoryFeatureStore` was
-        already built into (via ``agritune features build`` / :mod:`feature_service`) — read from
-        under ``feature_provider: cached``/``hybrid``, written to (write-through) under ``hybrid``,
-        unused under ``online``.
+        Directory a feature store was already built into (via ``agritune features build`` /
+        :mod:`feature_service`) — read from under ``feature_provider: cached``/``hybrid``, written
+        to (write-through) under ``hybrid``, unused under ``online``.
+    store_type : str
+        ``"directory"`` (:class:`~precisionai.agritune.features.store.DirectoryFeatureStore`,
+        development scale) or ``"sharded"``
+        (:class:`~precisionai.agritune.features.store.ShardedFeatureStore`, production scale) —
+        must match whatever ``feature_store_dir`` was actually built as.
+    entries_per_shard : int
+        Samples packed per shard file; only consulted when ``store_type == "sharded"``.
     run_root : str
         Directory ``runs/<run_id>/`` is created under.
     run_id : str
@@ -231,6 +237,12 @@ class TrainingRunConfig:
         Extra keyword arguments forwarded to the decoder's constructor (e.g. ``hidden_dims`` for
         ``"mlp_probe"``, ``atrous_rates`` for ``"aspp"``).
     batch_size : int
+    device : str
+        Where the decoder and every batch's features/targets are moved before ``forward``/
+        ``compute_loss`` — ``"cpu"`` (the default, always safe on CPU-only machines), ``"cuda"``,
+        or a specific GPU like ``"cuda:3"``. Rejected up front if it names a CUDA device that
+        either isn't available at all or is out of range for this machine's GPU count — this never
+        silently falls back to CPU.
     num_workers : int
         Forwarded to the ``DataLoader`` backing every train/validation batches iterable — worker
         subprocesses to decode/augment samples in parallel. ``0`` runs everything in the main
@@ -245,6 +257,13 @@ class TrainingRunConfig:
         memory scales with ``num_workers * prefetch_factor * batch_size``, so a large ``batch_size``
         combined with many workers at the default of ``2`` can buffer enough whole batches at once
         to exhaust memory — cap this explicitly (e.g. ``1``) in that case.
+    feature_read_workers : int
+        Forwarded to :class:`~precisionai.agritune.features.provider.CachedFeatureProvider` — the
+        thread-pool size for concurrent per-batch store reads (only consulted under
+        ``feature_provider: cached``). Independent of ``num_workers``: that pool decodes/augments
+        raw images (or is unused entirely when ``feature_provider: cached`` skips image loading —
+        see ``build_training_batches``'s ``load_images``); this one reads already-computed features
+        off disk, the dominant remaining per-batch cost once images are skipped.
     val_fraction : float
         Fraction of samples held out for validation (via a random split). Validation always uses
         unaugmented samples, regardless of ``augmentation.mode``.
@@ -273,6 +292,8 @@ class TrainingRunConfig:
     num_classes: int
     encoder_fingerprint: EncoderFingerprint
     feature_provider: str = "cached"
+    store_type: str = "directory"
+    entries_per_shard: int = 1000
     encoder_base_url: str | None = None
     encoder_api_key: str | None = None
     augmentation: AugmentationSelection = field(default_factory=AugmentationSelection)
@@ -280,9 +301,11 @@ class TrainingRunConfig:
     decoder_name: str = "mlp_probe"
     decoder_kwargs: dict[str, Any] = field(default_factory=dict)
     batch_size: int = 4
+    device: str = "cpu"
     num_workers: int = 0
     pin_memory: bool = False
     prefetch_factor: int | None = None
+    feature_read_workers: int = 32
     val_fraction: float = 0.2
     seed: int = 0
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
@@ -318,17 +341,51 @@ class TrainingRunResult:
     val_metrics: dict[str, float]
 
 
-def _validate_config(config: TrainingRunConfig) -> None:
-    if config.num_classes < 1:
-        raise ValueError(f"num_classes must be positive; got {config.num_classes}")
-    if config.batch_size < 1:
-        raise ValueError(f"batch_size must be positive; got {config.batch_size}")
+def _validate_dataloader_config(config: TrainingRunConfig) -> None:
     if config.num_workers < 0:
         raise ValueError(f"num_workers must be non-negative; got {config.num_workers}")
     if config.prefetch_factor is not None and config.num_workers == 0:
         raise ValueError(f"prefetch_factor={config.prefetch_factor} requires num_workers > 0; got num_workers=0")
     if config.prefetch_factor is not None and config.prefetch_factor < 1:
         raise ValueError(f"prefetch_factor must be positive; got {config.prefetch_factor}")
+
+
+def _validate_feature_store_config(config: TrainingRunConfig) -> None:
+    if config.store_type not in FEATURE_STORE_TYPES:
+        raise ValueError(f"unsupported store_type: {config.store_type!r}; expected one of {FEATURE_STORE_TYPES}")
+    if config.entries_per_shard < 1:
+        raise ValueError(f"entries_per_shard must be positive; got {config.entries_per_shard}")
+    if config.feature_read_workers < 1:
+        raise ValueError(f"feature_read_workers must be positive; got {config.feature_read_workers}")
+
+
+def _validate_device_config(config: TrainingRunConfig) -> None:
+    try:
+        device = torch.device(config.device)
+    except RuntimeError as exc:
+        raise ValueError(f"invalid device: {config.device!r} ({exc})") from exc
+    if device.type != "cuda":
+        return
+    if not torch.cuda.is_available():
+        raise ValueError(
+            f"device={config.device!r} requests CUDA, but torch.cuda.is_available() is False on this "
+            "machine — training never silently falls back to CPU"
+        )
+    device_count = torch.cuda.device_count()
+    index = device.index if device.index is not None else 0
+    if index >= device_count:
+        raise ValueError(
+            f"device={config.device!r} names GPU index {index}, but this machine only has "
+            f"{device_count} GPU(s) (0..{device_count - 1})"
+        )
+
+
+def _validate_config(config: TrainingRunConfig) -> None:
+    if config.num_classes < 1:
+        raise ValueError(f"num_classes must be positive; got {config.num_classes}")
+    if config.batch_size < 1:
+        raise ValueError(f"batch_size must be positive; got {config.batch_size}")
+    _validate_dataloader_config(config)
     if config.trainer.max_epochs < 1:
         raise ValueError(f"trainer.max_epochs must be positive; got {config.trainer.max_epochs}")
     if config.checkpoint_top_k < 0:
@@ -337,6 +394,8 @@ def _validate_config(config: TrainingRunConfig) -> None:
         raise ValueError(
             f"unsupported feature_provider: {config.feature_provider!r}; expected one of {_FEATURE_PROVIDERS}"
         )
+    _validate_feature_store_config(config)
+    _validate_device_config(config)
     online_augmentation = config.augmentation.mode in (AugmentationMode.ONLINE, AugmentationMode.HYBRID)
     if online_augmentation and config.feature_provider == "cached":
         raise ValueError(
@@ -351,7 +410,10 @@ def _build_feature_provider(
 ) -> tuple[FeatureProvider, list]:
     if config.feature_provider == "cached":
         return build_cached_feature_provider(
-            config.manifest_path, store=store, encoder_fingerprint=config.encoder_fingerprint
+            config.manifest_path,
+            store=store,
+            encoder_fingerprint=config.encoder_fingerprint,
+            max_read_workers=config.feature_read_workers,
         )
 
     rows = load_manifest(config.manifest_path)
@@ -382,6 +444,10 @@ def _build_augmentation_pipeline(config: TrainingRunConfig) -> ImageAugmentation
 def _build_train_batches(
     config: TrainingRunConfig, train_dataset: ManifestDataset, *, show_progress: bool = False
 ) -> Any:
+    # A cached provider never consults PreparedSample.image (its features are already computed);
+    # only hybrid/online do, to encode fresh on a miss or every epoch respectively — so only cached
+    # is safe to skip decoding the image for entirely.
+    load_images = config.feature_provider != "cached"
     if config.augmentation.mode is AugmentationMode.NONE:
         return build_training_batches(
             train_dataset,
@@ -390,6 +456,7 @@ def _build_train_batches(
             num_workers=config.num_workers,
             pin_memory=config.pin_memory,
             prefetch_factor=config.prefetch_factor,
+            load_images=load_images,
         )
 
     pipeline = _build_augmentation_pipeline(config)
@@ -405,6 +472,7 @@ def _build_train_batches(
             num_workers=config.num_workers,
             pin_memory=config.pin_memory,
             prefetch_factor=config.prefetch_factor,
+            load_images=load_images,
         )
 
     return OnlineAugmentedBatches(
@@ -492,6 +560,7 @@ def run_training(
         num_workers=config.num_workers,
         pin_memory=config.pin_memory,
         prefetch_factor=config.prefetch_factor,
+        load_images=config.feature_provider != "cached",
     )
 
     first_train_sample = train_dataset[0]
@@ -524,6 +593,7 @@ def run_training(
         output_size=output_size,
         **config.decoder_kwargs,
     )
+    decoder = decoder.to(torch.device(config.device))
     task = SegmentationTask(decoder, SegmentationLoss(config.loss, num_classes=config.num_classes))
     optimizer = build_optimizer(decoder.parameters(), config.optimizer)
     scheduler = build_scheduler(optimizer, config.scheduler) if config.scheduler is not None else None

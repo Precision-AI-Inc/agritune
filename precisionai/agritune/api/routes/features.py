@@ -19,7 +19,7 @@ from precisionai.agritune.augmentations.image.pipeline import AugmentationPipeli
 from precisionai.agritune.cli.config import load_augmentation_selection
 from precisionai.agritune.features.integrity import verify_store
 from precisionai.agritune.features.manifest import FeatureManifest
-from precisionai.agritune.features.store import DirectoryFeatureStore
+from precisionai.agritune.features.store import build_feature_store
 from precisionai.agritune.services.encoder_selection import build_encoder
 from precisionai.agritune.services.feature_service import build_features
 
@@ -37,7 +37,7 @@ async def build(request: FeaturesBuildRequest) -> FeaturesBuildResponse:
         if request.augmentation_config_path is not None
         else None
     )
-    store = DirectoryFeatureStore(store_path)
+    store = build_feature_store(request.store_type, store_path, entries_per_shard=request.entries_per_shard)
     encoder, fingerprint = build_encoder(
         base_url=request.encoder.base_url,
         api_key=request.encoder.api_key,
@@ -73,15 +73,18 @@ async def build(request: FeaturesBuildRequest) -> FeaturesBuildResponse:
 def verify(request: FeaturesStoreRequest) -> FeaturesVerifyResponse:
     """Verify every entry in a feature store's checksum against its actual file contents."""
     store_path = resolve_under_root(get_api_root(), request.store, field_name="store")
-    report = verify_store(DirectoryFeatureStore(store_path))
+    store = build_feature_store(request.store_type, store_path, entries_per_shard=request.entries_per_shard)
+    report = verify_store(store)
     return FeaturesVerifyResponse(is_valid=report.is_valid, total=report.total, corrupted_keys=report.corrupted_keys)
 
 
 @router.get("/inspect", response_model=FeaturesInspectResponse)
-def inspect(store: str) -> FeaturesInspectResponse:
+def inspect(store: str, store_type: str = "directory", entries_per_shard: int = 1000) -> FeaturesInspectResponse:
     """Report feature store statistics: entry count, encoder models seen, patch dimensions seen."""
     store_path = resolve_under_root(get_api_root(), store, field_name="store")
-    manifest = FeatureManifest.from_store(DirectoryFeatureStore(store_path))
+    manifest = FeatureManifest.from_store(
+        build_feature_store(store_type, store_path, entries_per_shard=entries_per_shard)
+    )
     return FeaturesInspectResponse(
         total_entries=len(manifest),
         encoder_models=dict(manifest.encoder_models()),
@@ -93,5 +96,6 @@ def inspect(store: str) -> FeaturesInspectResponse:
 def clean(request: FeaturesStoreRequest) -> FeaturesCleanResponse:
     """Remove any tensor/meta file in a feature store whose pair is missing."""
     store_path = resolve_under_root(get_api_root(), request.store, field_name="store")
-    removed = DirectoryFeatureStore(store_path).clean()
+    store = build_feature_store(request.store_type, store_path, entries_per_shard=request.entries_per_shard)
+    removed = store.clean()
     return FeaturesCleanResponse(removed=removed)

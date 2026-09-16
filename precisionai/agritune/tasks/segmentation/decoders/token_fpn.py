@@ -46,10 +46,17 @@ class TokenFPNDecoder(nn.Module):
         CLS embedding dimension; required when ``cls_fusion`` is not ``CLSFusion.NONE``.
     hidden_dim : int, optional
         Channel width used throughout the refinement stack.
+    num_layers : int, optional
+        Number of stacked 3x3 conv + ReLU blocks in the refinement stack.
     cls_fusion : CLSFusion, optional
         How to fuse the CLS token: ``NONE`` (ignore it), ``CONCAT`` (project and concatenate as
         extra spatial channels), or ``FILM`` (feature-wise linear modulation: scale and shift the
         spatial feature map).
+
+    Raises
+    ------
+    ValueError
+        If ``num_layers`` is not positive.
     """
 
     def __init__(
@@ -60,11 +67,14 @@ class TokenFPNDecoder(nn.Module):
         output_size: tuple[int, int],
         cls_dim: int | None = None,
         hidden_dim: int = 128,
+        num_layers: int = 2,
         cls_fusion: CLSFusion = CLSFusion.NONE,
     ) -> None:
         super().__init__()
         if cls_fusion is not CLSFusion.NONE and cls_dim is None:
             raise ValueError(f"cls_fusion={cls_fusion.value!r} requires cls_dim to be set")
+        if num_layers < 1:
+            raise ValueError(f"num_layers must be positive; got {num_layers}")
 
         self.output_size = output_size
         self.cls_fusion = cls_fusion
@@ -82,12 +92,13 @@ class TokenFPNDecoder(nn.Module):
                 raise RuntimeError("cls_dim must be set for cls_fusion=film")
             self.cls_proj = nn.Linear(cls_dim, hidden_dim * 2)
 
-        self.refine = nn.Sequential(
-            nn.Conv2d(refine_in_channels, hidden_dim, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-        )
+        refine_layers: list[nn.Module] = []
+        in_channels = refine_in_channels
+        for _ in range(num_layers):
+            refine_layers.append(nn.Conv2d(in_channels, hidden_dim, kernel_size=3, padding=1))
+            refine_layers.append(nn.ReLU(inplace=True))
+            in_channels = hidden_dim
+        self.refine = nn.Sequential(*refine_layers)
         self.classifier = nn.Conv2d(hidden_dim, num_classes, kernel_size=1)
 
     def forward(self, features: EncoderFeatures) -> torch.Tensor:

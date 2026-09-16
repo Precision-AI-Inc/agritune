@@ -85,8 +85,9 @@ feature_augmentation:
 # decoder_name: mlp_probe | token_fpn | aspp | ppm | segmenter | mask_former
 # decoder_kwargs is forwarded verbatim to the selected decoder's constructor — shown below are
 # mlp_probe's own kwargs (matching its defaults); swapping decoder_name requires swapping these
-# keys too (e.g. atrous_rates/hidden_dim for aspp, pool_sizes for ppm, num_queries for
-# mask_former, cls_fusion/hidden_dim for token_fpn).
+# keys too (e.g. atrous_rates/hidden_dim/num_layers for aspp, pool_sizes/hidden_dim/num_layers for
+# ppm, num_queries/hidden_dim/num_layers/num_heads/mlp_ratio/dropout for mask_former,
+# cls_fusion/hidden_dim/num_layers for token_fpn).
 decoder_name: mlp_probe
 decoder_kwargs:
   hidden_dims: []                        # empty = a single nn.Linear(patch_dim, num_classes)

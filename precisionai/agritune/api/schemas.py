@@ -67,6 +67,14 @@ class FeaturesBuildRequest(BaseModel):
 
     manifest_path: str
     store: str
+    store_type: str = Field(
+        default="directory",
+        description="'directory' (development scale) or 'sharded' (production scale) — the store "
+        "implementation to build (or resume building) 'store' as.",
+    )
+    entries_per_shard: int = Field(
+        default=1000, description="Samples packed per shard file; only consulted when store_type is 'sharded'."
+    )
     encoder: EncoderSelection = Field(default_factory=EncoderSelection)
     augmentation_config_path: str | None = Field(
         default=None,
@@ -97,6 +105,12 @@ class FeaturesStoreRequest(BaseModel):
     """Body for ``POST /features/verify`` and ``POST /features/clean``."""
 
     store: str
+    store_type: str = Field(
+        default="directory", description="'directory' or 'sharded' — must match how 'store' was actually built."
+    )
+    entries_per_shard: int = Field(
+        default=1000, description="Samples packed per shard file; only consulted when store_type is 'sharded'."
+    )
 
 
 class FeaturesVerifyResponse(BaseModel):
@@ -144,6 +158,12 @@ class ScoredRunRequest(BaseModel):
 
     manifest_path: str
     store: str
+    store_type: str = Field(
+        default="directory", description="'directory' or 'sharded' — must match how 'store' was actually built."
+    )
+    entries_per_shard: int = Field(
+        default=1000, description="Samples packed per shard file; only consulted when store_type is 'sharded'."
+    )
     checkpoint_path: str
     num_classes: int
     decoder: str = Field(

@@ -587,11 +587,43 @@ def test_reduce_on_plateau_scheduler_is_stepped_on_validation() -> None:
 
 
 def test_construction_does_not_raise_for_parameterless_decoder() -> None:
-    # _device_type() must fall back to "cpu" rather than raising when the decoder has no
+    # _device() must fall back to torch.device("cpu") rather than raising when the decoder has no
     # parameters to inspect.
     decoder = nn.Module()
     task = SegmentationTask(decoder, SegmentationLoss(SegmentationLossConfig(name="ce"), num_classes=2))
     provider = _DeterministicFeatureProvider(patch_dim=4, patch_grid=(2, 2))
     optimizer = SGD([torch.nn.Parameter(torch.zeros(1))], lr=0.1)
     config = TrainerConfig(max_epochs=1)
-    Trainer(task=task, decoder=decoder, feature_provider=provider, optimizer=optimizer, scheduler=None, config=config)
+    trainer = Trainer(
+        task=task, decoder=decoder, feature_provider=provider, optimizer=optimizer, scheduler=None, config=config
+    )
+    assert trainer.device == torch.device("cpu")
+
+
+def test_device_reflects_wherever_the_decoders_parameters_live() -> None:
+    trainer, _ = _build_trainer(max_epochs=1)
+    assert trainer.device == next(trainer.decoder.parameters()).device
+
+
+def test_train_one_epoch_moves_features_and_targets_to_the_trainers_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A CPU-only CI machine can't prove data actually lands on a GPU, but it can prove every
+    # feature/target passes through .to(trainer.device) with the right device argument — the same
+    # code path that matters on a real CUDA device.
+    trainer, _ = _build_trainer(max_epochs=1)
+    train_batch = TrainingBatch(samples=[_sample("a"), _sample("b")], targets=torch.randint(0, 2, (2, 2, 2)))
+
+    seen_devices: list[torch.device] = []
+    original_to = EncoderFeatures.to
+
+    def spy_to(self: EncoderFeatures, device: torch.device | str, *, non_blocking: bool = False) -> EncoderFeatures:
+        seen_devices.append(torch.device(device))
+        return original_to(self, device, non_blocking=non_blocking)
+
+    monkeypatch.setattr(EncoderFeatures, "to", spy_to)
+
+    trainer.fit([train_batch])
+
+    assert seen_devices
+    assert all(device == trainer.device for device in seen_devices)

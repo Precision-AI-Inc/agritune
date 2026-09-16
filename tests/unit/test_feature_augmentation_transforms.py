@@ -186,3 +186,40 @@ def test_feature_channel_dropout_rejects_probability_of_one() -> None:
     features = _make_features()
     with pytest.raises(ValueError, match=r"probability must be in \[0, 1\)"):
         feature_channel_dropout(features, probability=1.0, generator=_generator(0))
+
+
+def _cuda_features(**kwargs: object) -> EncoderFeatures:
+    features = _make_features(**kwargs)  # type: ignore[arg-type]
+    return features.to("cuda")
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA-enabled machine")
+class TestTransformsOnCudaFeatures:
+    """The RNG (and its checkpointed state) always lives on CPU — see the module docstring — so
+    every transform must explicitly move what it draws from it onto wherever the real features
+    are, or combining the two raises a device-mismatch error the moment features aren't on CPU."""
+
+    def test_patch_dropout(self) -> None:
+        result = patch_dropout(_cuda_features(), probability=0.5, generator=_generator(0))
+        assert result.patch_tokens.device.type == "cuda"
+
+    def test_token_masking(self) -> None:
+        result = token_masking(_cuda_features(), probability=0.5, generator=_generator(0))
+        assert result.patch_tokens.device.type == "cuda"
+
+    def test_gaussian_feature_noise(self) -> None:
+        result = gaussian_feature_noise(_cuda_features(), std=0.1, generator=_generator(0))
+        assert result.patch_tokens.device.type == "cuda"
+        assert result.cls_tokens is not None
+        assert result.cls_tokens.device.type == "cuda"
+
+    def test_cls_dropout(self) -> None:
+        result = cls_dropout(_cuda_features(), probability=0.5, generator=_generator(0))
+        assert result.cls_tokens is not None
+        assert result.cls_tokens.device.type == "cuda"
+
+    def test_feature_channel_dropout(self) -> None:
+        result = feature_channel_dropout(_cuda_features(), probability=0.5, generator=_generator(0))
+        assert result.patch_tokens.device.type == "cuda"
+        assert result.cls_tokens is not None
+        assert result.cls_tokens.device.type == "cuda"

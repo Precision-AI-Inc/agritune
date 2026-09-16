@@ -11,6 +11,7 @@ directly.
 """
 
 import numpy as np
+import pytest
 
 from precisionai.agritune.augmentations.image.pipeline import (
     AugmentationMode,
@@ -19,8 +20,10 @@ from precisionai.agritune.augmentations.image.pipeline import (
     ImageAugmentationPipeline,
     PhotometricConfig,
     prepare_sample,
+    prepare_target_only,
 )
 from precisionai.agritune.augmentations.image.seeding import derive_offline_seed
+from precisionai.agritune.features.keys import hash_augmentation
 from precisionai.agritune.schemas.samples import Sample
 from tests.fixtures.image_factory import make_image, make_mask
 
@@ -256,3 +259,124 @@ def test_prepare_sample_online_mode_varies_by_epoch() -> None:
     assert epoch_0.augmentation_metadata is not None
     assert epoch_1.augmentation_metadata is not None
     assert epoch_0.augmentation_metadata.seed != epoch_1.augmentation_metadata.seed
+
+
+# --- apply_to_mask / prepare_target_only: feature_provider=cached's image-free batch-building path ---
+#
+# The critical invariant under test throughout this section: a cache key is
+# hash_augmentation(sample.augmentation_metadata), and hash_augmentation hashes the *entire*
+# transform list — including photometric transforms, which never touch a mask at all. So
+# apply_to_mask must reproduce byte-identical resolved parameters for every transform, geometric
+# and photometric alike, purely from the mask and the seed, or a mask-only-built batch's cache
+# lookup would silently miss the exact same entry apply() cached it under.
+
+
+def _full_config() -> AugmentationPipelineConfig:
+    return AugmentationPipelineConfig(
+        geometric=GeometricConfig(
+            resize=(8, 6),
+            random_crop=(6, 4),
+            horizontal_flip_probability=1.0,
+            vertical_flip_probability=1.0,
+            rotation_max_degrees=25.0,
+        ),
+        photometric=PhotometricConfig(
+            brightness_range=(0.6, 1.4),
+            contrast_range=(0.6, 1.4),
+            saturation_range=(0.6, 1.4),
+            hue_max_degrees=15.0,
+            blur_probability=1.0,
+            noise_probability=1.0,
+            channel_dropout_probability=1.0,
+        ),
+    )
+
+
+@pytest.mark.parametrize("seed", [0, 1, 123, 999])
+def test_apply_to_mask_reproduces_apply_s_mask_pixels(seed: int) -> None:
+    sample = _sample()
+    pipeline = ImageAugmentationPipeline(_full_config())
+
+    prepared = pipeline.apply(sample, seed=seed)
+    mask_only, _ = pipeline.apply_to_mask(sample.target, seed=seed)
+
+    assert np.array_equal(np.array(prepared.target), np.array(mask_only))
+
+
+@pytest.mark.parametrize("seed", [0, 1, 123, 999])
+def test_apply_to_mask_reproduces_a_hash_matching_cache_key(seed: int) -> None:
+    """The decisive test: even with photometric transforms active (which never touch the mask),
+    the mask-only record must hash identically to the real image+mask record — otherwise
+    feature_provider=cached lookups from a mask-only-built batch would miss the cache entirely."""
+    sample = _sample()
+    pipeline = ImageAugmentationPipeline(_full_config())
+
+    prepared = pipeline.apply(sample, seed=seed)
+    _, mask_only_record = pipeline.apply_to_mask(sample.target, seed=seed)
+
+    assert hash_augmentation(prepared.augmentation_metadata) == hash_augmentation(mask_only_record)
+
+
+def test_apply_to_mask_matches_apply_with_resize_only() -> None:
+    """The trivial (but common) case: only a deterministic resize is configured, no randomness."""
+    sample = _sample()
+    pipeline = ImageAugmentationPipeline(AugmentationPipelineConfig(geometric=GeometricConfig(resize=(4, 3))))
+
+    prepared = pipeline.apply(sample, seed=0)
+    mask_only, record = pipeline.apply_to_mask(sample.target, seed=0)
+
+    assert mask_only.size == (4, 3)
+    assert np.array_equal(np.array(prepared.target), np.array(mask_only))
+    assert hash_augmentation(prepared.augmentation_metadata) == hash_augmentation(record)
+
+
+def test_apply_to_mask_matches_apply_with_no_transforms_configured() -> None:
+    sample = _sample()
+    pipeline = ImageAugmentationPipeline()
+
+    prepared = pipeline.apply(sample, seed=0)
+    mask_only, record = pipeline.apply_to_mask(sample.target, seed=0)
+
+    assert np.array_equal(np.array(prepared.target), np.array(mask_only))
+    assert hash_augmentation(prepared.augmentation_metadata) == hash_augmentation(record)
+    assert record.transforms == []
+
+
+def test_prepare_target_only_none_mode_passes_mask_through_unchanged() -> None:
+    sample = _sample()
+    pipeline = ImageAugmentationPipeline(AugmentationPipelineConfig(geometric=GeometricConfig(rotation_max_degrees=30)))
+
+    mask, record = prepare_target_only(
+        sample.target, sample_id=sample.sample_id, mode=AugmentationMode.NONE, pipeline=pipeline, global_seed=0
+    )
+
+    assert mask is sample.target
+    assert record is None
+
+
+def test_prepare_target_only_offline_mode_matches_prepare_sample() -> None:
+    sample = _sample()
+    pipeline = ImageAugmentationPipeline(_full_config())
+
+    prepared = prepare_sample(sample, mode=AugmentationMode.OFFLINE, pipeline=pipeline, global_seed=5, variant=2)
+    mask, record = prepare_target_only(
+        sample.target,
+        sample_id=sample.sample_id,
+        mode=AugmentationMode.OFFLINE,
+        pipeline=pipeline,
+        global_seed=5,
+        variant=2,
+    )
+
+    assert np.array_equal(np.array(prepared.target), np.array(mask))
+    assert prepared.augmentation_metadata is not None
+    assert record is not None
+    assert hash_augmentation(prepared.augmentation_metadata) == hash_augmentation(record)
+
+
+@pytest.mark.parametrize("mode", [AugmentationMode.ONLINE, AugmentationMode.HYBRID])
+def test_prepare_target_only_rejects_online_and_hybrid(mode: AugmentationMode) -> None:
+    sample = _sample()
+    pipeline = ImageAugmentationPipeline(_full_config())
+    with pytest.raises(ValueError, match="supports mode 'none' or 'offline' only"):
+        prepare_target_only(sample.target, sample_id=sample.sample_id, mode=mode, pipeline=pipeline, global_seed=0)

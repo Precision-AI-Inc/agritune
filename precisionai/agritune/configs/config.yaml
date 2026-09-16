@@ -21,12 +21,21 @@ defaults:
 run_root: runs
 run_id: ???
 feature_store_dir: ???
+store_type: directory  # directory (development scale) | sharded (production scale) — must match
+                        # whatever feature_store_dir was actually built as (agritune features build)
+entries_per_shard: 1000  # samples packed per shard file; only consulted when store_type: sharded
 batch_size: 4
+device: cpu  # "cpu" (default, always safe) | "cuda" | "cuda:N" — where the decoder and every
+             # batch's features/targets are moved; rejected up front if it names a CUDA device
+             # that is unavailable or out of range, never a silent fallback to CPU
 num_workers: 0  # DataLoader worker subprocesses for batch decode/augmentation; 0 = main process only
 pin_memory: false  # DataLoader pinned-memory batches; speeds up host-to-device copies on CUDA, no-op on CPU
 prefetch_factor: null  # batches each worker buffers ahead; null defers to DataLoader's default (2),
                         # only meaningful when num_workers > 0 — cap it at a large batch_size to bound
                         # memory (num_workers * prefetch_factor * batch_size)
+feature_read_workers: 32  # thread-pool size for concurrent feature-store reads under
+                           # feature_provider: cached — raise to match available CPU cores when
+                           # disk/store read latency, not CPU, is the bottleneck
 val_fraction: 0.2
 seed: 0
 checkpoint_top_k: 3

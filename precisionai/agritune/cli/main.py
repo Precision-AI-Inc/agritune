@@ -58,6 +58,23 @@ def _add_encoder_selection_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_store_type_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--store-type",
+        default="directory",
+        choices=["directory", "sharded"],
+        help="Feature store implementation --store holds: 'directory' (development scale, one file "
+        "per sample) or 'sharded' (production scale, many samples packed per shard file). Must "
+        "match whatever the store was actually built as (default: directory).",
+    )
+    parser.add_argument(
+        "--entries-per-shard",
+        type=int,
+        default=1000,
+        help="Samples packed per shard file; only consulted when --store-type=sharded (default: 1000).",
+    )
+
+
 def _build_config_parser(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser("config", help="Generate and inspect training run config files.")
     config_subparsers = parser.add_subparsers(dest="subcommand", required=True)
@@ -111,20 +128,45 @@ def _build_features_parser(subparsers: argparse._SubParsersAction) -> None:
         help="Global seed offline augmentation derives each sample's seed from — must match the "
         "training config's top-level seed (only consulted when --augmentation-config sets mode: offline).",
     )
+    _add_store_type_arguments(build)
     _add_encoder_selection_arguments(build)
     build.set_defaults(handler=handlers.features_build)
 
     verify = features_subparsers.add_parser("verify", help="Verify feature store integrity.")
     verify.add_argument("--store", required=True, help="Directory the feature store was built in.")
+    _add_store_type_arguments(verify)
     verify.set_defaults(handler=handlers.features_verify)
 
     inspect = features_subparsers.add_parser("inspect", help="Report feature store statistics.")
     inspect.add_argument("--store", required=True, help="Directory the feature store was built in.")
+    _add_store_type_arguments(inspect)
     inspect.set_defaults(handler=handlers.features_inspect)
 
     clean = features_subparsers.add_parser("clean", help="Remove stale or orphaned feature shards.")
     clean.add_argument("--store", required=True, help="Directory the feature store was built in.")
+    _add_store_type_arguments(clean)
     clean.set_defaults(handler=handlers.features_clean)
+
+    migrate = features_subparsers.add_parser(
+        "migrate", help="Copy every entry from one feature store into another (e.g. directory -> sharded)."
+    )
+    migrate.add_argument("--source", required=True, help="Directory the source feature store was built in.")
+    migrate.add_argument(
+        "--source-type", default="directory", choices=["directory", "sharded"], help="Source store implementation."
+    )
+    migrate.add_argument(
+        "--dest", required=True, help="Directory the destination feature store is (or will be) built in."
+    )
+    migrate.add_argument(
+        "--dest-type", default="sharded", choices=["directory", "sharded"], help="Destination store implementation."
+    )
+    migrate.add_argument(
+        "--dest-entries-per-shard",
+        type=int,
+        default=1000,
+        help="Samples packed per shard file; only consulted when --dest-type=sharded (default: 1000).",
+    )
+    migrate.set_defaults(handler=handlers.features_migrate)
 
 
 def _build_train_parser(subparsers: argparse._SubParsersAction) -> None:
@@ -137,6 +179,7 @@ def _build_train_parser(subparsers: argparse._SubParsersAction) -> None:
 def _add_scored_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--manifest", required=True, help="Path to the dataset manifest file.")
     parser.add_argument("--store", required=True, help="Directory the feature store was built in.")
+    _add_store_type_arguments(parser)
     parser.add_argument("--checkpoint", required=True, help="Path to a checkpoint (e.g. last.ckpt/best.ckpt).")
     parser.add_argument("--num-classes", type=int, required=True, help="Number of segmentation classes.")
     parser.add_argument(

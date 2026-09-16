@@ -16,7 +16,7 @@ splits can legitimately disagree on spatial size. ``SegmentationLoss.forward`` b
 """
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, cast
 
 import torch
 from torch import nn
@@ -149,30 +149,34 @@ class SegmentationLoss(nn.Module):
         self._config = config
         self._num_classes = num_classes
         self._dice = DiceLoss(num_classes=num_classes, ignore_index=config.ignore_index)
+        # Registered as a buffer (not just kept on `config`) so `Module.to(device)` carries it along
+        # automatically — otherwise a GPU-resident model would call `cross_entropy`/`bce_with_logits`
+        # with CPU weights against CUDA logits and fail with a device-mismatch error.
+        self.register_buffer("_class_weights", config.class_weights, persistent=False)
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """Compute the configured loss for one batch."""
         if logits.shape[-2:] != targets.shape[-2:]:
             logits = functional.interpolate(logits, size=targets.shape[-2:], mode="bilinear", align_corners=False)
         config = self._config
+        # nn.Module's __getattr__ is typed as returning `Tensor | Module` for any registered
+        # buffer/submodule name, since it can't know which this one is; this buffer is always a
+        # plain tensor or None (see __init__), never a submodule.
+        class_weights = cast("torch.Tensor | None", self._class_weights)
         if config.name == "ce":
-            return cross_entropy_loss(
-                logits, targets, ignore_index=config.ignore_index, class_weights=config.class_weights
-            )
+            return cross_entropy_loss(logits, targets, ignore_index=config.ignore_index, class_weights=class_weights)
         if config.name == "bce":
             return bce_with_logits_loss(
                 logits,
                 targets,
                 num_classes=self._num_classes,
                 ignore_index=config.ignore_index,
-                class_weights=config.class_weights,
+                class_weights=class_weights,
             )
         if config.name == "dice":
             return self._dice(logits, targets)
         if config.name == "ce_dice":
-            ce = cross_entropy_loss(
-                logits, targets, ignore_index=config.ignore_index, class_weights=config.class_weights
-            )
+            ce = cross_entropy_loss(logits, targets, ignore_index=config.ignore_index, class_weights=class_weights)
             return config.ce_weight * ce + config.dice_weight * self._dice(logits, targets)
         if config.name == "bce_dice":
             bce = bce_with_logits_loss(
@@ -180,7 +184,7 @@ class SegmentationLoss(nn.Module):
                 targets,
                 num_classes=self._num_classes,
                 ignore_index=config.ignore_index,
-                class_weights=config.class_weights,
+                class_weights=class_weights,
             )
             return config.ce_weight * bce + config.dice_weight * self._dice(logits, targets)
         raise ValueError(f"unsupported loss name: {config.name!r}")  # pragma: no cover — exhaustive over LossName

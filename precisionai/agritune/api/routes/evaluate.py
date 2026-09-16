@@ -9,7 +9,7 @@ from precisionai.agritune.api.config import get_api_root
 from precisionai.agritune.api.paths import resolve_under_root
 from precisionai.agritune.api.schemas import EvaluateRequest, EvaluateResponse
 from precisionai.agritune.features.keys import EncoderFingerprint
-from precisionai.agritune.features.store import DirectoryFeatureStore
+from precisionai.agritune.features.store import build_feature_store
 from precisionai.agritune.services.evaluation_service import EvaluationRunConfig, run_evaluation
 from precisionai.agritune.tasks.segmentation.losses import SegmentationLossConfig
 
@@ -23,7 +23,7 @@ def evaluate(request: EvaluateRequest) -> EvaluateResponse:
     manifest_path = resolve_under_root(root, request.manifest_path, field_name="manifest_path")
     store_path = resolve_under_root(root, request.store, field_name="store")
     checkpoint_path = resolve_under_root(root, request.checkpoint_path, field_name="checkpoint_path")
-    store = DirectoryFeatureStore(store_path)
+    store = build_feature_store(request.store_type, store_path, entries_per_shard=request.entries_per_shard)
     config = EvaluationRunConfig(
         manifest_path=str(manifest_path),
         checkpoint_path=str(checkpoint_path),

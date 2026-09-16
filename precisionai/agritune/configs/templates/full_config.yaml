@@ -32,6 +32,11 @@ encoder_fingerprint:
 # sample every epoch; "hybrid" reads the cache and write-through populates whatever is missing.
 # encoder_base_url/encoder_api_key are ignored entirely under "cached".
 feature_provider: cached                 # cached | online | hybrid
+store_type: directory                    # directory (development scale) | sharded (production
+                                          # scale) — must match whatever feature_store_dir was
+                                          # actually built as (agritune features build --store-type)
+entries_per_shard: 1000                  # samples packed per shard file; only consulted when
+                                          # store_type: sharded
 encoder_base_url: null                   # null uses the built-in fake encoder; set to your hosted
                                           # embeddings endpoint to use the real one (required for
                                           # "online"/"hybrid")
@@ -86,8 +91,9 @@ feature_augmentation:
 # decoder_name: mlp_probe | token_fpn | aspp | ppm | segmenter | mask_former
 # decoder_kwargs is forwarded verbatim to the selected decoder's constructor — shown below are
 # mlp_probe's own kwargs (matching its defaults); swapping decoder_name requires swapping these
-# keys too (e.g. atrous_rates/hidden_dim for aspp, pool_sizes for ppm, num_queries for
-# mask_former, cls_fusion/hidden_dim for token_fpn).
+# keys too (e.g. atrous_rates/hidden_dim/num_layers for aspp, pool_sizes/hidden_dim/num_layers for
+# ppm, num_queries/hidden_dim/num_layers/num_heads/mlp_ratio/dropout for mask_former,
+# cls_fusion/hidden_dim/num_layers for token_fpn).
 decoder_name: mlp_probe
 decoder_kwargs:
   hidden_dims: []                        # empty = a single nn.Linear(patch_dim, num_classes)
@@ -95,6 +101,10 @@ decoder_kwargs:
 
 # --- Batching / split ------------------------------------------------------------
 batch_size: 4
+device: cpu                              # "cpu" (default, always safe on CPU-only machines) | "cuda" |
+                                          # a specific GPU like "cuda:3". Rejected up front if it names a
+                                          # CUDA device that is unavailable or out of range for this
+                                          # machine's GPU count — never a silent fallback to CPU.
 num_workers: 0                           # DataLoader worker subprocesses for batch decode/augmentation;
                                           # 0 runs everything in the main process. Raise this (e.g. 4-8)
                                           # if "building batches" is slow at your batch_size/storage speed.
@@ -105,6 +115,9 @@ prefetch_factor: null                    # batches each worker buffers ahead; nu
                                           # memory scales with num_workers * prefetch_factor * batch_size
                                           # — cap this (e.g. 1) if a high num_workers gets killed (OOM)
                                           # at a large batch_size.
+feature_read_workers: 32                 # thread-pool size for concurrent feature-store reads under
+                                          # feature_provider: cached; raise to match available CPU cores
+                                          # when disk/store read latency, not CPU, is the bottleneck.
 val_fraction: 0.2                        # fraction of samples held out for validation (random split)
 
 # --- Optimizer -------------------------------------------------------------------

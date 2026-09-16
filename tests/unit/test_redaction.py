@@ -169,9 +169,11 @@ def test_cli_train_debug_log_redacts_override_api_key(
     monkeypatch.setattr(
         handlers,
         "load_training_run_config",
-        lambda _config, _overrides: SimpleNamespace(feature_store_dir=str(tmp_path)),
+        lambda _config, _overrides: SimpleNamespace(
+            feature_store_dir=str(tmp_path), store_type="directory", entries_per_shard=1000
+        ),
     )
-    monkeypatch.setattr(handlers, "DirectoryFeatureStore", lambda _path: object())
+    monkeypatch.setattr(handlers, "build_feature_store", lambda *_args, **_kwargs: object())
     monkeypatch.setattr(
         handlers,
         "run_training",

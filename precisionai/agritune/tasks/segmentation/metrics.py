@@ -79,6 +79,11 @@ class SegmentationMetric:
             raise ValueError(f"predictions contain labels outside [0, {self.num_classes}): {invalid_predictions}")
         indices = targets * self.num_classes + predictions
         counts = torch.bincount(indices, minlength=self.num_classes**2)
+        # Follows wherever outputs/targets actually are (e.g. a CUDA device once Trainer starts
+        # moving batches there) rather than forcing every update() call to transfer back to
+        # whatever device the metric happened to be constructed on.
+        if self._confusion.device != counts.device:
+            self._confusion = self._confusion.to(counts.device)
         self._confusion += counts.reshape(self.num_classes, self.num_classes).to(self._confusion.dtype)
 
     def compute(self) -> dict[str, float]:

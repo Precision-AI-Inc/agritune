@@ -44,6 +44,11 @@ class CachedFeatureProvider:
     image_hash_fn : Callable[[PreparedSample], str]
         Computes the image-content hash component of the cache key for one sample; must match
         what was used during precomputation.
+    max_read_workers : int, optional
+        Upper bound on concurrent store reads per :meth:`get_features` call (actual concurrency is
+        also capped at the batch size). Raise this to match available CPU cores when disk/store
+        read latency — not CPU — is the bottleneck; the default is a conservative, always-safe
+        value.
     """
 
     def __init__(
@@ -52,10 +57,12 @@ class CachedFeatureProvider:
         *,
         encoder_fingerprint: EncoderFingerprint,
         image_hash_fn: Callable[[PreparedSample], str],
+        max_read_workers: int = _MAX_READ_WORKERS,
     ) -> None:
         self._store = store
         self._encoder_fingerprint = encoder_fingerprint
         self._image_hash_fn = image_hash_fn
+        self._max_read_workers = max_read_workers
 
     def get_features(self, samples: Sequence[PreparedSample]) -> EncoderFeatures:
         """Return cached features for every sample in ``samples``, in order.
@@ -86,7 +93,7 @@ class CachedFeatureProvider:
         if not samples:
             raise ValueError("samples must be non-empty")
 
-        workers = min(_MAX_READ_WORKERS, len(samples))
+        workers = min(self._max_read_workers, len(samples))
         with ThreadPoolExecutor(max_workers=workers) as executor:
             per_sample_features = list(executor.map(self._read_one, samples))
         return concatenate_encoder_features(per_sample_features)

@@ -35,6 +35,7 @@ from precisionai.agritune.training.checkpointing import Checkpoint, CheckpointMa
 from precisionai.agritune.training.distributed import DistributedContext
 from precisionai.agritune.training.evaluator import TrainingBatch, evaluate
 from precisionai.agritune.training.precision import PrecisionConfig, PrecisionContext
+from precisionai.agritune.training.prefetch import PrefetchingFeatureLoader
 from precisionai.agritune.training.state import (
     TrainingState,
     capture_rng_state,
@@ -167,7 +168,8 @@ class Trainer:
         self.distributed = distributed or DistributedContext()
         self.feature_augmentation = feature_augmentation
         self.show_progress = show_progress
-        self.precision = PrecisionContext(config.precision, device_type=self._device_type())
+        self.device = self._device()
+        self.precision = PrecisionContext(config.precision, device_type=self.device.type)
         self.state = TrainingState()
         self.last_train_metrics: dict[str, float] | None = None
         self.last_val_metrics: dict[str, float] | None = None
@@ -227,6 +229,7 @@ class Trainer:
                     self.feature_provider,
                     val_batches,
                     val_metric,
+                    device=self.device,
                     show_progress=self.show_progress and self.distributed.is_main_process,
                 )
                 self.last_val_metrics = metrics
@@ -247,26 +250,35 @@ class Trainer:
         accumulated_steps = 0
         last_loss_value = 0.0
         resume_offset = self.state.batch_in_epoch
+        non_blocking = self.device.type == "cuda"
+
+        # Skip already-trained batches on the raw iterator, before wrapping it in the prefetcher —
+        # so a mid-epoch resume never fetches features for a batch it is about to discard.
+        iterator = iter(batches)
+        for _ in range(resume_offset):
+            next(iterator, None)
+        prefetcher = PrefetchingFeatureLoader(
+            iterator, self.feature_provider, device=self.device, non_blocking=non_blocking
+        )
         display_batches = progress_iter(
-            batches,
+            prefetcher,
             desc=f"epoch {self.state.epoch}",
             unit="batch",
             disable=not (self.show_progress and self.distributed.is_main_process),
         )
-        for batch_index, batch in enumerate(display_batches):
-            if batch_index < resume_offset:
-                continue
+        for offset, (_, batch_features, targets) in enumerate(display_batches):
+            batch_index = resume_offset + offset
             with self.precision.autocast():
-                features = self.feature_provider.get_features(batch.samples)
+                features = batch_features
                 if self.feature_augmentation is not None:
                     features = self.feature_augmentation.apply(features)
                 outputs = self.task.forward(features)
-                loss = self.task.compute_loss(outputs, batch.targets)
+                loss = self.task.compute_loss(outputs, targets)
                 scaled_loss = loss / self.config.accumulation_steps
 
             if train_metric is not None:
                 with torch.no_grad():
-                    train_metric.update(outputs, batch.targets)
+                    train_metric.update(outputs, targets)
 
             self.precision.backward(scaled_loss)
             self.state.micro_step += 1
@@ -402,8 +414,8 @@ class Trainer:
             self.state.global_optimizer_step,
         )
 
-    def _device_type(self) -> str:
+    def _device(self) -> torch.device:
         try:
-            return next(self.decoder.parameters()).device.type
+            return next(self.decoder.parameters()).device
         except StopIteration:
-            return "cpu"
+            return torch.device("cpu")

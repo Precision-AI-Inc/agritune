@@ -16,11 +16,13 @@ from precisionai.agritune.augmentations.image.pipeline import (
     AugmentationPipelineConfig,
     GeometricConfig,
     ImageAugmentationPipeline,
+    PhotometricConfig,
     prepare_sample,
 )
 from precisionai.agritune.data.dataset import ManifestDataset
 from precisionai.agritune.encoder.fake import FakeEncoderBackend
-from precisionai.agritune.features.keys import EncoderFingerprint
+from precisionai.agritune.features.keys import EncoderFingerprint, hash_augmentation
+from precisionai.agritune.features.provider import _MAX_READ_WORKERS
 from precisionai.agritune.features.store import DirectoryFeatureStore
 from precisionai.agritune.schemas.samples import PreparedSample
 from precisionai.agritune.services.feature_service import build_features
@@ -217,6 +219,32 @@ async def test_build_cached_feature_provider_reads_what_was_precomputed(tmp_path
     assert features.batch_size == 1
 
 
+async def test_build_cached_feature_provider_forwards_max_read_workers(tmp_path: Path) -> None:
+    manifest_path = build_manifest(tmp_path)
+    store = DirectoryFeatureStore(tmp_path / "features")
+    await build_features(
+        str(manifest_path), store=store, encoder=FakeEncoderBackend(), encoder_fingerprint=_FINGERPRINT
+    )
+
+    provider, _ = build_cached_feature_provider(
+        str(manifest_path), store=store, encoder_fingerprint=_FINGERPRINT, max_read_workers=4
+    )
+
+    assert provider._max_read_workers == 4
+
+
+async def test_build_cached_feature_provider_defaults_max_read_workers_when_omitted(tmp_path: Path) -> None:
+    manifest_path = build_manifest(tmp_path)
+    store = DirectoryFeatureStore(tmp_path / "features")
+    await build_features(
+        str(manifest_path), store=store, encoder=FakeEncoderBackend(), encoder_fingerprint=_FINGERPRINT
+    )
+
+    provider, _ = build_cached_feature_provider(str(manifest_path), store=store, encoder_fingerprint=_FINGERPRINT)
+
+    assert provider._max_read_workers == _MAX_READ_WORKERS
+
+
 async def test_probe_feature_dims_reports_patch_and_cls_dims(tmp_path: Path) -> None:
     manifest_path = build_manifest(tmp_path)
     store = DirectoryFeatureStore(tmp_path / "features")
@@ -315,6 +343,116 @@ def test_build_static_augmented_batches_offline_is_deterministic(tmp_path: Path)
 
     for first_sample, second_sample in zip(first[0].samples, second[0].samples, strict=True):
         assert np.array_equal(np.array(first_sample.image), np.array(second_sample.image))
+
+
+def test_build_static_augmented_batches_load_images_false_never_sets_image(tmp_path: Path) -> None:
+    manifest_path = _build_gradient_manifest(tmp_path)
+    dataset = ManifestDataset(manifest_path)
+    pipeline = ImageAugmentationPipeline(
+        AugmentationPipelineConfig(geometric=GeometricConfig(horizontal_flip_probability=1.0))
+    )
+
+    batches = list(
+        build_static_augmented_batches(
+            dataset,
+            pipeline=pipeline,
+            mode=AugmentationMode.OFFLINE,
+            global_seed=0,
+            batch_size=2,
+            load_images=False,
+        )
+    )
+
+    for sample in batches[0].samples:
+        assert sample.image is None
+        assert sample.augmentation_metadata is not None
+
+
+def test_build_static_augmented_batches_load_images_false_matches_load_images_true_targets(tmp_path: Path) -> None:
+    manifest_path = _build_gradient_manifest(tmp_path)
+    dataset = ManifestDataset(manifest_path)
+    pipeline = ImageAugmentationPipeline(
+        AugmentationPipelineConfig(
+            geometric=GeometricConfig(horizontal_flip_probability=1.0, rotation_max_degrees=15.0),
+            photometric=PhotometricConfig(brightness_range=(0.6, 1.4), blur_probability=1.0),
+        )
+    )
+
+    with_images = list(
+        build_static_augmented_batches(
+            dataset, pipeline=pipeline, mode=AugmentationMode.OFFLINE, global_seed=3, batch_size=2, variant=1
+        )
+    )
+    without_images = list(
+        build_static_augmented_batches(
+            dataset,
+            pipeline=pipeline,
+            mode=AugmentationMode.OFFLINE,
+            global_seed=3,
+            batch_size=2,
+            variant=1,
+            load_images=False,
+        )
+    )
+
+    assert torch.equal(with_images[0].targets, without_images[0].targets)
+    for with_sample, without_sample in zip(with_images[0].samples, without_images[0].samples, strict=True):
+        assert hash_augmentation(with_sample.augmentation_metadata) == hash_augmentation(
+            without_sample.augmentation_metadata
+        )
+
+
+async def test_build_static_augmented_batches_load_images_false_still_hits_the_cache(tmp_path: Path) -> None:
+    """The end-to-end proof: features cached from the real image+mask pipeline must still be found
+    by a provider fed samples built by the image-free (mask-only) batch-building path — even with
+    both geometric and photometric randomness active, mirroring a real offline flip/rotate/color
+    config."""
+    manifest_path = _build_gradient_manifest(tmp_path)
+    store = DirectoryFeatureStore(tmp_path / "features")
+    pipeline = ImageAugmentationPipeline(
+        AugmentationPipelineConfig(
+            geometric=GeometricConfig(horizontal_flip_probability=1.0, rotation_max_degrees=20.0),
+            photometric=PhotometricConfig(contrast_range=(0.5, 1.5), noise_probability=1.0),
+        )
+    )
+    await build_features(
+        str(manifest_path),
+        store=store,
+        encoder=FakeEncoderBackend(),
+        encoder_fingerprint=_FINGERPRINT,
+        augmentation_mode=AugmentationMode.OFFLINE,
+        augmentation_pipeline=pipeline,
+        global_seed=9,
+        augmentation_variant=0,
+    )
+
+    dataset = ManifestDataset(manifest_path)
+    provider, _ = build_cached_feature_provider(str(manifest_path), store=store, encoder_fingerprint=_FINGERPRINT)
+    batches = list(
+        build_static_augmented_batches(
+            dataset,
+            pipeline=pipeline,
+            mode=AugmentationMode.OFFLINE,
+            global_seed=9,
+            batch_size=2,
+            variant=0,
+            load_images=False,
+        )
+    )
+
+    features = provider.get_features(batches[0].samples)
+    assert features.batch_size == 2
+
+
+def test_build_training_batches_load_images_false_never_sets_image(tmp_path: Path) -> None:
+    manifest_path = build_manifest(tmp_path)
+    dataset = ManifestDataset(manifest_path)
+
+    batches = list(build_training_batches(dataset, batch_size=2, resize=(4, 3), load_images=False))
+
+    for sample in batches[0].samples:
+        assert sample.image is None
+    assert batches[0].targets.shape[1:] == (3, 4)
 
 
 def test_build_static_augmented_batches_is_reiterable(tmp_path: Path) -> None:

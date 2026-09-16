@@ -84,6 +84,28 @@ marked `REQUIRED` as placeholders for you to fill in. It's the same shape as
 `examples/segmentation/cwfid.yaml`, just without the CWFID-specific values. Pass `--force` to
 overwrite an existing file at `--output`.
 
+## Performance tuning
+
+These are plain `TrainingRunConfig` fields, not a Hydra group — set them directly (flat config
+file, or `key=value` overrides) alongside `batch_size`. None of them affect training math or
+reproducibility, so they're excluded from the config fingerprint checkpoints are validated
+against — changing any of them mid-run-series never invalidates a resume.
+
+| Field | Default | Effect |
+|---|---|---|
+| `device` | `"cpu"` | Where the decoder and every batch's features/targets are moved before `forward`/`compute_loss` — `"cpu"`, `"cuda"`, or a specific GPU like `"cuda:3"`. Rejected up front (`ValueError`) if it names a CUDA device that is unavailable or out of range for the machine's GPU count — never a silent fallback to CPU. |
+| `num_workers` | `0` | `DataLoader` worker subprocesses decoding/resizing raw images (or masks only, under `feature_provider: cached` — see [feature-caching.md](feature-caching.md#mask-only-loading-under-feature_provider-cached)). Raise this toward the machine's core count if "building batches" is slow relative to storage/decode speed. |
+| `pin_memory` | `false` | Forwarded to the same `DataLoader`; speeds up the host-to-device copy of batch targets when `device` is a CUDA device. No effect on a CPU run. |
+| `prefetch_factor` | `null` | Batches each `DataLoader` worker buffers ahead; requires `num_workers > 0`. Peak memory scales with `num_workers * prefetch_factor * batch_size` — cap it (e.g. `1`) if a high `num_workers` gets OOM-killed at a large `batch_size`. |
+| `feature_read_workers` | `32` | Thread-pool size `CachedFeatureProvider` uses for concurrent store reads per batch — independent of `num_workers`, since these are I/O-bound threads (file open + safetensors deserialization) reading already-computed features, not raw images. Raise this toward the machine's core count when disk/store read latency, not CPU, is the batch-loading bottleneck (the common case for a large `store_type: sharded` store). |
+| `store_type` | `"directory"` | `"directory"` (development scale, one file per sample) or `"sharded"` (production scale, many samples packed per shard file — see [feature-caching.md](feature-caching.md)). Must match whatever `feature_store_dir` was actually built as. |
+| `entries_per_shard` | `1000` | Samples packed per shard file; only consulted when `store_type: sharded`. |
+
+Every batch's feature fetch (a `FeatureProvider.get_features` call) also overlaps with the previous
+batch's model compute automatically, via `PrefetchingFeatureLoader` — see
+[feature-caching.md](feature-caching.md#overlapping-feature-fetch-with-compute). There's no config
+flag for this; it's always on, for every `feature_provider` and every `device`.
+
 ## Group reference
 
 | Group | Variants shipped | Selects |

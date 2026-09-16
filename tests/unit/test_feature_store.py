@@ -3,12 +3,16 @@
 
 """Unit tests for precisionai.agritune.features.store."""
 
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 import torch
 
-from precisionai.agritune.features.store import DirectoryFeatureStore, ShardedFeatureStore
+from precisionai.agritune.features import store as store_module
+from precisionai.agritune.features.store import DirectoryFeatureStore, ShardedFeatureStore, build_feature_store
 from precisionai.agritune.schemas.features import EncoderFeatures
 
 
@@ -190,6 +194,41 @@ class TestShardedFeatureStore:
         with pytest.raises(KeyError):
             store.read("missing")
 
+    def test_concurrent_reads_of_an_uncached_shard_load_it_only_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``CachedFeatureProvider`` reads a batch's keys from a thread pool; without the lock in
+        ``_load_shard``, every thread racing to read a not-yet-cached shard would independently
+        re-read that same (potentially multi-gigabyte) file, rather than one thread loading it
+        while the rest wait and reuse the result."""
+        store = ShardedFeatureStore(tmp_path, entries_per_shard=10)
+        for index in range(5):
+            store.write(f"key{index}", _single_sample_features())
+        store.flush()
+
+        real_load_file = store_module.load_file
+        call_count = 0
+        call_count_lock = threading.Lock()
+
+        def slow_load_file(path: str) -> dict[str, torch.Tensor]:
+            nonlocal call_count
+            with call_count_lock:
+                call_count += 1
+            time.sleep(0.05)  # widen the race window so concurrent threads overlap
+            return real_load_file(path)
+
+        monkeypatch.setattr(store_module, "load_file", slow_load_file)
+        barrier = threading.Barrier(8)
+
+        def read_after_barrier(key: str) -> None:
+            barrier.wait()
+            store.read(key)
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            list(executor.map(read_after_barrier, [f"key{index % 5}" for index in range(8)]))
+
+        assert call_count == 1
+
     def test_manual_flush_persists_partial_shard(self, tmp_path: Path) -> None:
         store = ShardedFeatureStore(tmp_path, entries_per_shard=10)
         store.write("key1", _single_sample_features())
@@ -292,3 +331,27 @@ class TestShardedFeatureStore:
         store.write("key1", _single_sample_features())
         assert store.clean() == []
         assert (tmp_path / "shard_00000.safetensors").exists()
+
+    def test_context_manager_flushes_pending_entries_on_exit(self, tmp_path: Path) -> None:
+        with ShardedFeatureStore(tmp_path, entries_per_shard=10) as store:
+            store.write("key1", _single_sample_features())
+            assert not (tmp_path / "shard_00000.safetensors").exists()  # not yet flushed
+        assert (tmp_path / "shard_00000.safetensors").exists()
+        assert ShardedFeatureStore(tmp_path).has("key1")
+
+
+class TestBuildFeatureStore:
+    def test_directory_type_builds_a_directory_store(self, tmp_path: Path) -> None:
+        store = build_feature_store("directory", tmp_path)
+        assert isinstance(store, DirectoryFeatureStore)
+
+    def test_sharded_type_builds_a_sharded_store(self, tmp_path: Path) -> None:
+        store = build_feature_store("sharded", tmp_path, entries_per_shard=50)
+        assert isinstance(store, ShardedFeatureStore)
+        store.write("key1", _single_sample_features())
+        store.flush()
+        assert ShardedFeatureStore(tmp_path).list_keys() == ["key1"]
+
+    def test_unsupported_type_raises_value_error(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="unsupported store_type: 'bogus'"):
+            build_feature_store("bogus", tmp_path)

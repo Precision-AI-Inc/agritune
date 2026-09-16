@@ -20,12 +20,14 @@ from PIL import Image
 
 from precisionai.agritune.augmentations.feature.pipeline import FeatureAugmentationConfig, FeatureAugmentationPipeline
 from precisionai.agritune.augmentations.image.pipeline import AugmentationMode, GeometricConfig
+from precisionai.agritune.data.dataset import ManifestDataset
 from precisionai.agritune.data.manifest import load_manifest
 from precisionai.agritune.data.split import random_split
 from precisionai.agritune.encoder.fake import FakeEncoderBackend
 from precisionai.agritune.features.keys import EncoderFingerprint
 from precisionai.agritune.features.store import DirectoryFeatureStore, ShardedFeatureStore
 from precisionai.agritune.optimization.optimizers import OptimizerConfig
+from precisionai.agritune.schemas.samples import Sample
 from precisionai.agritune.services import training_service
 from precisionai.agritune.services.feature_service import build_features
 from precisionai.agritune.services.tracking_selection import TrackingSelection
@@ -125,6 +127,32 @@ def test_run_training_default_config_is_backward_compatible(tmp_path: Path) -> N
     assert run_info["split_fingerprint"]
     assert run_info["encoder_fingerprint"]
     assert run_info["feature_cache_fingerprint"]
+
+
+def test_run_training_cached_provider_does_not_load_images_per_batch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The image-loading path (``ManifestDataset.__getitem__``) must not scale with dataset size x
+    epochs for feature_provider=cached — only the one-time output-size probe may call it."""
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    store = DirectoryFeatureStore(tmp_path / "features")
+    _precompute(manifest_path, store)
+
+    calls = 0
+    original_getitem = ManifestDataset.__getitem__
+
+    def counting_getitem(self: ManifestDataset, index: int) -> Sample:
+        nonlocal calls
+        calls += 1
+        return original_getitem(self, index)
+
+    monkeypatch.setattr(ManifestDataset, "__getitem__", counting_getitem)
+
+    config = _base_config(tmp_path, manifest_path, run_id="cached-no-image-run", trainer=TrainerConfig(max_epochs=2))
+    result = run_training(config, store=store)
+
+    assert result.final_train_state["epoch"] == 2
+    assert calls == 1  # only the one-time output-size probe — never per-batch, per-epoch
 
 
 def test_run_training_with_online_feature_provider_needs_no_precomputed_store(tmp_path: Path) -> None:
@@ -472,6 +500,10 @@ def test_run_training_rejects_unknown_feature_provider(tmp_path: Path) -> None:
         ({"num_workers": -1}, "num_workers must be non-negative"),
         ({"prefetch_factor": 1}, "prefetch_factor=1 requires num_workers > 0"),
         ({"num_workers": 2, "prefetch_factor": 0}, "prefetch_factor must be positive"),
+        ({"store_type": "bogus"}, "unsupported store_type"),
+        ({"entries_per_shard": 0}, "entries_per_shard must be positive"),
+        ({"feature_read_workers": 0}, "feature_read_workers must be positive"),
+        ({"device": "not-a-real-device"}, "invalid device"),
         ({"trainer": TrainerConfig(max_epochs=0)}, "trainer.max_epochs must be positive"),
         ({"checkpoint_top_k": -1}, "checkpoint_top_k must be non-negative"),
     ],
@@ -485,6 +517,44 @@ def test_run_training_rejects_invalid_numeric_config(
 
     with pytest.raises(ValueError, match=message):
         run_training(config, store=store)
+
+
+@pytest.mark.skipif(torch.cuda.is_available(), reason="requires a CPU-only machine")
+def test_run_training_rejects_cuda_device_when_cuda_is_unavailable(tmp_path: Path) -> None:
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    store = DirectoryFeatureStore(tmp_path / "features")
+    config = _base_config(tmp_path, manifest_path, run_id="no-cuda-run", device="cuda:0")
+
+    with pytest.raises(ValueError, match="requests CUDA"):
+        run_training(config, store=store)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA-enabled machine")
+def test_run_training_rejects_out_of_range_cuda_index(tmp_path: Path) -> None:
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    store = DirectoryFeatureStore(tmp_path / "features")
+    out_of_range = torch.cuda.device_count()
+    config = _base_config(tmp_path, manifest_path, run_id="oor-cuda-run", device=f"cuda:{out_of_range}")
+
+    with pytest.raises(ValueError, match="only has"):
+        run_training(config, store=store)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA-enabled machine")
+def test_run_training_moves_the_decoder_to_the_configured_cuda_device(tmp_path: Path) -> None:
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    store = DirectoryFeatureStore(tmp_path / "features")
+    _precompute(manifest_path, store)
+    config = _base_config(
+        tmp_path,
+        manifest_path,
+        run_id="cuda-run",
+        feature_provider="cached",
+        device="cuda:0",
+        trainer=TrainerConfig(max_epochs=1),
+    )
+
+    run_training(config, store=store)
 
 
 def test_run_training_rejects_an_empty_training_split(tmp_path: Path) -> None:

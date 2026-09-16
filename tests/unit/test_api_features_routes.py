@@ -126,3 +126,45 @@ def test_build_rejects_a_manifest_path_that_escapes_the_api_root_with_dotdot(tmp
 
     assert response.status_code == 400
     assert "manifest_path" in response.json()["detail"]
+
+
+def test_build_with_sharded_store_type_builds_a_sharded_store(tmp_path: Path) -> None:
+    client = _client()
+    manifest_path = build_manifest(tmp_path)
+    store_path = tmp_path / "features"
+
+    response = client.post(
+        "/features/build",
+        json={
+            "manifest_path": str(manifest_path),
+            "store": str(store_path),
+            "store_type": "sharded",
+            "entries_per_shard": 2,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["computed"] == 4
+    assert (store_path / "shard_index.json").is_file()
+
+
+def test_verify_and_clean_accept_store_type_sharded(tmp_path: Path) -> None:
+    client = _client()
+    manifest_path = build_manifest(tmp_path)
+    store_path = tmp_path / "features"
+    client.post(
+        "/features/build",
+        json={"manifest_path": str(manifest_path), "store": str(store_path), "store_type": "sharded"},
+    )
+
+    verify_response = client.post("/features/verify", json={"store": str(store_path), "store_type": "sharded"})
+    assert verify_response.status_code == 200
+    assert verify_response.json()["is_valid"] is True
+
+    clean_response = client.post("/features/clean", json={"store": str(store_path), "store_type": "sharded"})
+    assert clean_response.status_code == 200
+    assert clean_response.json()["removed"] == []
+
+    inspect_response = client.get("/features/inspect", params={"store": str(store_path), "store_type": "sharded"})
+    assert inspect_response.status_code == 200
+    assert inspect_response.json()["total_entries"] == 4

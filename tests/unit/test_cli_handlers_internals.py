@@ -52,6 +52,8 @@ def test_features_build_reports_failure_and_exits_nonzero(
     args = argparse.Namespace(
         manifest=str(manifest_path),
         store=str(tmp_path / "features"),
+        store_type="directory",
+        entries_per_shard=1000,
         augmentation_config=None,
         seed=0,
         base_url=None,
@@ -81,7 +83,9 @@ def test_features_clean_lists_removed_files(tmp_path: Path, capsys: pytest.Captu
     )
     (tmp_path / "key1.json").unlink()  # simulate an interrupted write -> orphaned tensor file
 
-    exit_code = handlers.features_clean(argparse.Namespace(store=str(tmp_path)))
+    exit_code = handlers.features_clean(
+        argparse.Namespace(store=str(tmp_path), store_type="directory", entries_per_shard=1000)
+    )
 
     assert exit_code == 0
     out = capsys.readouterr().out

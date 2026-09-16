@@ -377,6 +377,86 @@ def test_features_clean_reports_no_removals_for_a_clean_store(
     assert "removed 0 file(s)" in capsys.readouterr().out
 
 
+def test_features_build_with_sharded_store_type_builds_a_sharded_store(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    manifest_path = build_manifest(tmp_path)
+    store_path = tmp_path / "features"
+
+    exit_code = main(
+        [
+            "features",
+            "build",
+            "--manifest",
+            str(manifest_path),
+            "--store",
+            str(store_path),
+            "--store-type",
+            "sharded",
+            "--entries-per-shard",
+            "2",
+        ]
+    )
+
+    assert exit_code == 0
+    assert "computed=4" in capsys.readouterr().out
+    assert (store_path / "shard_index.json").is_file()  # ShardedFeatureStore, not one file per sample
+
+
+def test_features_migrate_copies_a_directory_store_into_a_sharded_store(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    manifest_path = build_manifest(tmp_path)
+    source_path = tmp_path / "features"
+    main(["features", "build", "--manifest", str(manifest_path), "--store", str(source_path)])
+    capsys.readouterr()
+    dest_path = tmp_path / "features-sharded"
+
+    exit_code = main(
+        [
+            "features",
+            "migrate",
+            "--source",
+            str(source_path),
+            "--source-type",
+            "directory",
+            "--dest",
+            str(dest_path),
+            "--dest-type",
+            "sharded",
+        ]
+    )
+
+    assert exit_code == 0
+    assert "migrated=4 skipped=0 total=4" in capsys.readouterr().out
+    assert (dest_path / "shard_index.json").is_file()
+
+
+def test_features_migrate_is_resumable(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    manifest_path = build_manifest(tmp_path)
+    source_path = tmp_path / "features"
+    main(["features", "build", "--manifest", str(manifest_path), "--store", str(source_path)])
+    capsys.readouterr()
+    dest_path = tmp_path / "features-sharded"
+    migrate_args = [
+        "features",
+        "migrate",
+        "--source",
+        str(source_path),
+        "--dest",
+        str(dest_path),
+        "--dest-type",
+        "sharded",
+    ]
+    main(migrate_args)
+    capsys.readouterr()
+
+    exit_code = main(migrate_args)
+
+    assert exit_code == 0
+    assert "migrated=0 skipped=4 total=4" in capsys.readouterr().out
+
+
 def test_evaluate_reports_metrics(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     manifest_path, store_path, checkpoint_path = _build_features_and_train_via_cli(tmp_path, capsys)
 

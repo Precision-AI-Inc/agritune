@@ -3,3 +3,4 @@
 name: aspp
 hidden_dim: 128
 atrous_rates: [6, 12, 18]
+num_layers: 1                          # stacked 1x1 conv + ReLU blocks in the post-fusion projection

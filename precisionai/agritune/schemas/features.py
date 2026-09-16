@@ -9,7 +9,7 @@ image — the real encoder is served behind an API where all four vary by model 
 """
 
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import torch
@@ -145,6 +145,39 @@ class EncoderFeatures:
     def batch_size(self) -> int:
         """Return the batch size ``B``."""
         return self.patch_tokens.shape[0]
+
+    def to(self, device: torch.device | str, *, non_blocking: bool = False) -> "EncoderFeatures":
+        """Return a copy with every tensor field moved to ``device``.
+
+        ``patch_tokens``, ``cls_tokens``, and ``valid_patch_mask`` are the only fields a decoder
+        ever computes with, so a decoder on ``device`` needs all three there too; ``patch_grid`` is
+        moved as well purely for consistency (nothing prevents a decoder from indexing into it
+        directly). ``image_sizes``/``encoder_model``/``encoder_revision``/``metadata`` are plain
+        Python values, unaffected.
+
+        Parameters
+        ----------
+        device : torch.device | str
+            Target device (e.g. ``torch.device("cuda:3")`` or ``"cuda:3"``).
+        non_blocking : bool, optional
+            Passed through to every tensor's own ``.to()`` — only actually asynchronous when the
+            source tensor is in pinned host memory and the target is a CUDA device.
+
+        Returns
+        -------
+        EncoderFeatures
+        """
+        return replace(
+            self,
+            patch_tokens=self.patch_tokens.to(device, non_blocking=non_blocking),
+            cls_tokens=self.cls_tokens.to(device, non_blocking=non_blocking) if self.cls_tokens is not None else None,
+            patch_grid=self.patch_grid.to(device, non_blocking=non_blocking),
+            valid_patch_mask=(
+                self.valid_patch_mask.to(device, non_blocking=non_blocking)
+                if self.valid_patch_mask is not None
+                else None
+            ),
+        )
 
     def patch_grid_hw(self, index: int) -> tuple[int, int]:
         """Return the ``(H, W)`` patch grid for one sample in the batch.

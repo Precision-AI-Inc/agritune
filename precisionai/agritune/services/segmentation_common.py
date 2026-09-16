@@ -24,6 +24,7 @@ from precisionai.agritune.augmentations.image.pipeline import (
     GeometricConfig,
     ImageAugmentationPipeline,
     prepare_sample,
+    prepare_target_only,
 )
 from precisionai.agritune.data.dataset import ManifestDataset
 from precisionai.agritune.data.manifest import ManifestRow, load_manifest
@@ -139,6 +140,7 @@ class _ResizedBatches:
         num_workers: int = 0,
         pin_memory: bool = False,
         prefetch_factor: int | None = None,
+        load_images: bool = True,
     ) -> None:
         self._dataset = dataset
         self._batch_size = batch_size
@@ -151,15 +153,25 @@ class _ResizedBatches:
         self._num_workers = num_workers
         self._pin_memory = pin_memory
         self._prefetch_factor = prefetch_factor
+        self._load_images = load_images
 
     def _item(self, index: int) -> tuple[PreparedSample, torch.Tensor]:
-        sample = self._dataset[index]
-        if self._resize_pipeline is not None:
-            sample = self._resize_pipeline.apply(sample, seed=0)
-        return (
-            PreparedSample(sample_id=sample.sample_id, image=sample.image, target=None),
-            mask_to_target_tensor(sample.target),
+        if self._load_images:
+            sample = self._dataset[index]
+            if self._resize_pipeline is not None:
+                sample = self._resize_pipeline.apply(sample, seed=0)
+            return (
+                PreparedSample(sample_id=sample.sample_id, image=sample.image, target=None),
+                mask_to_target_tensor(sample.target),
+            )
+
+        sample = self._dataset.load_target(index)
+        target = (
+            sample.target
+            if self._resize_pipeline is None
+            else self._resize_pipeline.apply_to_mask(sample.target, seed=0)[0]
         )
+        return PreparedSample(sample_id=sample.sample_id, image=None, target=None), mask_to_target_tensor(target)
 
     def __iter__(self) -> Iterator[TrainingBatch]:
         loader = _training_batch_loader(
@@ -182,6 +194,7 @@ def build_training_batches(
     num_workers: int = 0,
     pin_memory: bool = False,
     prefetch_factor: int | None = None,
+    load_images: bool = True,
 ) -> Iterable[TrainingBatch]:
     """Return a :class:`TrainingBatch` iterable, chunked to at most ``batch_size`` samples.
 
@@ -222,6 +235,13 @@ def build_training_batches(
         ``batch_size`` it is worth capping explicitly (e.g. ``1``) rather than relying on
         ``DataLoader``'s own default of ``2`` — a high ``num_workers`` combined with that default
         can buffer enough whole batches at once to exhaust memory.
+    load_images : bool, optional
+        ``False`` skips decoding the image entirely — only the mask is read from disk, resized via
+        :meth:`~precisionai.agritune.augmentations.image.pipeline.ImageAugmentationPipeline.apply_to_mask`
+        (rather than :meth:`~....ImageAugmentationPipeline.apply`) — for ``feature_provider:
+        cached``, which never consults ``TrainingBatch.samples[i].image`` (the encoder features are
+        already computed). Every ``PreparedSample.image`` is ``None`` in the returned batches.
+        Never set this for ``online``/``hybrid``, which do need the real image.
     """
     return _ResizedBatches(
         dataset,
@@ -231,6 +251,7 @@ def build_training_batches(
         num_workers=num_workers,
         pin_memory=pin_memory,
         prefetch_factor=prefetch_factor,
+        load_images=load_images,
     )
 
 
@@ -250,6 +271,7 @@ class _StaticAugmentedBatches:
         num_workers: int = 0,
         pin_memory: bool = False,
         prefetch_factor: int | None = None,
+        load_images: bool = True,
     ) -> None:
         self._dataset = dataset
         self._pipeline = pipeline
@@ -261,23 +283,39 @@ class _StaticAugmentedBatches:
         self._num_workers = num_workers
         self._pin_memory = pin_memory
         self._prefetch_factor = prefetch_factor
+        self._load_images = load_images
 
     def _item(self, index: int) -> tuple[PreparedSample, torch.Tensor]:
-        prepared = prepare_sample(
-            self._dataset[index],
+        if self._load_images:
+            prepared = prepare_sample(
+                self._dataset[index],
+                mode=self._mode,
+                pipeline=self._pipeline,
+                global_seed=self._global_seed,
+                variant=self._variant,
+            )
+            return (
+                PreparedSample(
+                    sample_id=prepared.sample_id,
+                    image=prepared.image,
+                    target=None,
+                    augmentation_metadata=prepared.augmentation_metadata,
+                ),
+                mask_to_target_tensor(prepared.target),
+            )
+
+        sample = self._dataset.load_target(index)
+        target, record = prepare_target_only(
+            sample.target,
+            sample_id=sample.sample_id,
             mode=self._mode,
             pipeline=self._pipeline,
             global_seed=self._global_seed,
             variant=self._variant,
         )
         return (
-            PreparedSample(
-                sample_id=prepared.sample_id,
-                image=prepared.image,
-                target=None,
-                augmentation_metadata=prepared.augmentation_metadata,
-            ),
-            mask_to_target_tensor(prepared.target),
+            PreparedSample(sample_id=sample.sample_id, image=None, target=None, augmentation_metadata=record),
+            mask_to_target_tensor(target),
         )
 
     def __iter__(self) -> Iterator[TrainingBatch]:
@@ -304,6 +342,7 @@ def build_static_augmented_batches(
     num_workers: int = 0,
     pin_memory: bool = False,
     prefetch_factor: int | None = None,
+    load_images: bool = True,
 ) -> Iterable[TrainingBatch]:
     """Return a batches iterable applying a fixed (non-epoch-varying) augmentation pass.
 
@@ -350,6 +389,16 @@ def build_static_augmented_batches(
         ``batch_size`` it is worth capping explicitly (e.g. ``1``) rather than relying on
         ``DataLoader``'s own default of ``2`` — a high ``num_workers`` combined with that default
         can buffer enough whole batches at once to exhaust memory.
+    load_images : bool, optional
+        ``False`` skips decoding the image entirely — only the mask is read from disk and
+        augmented via
+        :meth:`~precisionai.agritune.augmentations.image.pipeline.ImageAugmentationPipeline.apply_to_mask`,
+        which reproduces the exact same :class:`~precisionai.agritune.schemas.augmentation.AugmentationRecord`
+        (and thus cache key) ``mode is AugmentationMode.OFFLINE`` would have derived from the real
+        image, so ``feature_provider: cached`` lookups still hit — see
+        :func:`~precisionai.agritune.augmentations.image.pipeline.prepare_target_only`. Every
+        ``PreparedSample.image`` is ``None`` in the returned batches. Must stay ``True`` for
+        ``feature_provider: hybrid``, which needs the real image to encode fresh on a cache miss.
 
     Returns
     -------
@@ -366,6 +415,7 @@ def build_static_augmented_batches(
         num_workers=num_workers,
         pin_memory=pin_memory,
         prefetch_factor=prefetch_factor,
+        load_images=load_images,
     )
 
 
@@ -602,9 +652,19 @@ def build_image_hash_fn(manifest_path: str) -> Callable[[PreparedSample], str]:
 
 
 def build_cached_feature_provider(
-    manifest_path: str, *, store: FeatureStore, encoder_fingerprint: EncoderFingerprint
+    manifest_path: str,
+    *,
+    store: FeatureStore,
+    encoder_fingerprint: EncoderFingerprint,
+    max_read_workers: int | None = None,
 ) -> tuple[CachedFeatureProvider, list[ManifestRow]]:
     """Build a :class:`CachedFeatureProvider` keyed identically to ``agritune features build``.
+
+    Parameters
+    ----------
+    max_read_workers : int | None, optional
+        Forwarded to :class:`~precisionai.agritune.features.provider.CachedFeatureProvider`;
+        ``None`` keeps its own default.
 
     Returns
     -------
@@ -612,7 +672,8 @@ def build_cached_feature_provider(
         The provider, plus the parsed manifest rows (callers typically need these for splitting).
     """
     rows = load_manifest(manifest_path)
+    kwargs: dict[str, Any] = {} if max_read_workers is None else {"max_read_workers": max_read_workers}
     provider = CachedFeatureProvider(
-        store, encoder_fingerprint=encoder_fingerprint, image_hash_fn=build_image_hash_fn(manifest_path)
+        store, encoder_fingerprint=encoder_fingerprint, image_hash_fn=build_image_hash_fn(manifest_path), **kwargs
     )
     return provider, rows

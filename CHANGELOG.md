@@ -27,9 +27,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Pyright optional-palette subscript in `colorize_predictions` and live-test API-key narrowing
   after `pytest.skip`.
+- `SegmentationMetric.update` now follows `outputs`/`targets` onto whatever device they're
+  actually on (its confusion-matrix accumulator used to stay fixed on CPU, raising a
+  device-mismatch error the first time `Trainer`/`evaluate()` moved a batch to CUDA).
+- Feature-space augmentation (`augmentations.feature.transforms`) now moves every random
+  mask/noise tensor it draws onto the same device as the features it perturbs, instead of
+  leaving it on the CPU-based checkpointed RNG's device — the same class of device-mismatch bug,
+  triggered whenever `feature_augmentation` is enabled on a CUDA training run.
 
 ### Added
 
+- `TrainingRunConfig.device` (`"cpu"`, `"cuda"`, or `"cuda:N"`): the decoder and every batch's
+  features/targets now actually move to the configured device before `forward`/`compute_loss`
+  (previously nothing in the training pipeline ever called `.to()`, so `trainer.precision: fp16`
+  silently never engaged CUDA's gradient scaler). Rejected up front via a new
+  `_validate_device_config` if it names a CUDA device that is unavailable or out of range for the
+  machine's GPU count — never a silent fallback to CPU. Added `EncoderFeatures.to(device)` and a
+  `device` parameter on `evaluate()` to support this.
+- `TrainingRunConfig.feature_read_workers`: exposes `CachedFeatureProvider`'s internal read
+  thread-pool size (previously a fixed constant) so it can be tuned independently of the
+  `DataLoader`'s `num_workers` — the dominant per-batch cost once `feature_provider: cached` skips
+  image loading entirely.
+- `precisionai.agritune.training.prefetch.PrefetchingFeatureLoader`: overlaps one batch's feature
+  fetch (a `FeatureProvider.get_features` call — a disk/store read for `cached`/`hybrid`) with the
+  previous batch's model compute in a single background thread, wired into both `Trainer`'s
+  training loop and `evaluate()`, so the GPU is no longer idle waiting on a synchronous feature
+  read every batch.
 - Info/debug/warning logging across previously-silent modules (services, encoder, evaluator),
   plus `tqdm` progress bars over every long-running loop (training/validation batches,
   evaluation, prediction, feature precompute, encoder benchmarking, and the CWFID/PhenoBench prep

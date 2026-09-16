@@ -19,8 +19,9 @@ from precisionai.agritune.cli.config import load_augmentation_selection, load_tr
 from precisionai.agritune.features.integrity import verify_store
 from precisionai.agritune.features.keys import EncoderFingerprint
 from precisionai.agritune.features.manifest import FeatureManifest
+from precisionai.agritune.features.migrate import MigrationReport, migrate_store
 from precisionai.agritune.features.precompute import PrecomputeStats
-from precisionai.agritune.features.store import DirectoryFeatureStore
+from precisionai.agritune.features.store import build_feature_store
 from precisionai.agritune.logging import get_logger, redact_text
 from precisionai.agritune.schemas.protocols import EncoderBackend
 from precisionai.agritune.services.benchmark_service import run_benchmark
@@ -99,7 +100,7 @@ def _build_encoder(args: argparse.Namespace) -> tuple[EncoderBackend, EncoderFin
 def features_build(args: argparse.Namespace) -> int:
     """Handle ``agritune features build``."""
     logger.debug("dispatching features build: manifest=%s store=%s", args.manifest, args.store)
-    store = DirectoryFeatureStore(args.store)
+    store = build_feature_store(args.store_type, args.store, entries_per_shard=args.entries_per_shard)
     encoder, fingerprint = _build_encoder(args)
     augmentation = load_augmentation_selection(args.augmentation_config)
     pipeline = ImageAugmentationPipeline(
@@ -140,7 +141,7 @@ def features_build(args: argparse.Namespace) -> int:
 def features_verify(args: argparse.Namespace) -> int:
     """Handle ``agritune features verify``."""
     logger.debug("dispatching features verify: store=%s", args.store)
-    store = DirectoryFeatureStore(args.store)
+    store = build_feature_store(args.store_type, args.store, entries_per_shard=args.entries_per_shard)
     report = verify_store(store)
     if report.is_valid:
         print(f"OK: {report.total} entries verified.")
@@ -154,7 +155,7 @@ def features_verify(args: argparse.Namespace) -> int:
 def features_inspect(args: argparse.Namespace) -> int:
     """Handle ``agritune features inspect``."""
     logger.debug("dispatching features inspect: store=%s", args.store)
-    store = DirectoryFeatureStore(args.store)
+    store = build_feature_store(args.store_type, args.store, entries_per_shard=args.entries_per_shard)
     manifest = FeatureManifest.from_store(store)
     result = {
         "total_entries": len(manifest),
@@ -168,7 +169,7 @@ def features_inspect(args: argparse.Namespace) -> int:
 def features_clean(args: argparse.Namespace) -> int:
     """Handle ``agritune features clean``."""
     logger.debug("dispatching features clean: store=%s", args.store)
-    store = DirectoryFeatureStore(args.store)
+    store = build_feature_store(args.store_type, args.store, entries_per_shard=args.entries_per_shard)
     removed = store.clean()
     print(f"removed {len(removed)} file(s)")
     for name in removed:
@@ -176,11 +177,33 @@ def features_clean(args: argparse.Namespace) -> int:
     return 0
 
 
+def features_migrate(args: argparse.Namespace) -> int:
+    """Handle ``agritune features migrate``."""
+    logger.debug("dispatching features migrate: source=%s dest=%s", args.source, args.dest)
+    source = build_feature_store(args.source_type, args.source)
+    dest = build_feature_store(args.dest_type, args.dest, entries_per_shard=args.dest_entries_per_shard)
+
+    bar = tqdm(desc="migrating features", unit="sample", file=sys.stderr)
+
+    def on_progress(report: MigrationReport) -> None:
+        if bar.total is None:
+            bar.reset(total=report.total)
+        bar.set_postfix(migrated=report.migrated, skipped=report.skipped)
+        bar.update(1)
+
+    try:
+        report = migrate_store(source, dest, on_progress=on_progress)
+    finally:
+        bar.close()
+    print(f"migrated={report.migrated} skipped={report.skipped} total={report.total}")
+    return 0
+
+
 def train(args: argparse.Namespace) -> int:
     """Handle ``agritune train``."""
     logger.debug("dispatching train: config=%s overrides=%s", args.config, redact_text(repr(args.overrides)))
     config = load_training_run_config(args.config, args.overrides)
-    store = DirectoryFeatureStore(config.feature_store_dir)
+    store = build_feature_store(config.store_type, config.feature_store_dir, entries_per_shard=config.entries_per_shard)
     result = run_training(config, store=store, show_progress=True)
     print(f"run directory: {result.run_directory.path}")
     print(f"final epoch: {result.final_train_state['epoch']}")
@@ -192,7 +215,7 @@ def train(args: argparse.Namespace) -> int:
 def evaluate(args: argparse.Namespace) -> int:
     """Handle ``agritune evaluate``."""
     logger.debug("dispatching evaluate: manifest=%s checkpoint=%s", args.manifest, args.checkpoint)
-    store = DirectoryFeatureStore(args.store)
+    store = build_feature_store(args.store_type, args.store, entries_per_shard=args.entries_per_shard)
     augmentation = load_augmentation_selection(args.augmentation_config)
     pipeline = ImageAugmentationPipeline(
         AugmentationPipelineConfig(geometric=augmentation.geometric, photometric=augmentation.photometric)
@@ -228,7 +251,7 @@ def evaluate(args: argparse.Namespace) -> int:
 def predict(args: argparse.Namespace) -> int:
     """Handle ``agritune predict``."""
     logger.debug("dispatching predict: manifest=%s checkpoint=%s", args.manifest, args.checkpoint)
-    store = DirectoryFeatureStore(args.store)
+    store = build_feature_store(args.store_type, args.store, entries_per_shard=args.entries_per_shard)
     augmentation = load_augmentation_selection(args.augmentation_config)
     pipeline = ImageAugmentationPipeline(
         AugmentationPipelineConfig(geometric=augmentation.geometric, photometric=augmentation.photometric)

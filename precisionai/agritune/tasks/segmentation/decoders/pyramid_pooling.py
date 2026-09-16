@@ -37,6 +37,13 @@ class PyramidPoolingDecoder(nn.Module):
         Channel width of the fused feature map (before the final classifier).
     pool_sizes : Sequence[int], optional
         Adaptive-average-pool output sizes (each pools the grid to a ``size x size`` bin map).
+    num_layers : int, optional
+        Number of stacked 3x3 conv + ReLU blocks fusing the pooled features together.
+
+    Raises
+    ------
+    ValueError
+        If ``num_layers`` is not positive.
     """
 
     def __init__(
@@ -47,8 +54,11 @@ class PyramidPoolingDecoder(nn.Module):
         output_size: tuple[int, int],
         hidden_dim: int = 128,
         pool_sizes: Sequence[int] = (1, 2, 3, 6),
+        num_layers: int = 1,
     ) -> None:
         super().__init__()
+        if num_layers < 1:
+            raise ValueError(f"num_layers must be positive; got {num_layers}")
         self.output_size = output_size
         self.pool_sizes = tuple(pool_sizes)
         pool_channels = max(hidden_dim // max(len(self.pool_sizes), 1), 1)
@@ -65,9 +75,13 @@ class PyramidPoolingDecoder(nn.Module):
         )
 
         fused_channels = patch_dim + pool_channels * len(self.pool_sizes)
-        self.fuse = nn.Sequential(
-            nn.Conv2d(fused_channels, hidden_dim, kernel_size=3, padding=1), nn.ReLU(inplace=True)
-        )
+        fuse_layers: list[nn.Module] = []
+        in_channels = fused_channels
+        for _ in range(num_layers):
+            fuse_layers.append(nn.Conv2d(in_channels, hidden_dim, kernel_size=3, padding=1))
+            fuse_layers.append(nn.ReLU(inplace=True))
+            in_channels = hidden_dim
+        self.fuse = nn.Sequential(*fuse_layers)
         self.classifier = nn.Conv2d(hidden_dim, num_classes, kernel_size=1)
 
     def forward(self, features: EncoderFeatures) -> torch.Tensor:
