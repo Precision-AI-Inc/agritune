@@ -24,7 +24,7 @@ from precisionai.agritune.tasks.segmentation.decoders.mlp_probe import MLPProbeD
 from precisionai.agritune.tasks.segmentation.losses import SegmentationLoss, SegmentationLossConfig
 from precisionai.agritune.tasks.segmentation.metrics import SegmentationMetric
 from precisionai.agritune.tasks.segmentation.task import SegmentationTask
-from precisionai.agritune.training.checkpointing import CheckpointManager
+from precisionai.agritune.training.checkpointing import CheckpointManager, CheckpointMismatchError
 from precisionai.agritune.training.distributed import DistributedContext
 from precisionai.agritune.training.evaluator import TrainingBatch
 from precisionai.agritune.training.state import set_deterministic_seed
@@ -111,6 +111,8 @@ def _build_trainer(
     feature_augmentation: FeatureAugmentation | None = None,
     show_progress: bool = False,
     distributed: DistributedContext | None = None,
+    fingerprints: dict[str, str] | None = None,
+    strict_resume: bool = True,
 ) -> tuple[Trainer, MLPProbeDecoder]:
     set_deterministic_seed(seed)  # ensures identical decoder initialization across builds
     decoder = MLPProbeDecoder(patch_dim=4, num_classes=2, output_size=(2, 2))
@@ -126,7 +128,8 @@ def _build_trainer(
         grad_clip_norm=grad_clip_norm,
         checkpoint_every_n_steps=checkpoint_every_n_steps,
         early_stopping_patience=early_stopping_patience,
-        fingerprints={"encoder": "deterministic-fake"},
+        fingerprints=fingerprints if fingerprints is not None else {"encoder": "deterministic-fake"},
+        strict_resume=strict_resume,
     )
     trainer = Trainer(
         task=task,
@@ -400,6 +403,37 @@ def test_exact_checkpoint_resume(tmp_path: Path) -> None:
         continuous_decoder.parameters(), resumed_decoder.parameters(), strict=True
     ):
         assert torch.allclose(continuous_param, resumed_param, atol=1e-6)
+
+
+def test_resume_raises_on_fingerprint_mismatch_by_default(tmp_path: Path) -> None:
+    batch = TrainingBatch(samples=[_sample("a"), _sample("b")], targets=torch.randint(0, 2, (2, 2, 2)))
+    manager = CheckpointManager(tmp_path)
+    first, _ = _build_trainer(max_epochs=1, seed=7, checkpoint_manager=manager, fingerprints={"encoder": "fake-v1"})
+    first.fit([batch])
+
+    with pytest.raises(CheckpointMismatchError, match="fingerprint mismatch"):
+        _build_trainer(max_epochs=2, seed=7, checkpoint_manager=manager, fingerprints={"encoder": "fake-v2"})
+
+
+def test_resume_with_strict_resume_false_warns_and_resumes_anyway(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    batch = TrainingBatch(samples=[_sample("a"), _sample("b")], targets=torch.randint(0, 2, (2, 2, 2)))
+    manager = CheckpointManager(tmp_path)
+    first, _ = _build_trainer(max_epochs=1, seed=7, checkpoint_manager=manager, fingerprints={"encoder": "fake-v1"})
+    first.fit([batch])
+
+    with caplog.at_level("WARNING"):
+        resumed, _ = _build_trainer(
+            max_epochs=2,
+            seed=7,
+            checkpoint_manager=manager,
+            fingerprints={"encoder": "fake-v2"},
+            strict_resume=False,
+        )
+    assert resumed._resumed
+    assert resumed.state.epoch == first.state.epoch
+    assert "fingerprint mismatch" in caplog.text
 
 
 def test_mid_epoch_checkpoint_resume_skips_already_consumed_batches(tmp_path: Path) -> None:

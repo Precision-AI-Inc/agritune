@@ -151,6 +151,9 @@ trainer:
   seed: 0                                # defaults to the top-level seed when omitted
   early_stopping_patience: null          # stop after this many validation passes with no improvement
   checkpoint_every_n_steps: null         # also checkpoint periodically, in addition to end-of-epoch/best
+  strict_resume: true                    # false: log a warning instead of raising when a checkpoint's
+                                          # fingerprint doesn't match on resume, and resume anyway (only
+                                          # after confirming the mismatch is benign)
 
 # --- Loss ------------------------------------------------------------------------
 loss:

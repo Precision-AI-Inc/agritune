@@ -123,6 +123,7 @@ def _critical_config(config: "TrainingRunConfig") -> dict[str, Any]:
     trainer = _jsonable(config.trainer)
     trainer.pop("max_epochs", None)
     trainer.pop("fingerprints", None)
+    trainer.pop("strict_resume", None)
     return {
         "num_classes": config.num_classes,
         "feature_provider": config.feature_provider,
@@ -164,6 +165,53 @@ def _original_config(config: "TrainingRunConfig") -> dict[str, Any]:
                 overrides.append(override)
         return {"config": original, "overrides": overrides}
     return original
+
+
+def _provenance_kwargs(
+    config: "TrainingRunConfig",
+    *,
+    split: SplitAssignment,
+    dataset_fingerprint: str,
+    split_fingerprint: str,
+    encoder_fingerprint: str,
+    critical_fingerprints: dict[str, str],
+    feature_cache_fingerprint: str,
+    epoch: int,
+    global_optimizer_step: int,
+    best_metric: float | None,
+) -> dict[str, Any]:
+    """Build the kwargs for :meth:`RunDirectory.write_provenance`.
+
+    Shared by the pre-``fit()`` and post-``fit()`` provenance writes in :func:`run_training` — the
+    same fingerprints and dataset/encoder metadata, only ``run_info``'s progress fields differ.
+    """
+    return {
+        "config_original": _original_config(config),
+        "config_resolved": _resolved_config(config),
+        "run_info": {
+            "seed": config.seed,
+            "epoch": epoch,
+            "global_optimizer_step": global_optimizer_step,
+            "best_metric": best_metric,
+            "config_fingerprint": critical_fingerprints["config"],
+            "dataset_fingerprint": dataset_fingerprint,
+            "split_fingerprint": split_fingerprint,
+            "encoder_fingerprint": encoder_fingerprint,
+            "feature_cache_fingerprint": feature_cache_fingerprint,
+        },
+        "dataset_info": {
+            "manifest_path": config.manifest_path,
+            "fingerprint": dataset_fingerprint,
+            "split_fingerprint": split_fingerprint,
+            "split": asdict(split),
+        },
+        "encoder_info": {
+            "model": config.encoder_fingerprint.model,
+            "revision": config.encoder_fingerprint.revision,
+            "preprocessing": config.encoder_fingerprint.preprocessing,
+            "fingerprint": encoder_fingerprint,
+        },
+    }
 
 
 @dataclass
@@ -561,6 +609,30 @@ def run_training(
         "encoder": encoder_fingerprint,
     }
 
+    run_dir = RunDirectory(config.run_root, config.run_id)
+    checkpoint_manager = CheckpointManager(run_dir.checkpoints_dir, top_k=config.checkpoint_top_k)
+    tracker = build_trackers(config.tracking, run_dir=run_dir, run_id=config.run_id)
+
+    # Written before trainer.fit() ever runs, not only after it succeeds: a run this crashes or is
+    # killed mid-training must still be reconstructable from runs/<run_id>/ alone (see CLAUDE.md's
+    # reproducibility requirement) — including for diagnosing a CheckpointMismatchError on resume,
+    # which otherwise has no record of what config a still-existing checkpoint was fingerprinted
+    # against. The post-fit() write below overwrites this with final epoch/step/best_metric.
+    run_dir.write_provenance(
+        **_provenance_kwargs(
+            config,
+            split=split,
+            dataset_fingerprint=dataset_fingerprint,
+            split_fingerprint=split_fingerprint,
+            encoder_fingerprint=encoder_fingerprint,
+            critical_fingerprints=critical_fingerprints,
+            feature_cache_fingerprint=_stable_fingerprint(sorted(store.list_keys())),
+            epoch=0,
+            global_optimizer_step=0,
+            best_metric=None,
+        )
+    )
+
     train_dataset = ManifestDataset(config.manifest_path, sample_ids=split.train)
     val_dataset = ManifestDataset(config.manifest_path, sample_ids=split.val or split.train)
 
@@ -615,10 +687,6 @@ def run_training(
     optimizer = build_optimizer(decoder.parameters(), config.optimizer)
     scheduler = build_scheduler(optimizer, config.scheduler) if config.scheduler is not None else None
 
-    run_dir = RunDirectory(config.run_root, config.run_id)
-    checkpoint_manager = CheckpointManager(run_dir.checkpoints_dir, top_k=config.checkpoint_top_k)
-    tracker = build_trackers(config.tracking, run_dir=run_dir, run_id=config.run_id)
-
     trainer_config = replace(
         config.trainer,
         fingerprints={**config.trainer.fingerprints, **critical_fingerprints},
@@ -657,33 +725,19 @@ def run_training(
     finally:
         _close_tracker_and_flush_store(tracker, store)
 
-    feature_cache_fingerprint = _stable_fingerprint(sorted(store.list_keys()))
     run_dir.write_provenance(
-        config_original=_original_config(config),
-        config_resolved=_resolved_config(config),
-        run_info={
-            "seed": config.seed,
-            "epoch": trainer.state.epoch,
-            "global_optimizer_step": trainer.state.global_optimizer_step,
-            "best_metric": trainer.state.best_metric,
-            "config_fingerprint": critical_fingerprints["config"],
-            "dataset_fingerprint": dataset_fingerprint,
-            "split_fingerprint": split_fingerprint,
-            "encoder_fingerprint": encoder_fingerprint,
-            "feature_cache_fingerprint": feature_cache_fingerprint,
-        },
-        dataset_info={
-            "manifest_path": config.manifest_path,
-            "fingerprint": dataset_fingerprint,
-            "split_fingerprint": split_fingerprint,
-            "split": asdict(split),
-        },
-        encoder_info={
-            "model": config.encoder_fingerprint.model,
-            "revision": config.encoder_fingerprint.revision,
-            "preprocessing": config.encoder_fingerprint.preprocessing,
-            "fingerprint": encoder_fingerprint,
-        },
+        **_provenance_kwargs(
+            config,
+            split=split,
+            dataset_fingerprint=dataset_fingerprint,
+            split_fingerprint=split_fingerprint,
+            encoder_fingerprint=encoder_fingerprint,
+            critical_fingerprints=critical_fingerprints,
+            feature_cache_fingerprint=_stable_fingerprint(sorted(store.list_keys())),
+            epoch=trainer.state.epoch,
+            global_optimizer_step=trainer.state.global_optimizer_step,
+            best_metric=trainer.state.best_metric,
+        )
     )
 
     logger.info(

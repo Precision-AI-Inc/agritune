@@ -71,6 +71,13 @@ class TrainerConfig:
     fingerprints : dict[str, str]
         Identifies this run's configuration/dataset/encoder, stored in every checkpoint and
         checked on resume — see :class:`~precisionai.agritune.training.checkpointing.CheckpointManager`.
+    strict_resume : bool
+        Raise :class:`~precisionai.agritune.training.checkpointing.CheckpointMismatchError` (the
+        default) when a fingerprint doesn't match ``last.ckpt``'s on resume, rather than only
+        logging a warning and resuming anyway. Set ``False`` only when a mismatch has been
+        confirmed benign (e.g. an unrelated config field changed) — decoder/optimizer state is
+        still loaded as-is, so a genuine architecture/dataset change resumed this way can silently
+        produce a corrupt run.
     """
 
     max_epochs: int
@@ -81,6 +88,7 @@ class TrainerConfig:
     early_stopping_patience: int | None = None
     checkpoint_every_n_steps: int | None = None
     fingerprints: dict[str, str] = field(default_factory=dict)
+    strict_resume: bool = True
 
     def __post_init__(self) -> None:
         """Validate optimizer-step, clipping, stopping, and checkpoint intervals."""
@@ -428,7 +436,9 @@ class Trainer:
         if self.checkpoint_manager is None:  # pragma: no cover — only called when it is set
             raise RuntimeError("_resume called without a checkpoint_manager")
         checkpoint = self.checkpoint_manager.load(
-            self.checkpoint_manager.last_path, expected_fingerprints=self.config.fingerprints, strict=True
+            self.checkpoint_manager.last_path,
+            expected_fingerprints=self.config.fingerprints,
+            strict=self.config.strict_resume,
         )
         self.decoder.load_state_dict(checkpoint.decoder_state)
         self.optimizer.load_state_dict(checkpoint.optimizer_state)

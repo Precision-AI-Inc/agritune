@@ -251,6 +251,7 @@ def _config_from_dict(data: dict[str, Any]) -> TrainingRunConfig:
             seed=trainer_data.get("seed", seed),
             early_stopping_patience=trainer_data.get("early_stopping_patience"),
             checkpoint_every_n_steps=trainer_data.get("checkpoint_every_n_steps"),
+            strict_resume=trainer_data.get("strict_resume", True),
         ),
         loss=SegmentationLossConfig(**loss_data),
         val_metric_name=data.get("val_metric_name", "mean_iou"),

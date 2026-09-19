@@ -424,6 +424,82 @@ def test_resume_rejects_critical_decoder_config_change(tmp_path: Path) -> None:
         run_training(changed, store=store)
 
 
+def test_strict_resume_false_allows_resume_despite_critical_config_change(tmp_path: Path) -> None:
+    """strict_resume=False only bypasses the fingerprint *check* — it still loads the checkpoint's
+    decoder/optimizer state as-is, so this uses a benign config change (optimizer lr, no effect on
+    parameter shapes) rather than a decoder_kwargs change, which would still fail (correctly) with
+    a state_dict shape mismatch regardless of strict_resume."""
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    store = DirectoryFeatureStore(tmp_path / "features")
+    _precompute(manifest_path, store)
+    run_training(_base_config(tmp_path, manifest_path, run_id="strict-resume-off-run"), store=store)
+    changed = _base_config(
+        tmp_path,
+        manifest_path,
+        run_id="strict-resume-off-run",
+        optimizer=OptimizerConfig(name="adamw", lr=0.01),
+        trainer=TrainerConfig(max_epochs=2, strict_resume=False),
+    )
+
+    result = run_training(changed, store=store)
+
+    assert result.final_train_state["epoch"] == 2
+
+
+def test_strict_resume_flag_is_excluded_from_the_config_fingerprint(tmp_path: Path) -> None:
+    """Flipping strict_resume between runs must never itself register as a "config" mismatch —
+    it controls resume behavior, not what produced the checkpoint, mirroring why max_epochs is
+    excluded too."""
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    store = DirectoryFeatureStore(tmp_path / "features")
+    _precompute(manifest_path, store)
+    run_training(
+        _base_config(tmp_path, manifest_path, run_id="strict-resume-toggle-run", trainer=TrainerConfig(max_epochs=1)),
+        store=store,
+    )
+
+    result = run_training(
+        _base_config(
+            tmp_path,
+            manifest_path,
+            run_id="strict-resume-toggle-run",
+            trainer=TrainerConfig(max_epochs=2, strict_resume=False),
+        ),
+        store=store,
+    )
+
+    assert result.final_train_state["epoch"] == 2
+
+
+def test_run_training_writes_provenance_before_fit_so_a_crash_still_leaves_a_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test: config.resolved.yaml/run.json must exist even when trainer.fit() crashes —
+    previously write_provenance only ran after a successful fit(), so a run killed mid-training left
+    no record of what config produced its checkpoints, violating the run-directory reproducibility
+    requirement and making a later CheckpointMismatchError on resume undiagnosable."""
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    store = DirectoryFeatureStore(tmp_path / "features")
+    _precompute(manifest_path, store)
+
+    def _failing_fit(self: object, *args: object, **kwargs: object) -> None:
+        raise RuntimeError("trainer fit failed")
+
+    monkeypatch.setattr(training_service.Trainer, "fit", _failing_fit)
+
+    config = _base_config(tmp_path, manifest_path, run_id="crash-before-provenance-run")
+    with pytest.raises(RuntimeError, match="trainer fit failed"):
+        run_training(config, store=store)
+
+    run_dir = Path(config.run_root) / config.run_id
+    assert (run_dir / "config.resolved.yaml").is_file()
+    resolved = yaml.safe_load((run_dir / "config.resolved.yaml").read_text(encoding="utf-8"))
+    assert resolved["decoder_name"] == "mlp_probe"
+    run_info = yaml.safe_load((run_dir / "run.json").read_text(encoding="utf-8"))
+    assert run_info["config_fingerprint"]
+    assert run_info["epoch"] == 0
+
+
 def test_resume_rejects_dataset_content_drift(tmp_path: Path) -> None:
     manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
     store = DirectoryFeatureStore(tmp_path / "features")
