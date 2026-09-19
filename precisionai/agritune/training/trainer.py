@@ -211,7 +211,20 @@ class Trainer:
         higher_is_better : bool, optional
             Whether a larger ``val_metric_name`` value is better (true for mIoU/Dice/accuracy;
             set ``False`` for a loss-like metric).
+
+        Raises
+        ------
+        ValueError
+            If ``self.scheduler`` is a ``ReduceLROnPlateau`` but ``val_batches``/``val_metric``
+            are not both given — it is only ever stepped from a validation pass (see
+            ``_after_validation``), so it would otherwise silently never step for the entire run.
         """
+        if isinstance(self.scheduler, ReduceLROnPlateau) and (val_batches is None or val_metric is None):
+            raise ValueError(
+                "scheduler is ReduceLROnPlateau, which only ever steps after a validation pass — "
+                "fit() must be called with both val_batches and val_metric, or the learning rate "
+                "would silently never change for the entire run"
+            )
         if not self._resumed:
             set_deterministic_seed(self.config.seed)
         for epoch in range(self.state.epoch, self.config.max_epochs):
@@ -234,11 +247,13 @@ class Trainer:
                     show_progress=self.show_progress and self.distributed.is_main_process,
                 )
                 self.last_val_metrics = metrics
-                self._after_validation(metrics, val_metric_name, higher_is_better)
-
-            self.state.epoch = epoch + 1
-            self.state.batch_in_epoch = 0
-            self._checkpoint(periodic=False, is_best=False, metric_value=None)
+                # Advances state to epoch + 1 itself (see its own docstring for why), so no
+                # further checkpoint write is needed here in this branch.
+                self._after_validation(metrics, val_metric_name, higher_is_better, next_epoch=epoch + 1)
+            else:
+                self.state.epoch = epoch + 1
+                self.state.batch_in_epoch = 0
+                self._checkpoint(periodic=False, is_best=False, metric_value=None)
 
             if self._should_stop_early():
                 logger.info("early stopping after epoch %d", epoch)
@@ -258,38 +273,38 @@ class Trainer:
         iterator = iter(batches)
         for _ in range(resume_offset):
             next(iterator, None)
-        prefetcher = PrefetchingFeatureLoader(
+        with PrefetchingFeatureLoader(
             iterator, self.feature_provider, device=self.device, non_blocking=non_blocking
-        )
-        display_batches = progress_iter(
-            prefetcher,
-            desc=f"epoch {self.state.epoch}",
-            unit="batch",
-            disable=not (self.show_progress and self.distributed.is_main_process),
-        )
-        for offset, (_, batch_features, targets) in enumerate(display_batches):
-            batch_index = resume_offset + offset
-            with self.precision.autocast():
-                features = batch_features
-                if self.feature_augmentation is not None:
-                    features = self.feature_augmentation.apply(features)
-                outputs = self.task.forward(features)
-                loss = self.task.compute_loss(outputs, targets)
-                scaled_loss = loss / self.config.accumulation_steps
+        ) as prefetcher:
+            display_batches = progress_iter(
+                prefetcher,
+                desc=f"epoch {self.state.epoch}",
+                unit="batch",
+                disable=not (self.show_progress and self.distributed.is_main_process),
+            )
+            for offset, (_, batch_features, targets) in enumerate(display_batches):
+                batch_index = resume_offset + offset
+                with self.precision.autocast():
+                    features = batch_features
+                    if self.feature_augmentation is not None:
+                        features = self.feature_augmentation.apply(features)
+                    outputs = self.task.forward(features)
+                    loss = self.task.compute_loss(outputs, targets)
+                    scaled_loss = loss / self.config.accumulation_steps
 
-            if train_metric is not None:
-                with torch.no_grad():
-                    train_metric.update(outputs, targets)
+                if train_metric is not None:
+                    with torch.no_grad():
+                        train_metric.update(outputs, targets)
 
-            self.precision.backward(scaled_loss)
-            self.state.micro_step += 1
-            self.state.batch_in_epoch = batch_index + 1
-            accumulated_steps += 1
-            last_loss_value = loss.item()
+                self.precision.backward(scaled_loss)
+                self.state.micro_step += 1
+                self.state.batch_in_epoch = batch_index + 1
+                accumulated_steps += 1
+                last_loss_value = loss.item()
 
-            if accumulated_steps == self.config.accumulation_steps:
-                self._optimizer_step(last_loss_value)
-                accumulated_steps = 0
+                if accumulated_steps == self.config.accumulation_steps:
+                    self._optimizer_step(last_loss_value)
+                    accumulated_steps = 0
 
         if accumulated_steps:
             gradient_scale = self.config.accumulation_steps / accumulated_steps
@@ -338,7 +353,18 @@ class Trainer:
             if parameter.grad is not None:
                 parameter.grad.mul_(scale)
 
-    def _after_validation(self, metrics: dict[str, float], metric_name: str, higher_is_better: bool) -> None:
+    def _after_validation(
+        self, metrics: dict[str, float], metric_name: str, higher_is_better: bool, *, next_epoch: int
+    ) -> None:
+        """Record validation results, then advance ``self.state`` to ``next_epoch`` before checkpointing.
+
+        The state must advance *before* the checkpoint write below, not after (as ``fit()``'s own
+        no-validation branch does): otherwise ``last.ckpt``/the periodic file would briefly pair a
+        stale epoch number with ``batch_in_epoch`` already equal to a full epoch's length, and a
+        crash in that window would make a resumed run silently replay a no-op epoch (see
+        ``_train_one_epoch``'s resume-skip logic). Logging above still reports the just-completed
+        epoch's number, since it reads ``self.state.epoch`` before this advances it.
+        """
         value = metrics[metric_name]
         is_best = self._is_new_best(value, higher_is_better)
         if is_best:
@@ -363,6 +389,8 @@ class Trainer:
         # CheckpointManager's top-k pruning ranks "lower is better"; negate a higher-is-better
         # metric so the best-performing validated epochs are the ones top-k retains.
         ranking_value = -value if higher_is_better else value
+        self.state.epoch = next_epoch
+        self.state.batch_in_epoch = 0
         self._checkpoint(periodic=True, is_best=is_best, metric_value=ranking_value)
 
     def _log_metrics(self, metrics: dict[str, float], *, step: int) -> None:

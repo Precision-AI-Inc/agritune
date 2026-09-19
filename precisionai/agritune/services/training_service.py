@@ -13,6 +13,7 @@ evaluate.
 
 import hashlib
 import json
+import sys
 from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from enum import Enum
 from pathlib import Path
@@ -38,7 +39,7 @@ from precisionai.agritune.features.store import FEATURE_STORE_TYPES, DirectoryFe
 from precisionai.agritune.logging import RunDirectory, get_logger, progress_iter
 from precisionai.agritune.optimization.optimizers import OptimizerConfig, build_optimizer
 from precisionai.agritune.optimization.schedulers import SchedulerConfig, build_scheduler
-from precisionai.agritune.schemas.protocols import FeatureProvider
+from precisionai.agritune.schemas.protocols import FeatureProvider, Tracker
 from precisionai.agritune.schemas.samples import PreparedSample
 from precisionai.agritune.services.encoder_selection import build_encoder
 from precisionai.agritune.services.segmentation_common import (
@@ -50,6 +51,7 @@ from precisionai.agritune.services.segmentation_common import (
     build_training_batches,
     mask_output_size,
     probe_feature_dims,
+    validate_device,
 )
 from precisionai.agritune.services.tracking_selection import TrackingSelection, build_trackers
 from precisionai.agritune.tasks.segmentation.losses import SegmentationLoss, SegmentationLossConfig
@@ -363,24 +365,7 @@ def _validate_feature_store_config(config: TrainingRunConfig) -> None:
 
 
 def _validate_device_config(config: TrainingRunConfig) -> None:
-    try:
-        device = torch.device(config.device)
-    except RuntimeError as exc:
-        raise ValueError(f"invalid device: {config.device!r} ({exc})") from exc
-    if device.type != "cuda":
-        return
-    if not torch.cuda.is_available():
-        raise ValueError(
-            f"device={config.device!r} requests CUDA, but torch.cuda.is_available() is False on this "
-            "machine — training never silently falls back to CPU"
-        )
-    device_count = torch.cuda.device_count()
-    index = device.index if device.index is not None else 0
-    if index >= device_count:
-        raise ValueError(
-            f"device={config.device!r} names GPU index {index}, but this machine only has "
-            f"{device_count} GPU(s) (0..{device_count - 1})"
-        )
+    validate_device(config.device)
 
 
 def _validate_config(config: TrainingRunConfig) -> None:
@@ -496,6 +481,28 @@ def _build_train_batches(
         pin_memory=config.pin_memory,
         prefetch_factor=config.prefetch_factor,
     )
+
+
+def _close_tracker_and_flush_store(tracker: Tracker, store: DirectoryFeatureStore | ShardedFeatureStore) -> None:
+    """Close ``tracker`` and flush ``store``, run unconditionally from ``run_training``'s ``finally``.
+
+    ``tracker.close()`` failing never masks whatever exception is already propagating from
+    ``trainer.fit()`` — it is always just logged. ``store.flush()`` gets the same treatment only
+    when ``fit()`` already failed; otherwise its own failure is a real error and must propagate
+    normally, since nothing else went wrong to explain suppressing it.
+    """
+    try:
+        tracker.close()
+    except Exception:
+        logger.exception("tracking backend failed while closing; training artifacts remain valid")
+
+    fit_already_failing = sys.exc_info()[0] is not None
+    try:
+        store.flush()
+    except Exception:
+        if not fit_already_failing:
+            raise
+        logger.exception("feature store failed to flush while trainer.fit() was already failing")
 
 
 def run_training(
@@ -648,11 +655,7 @@ def run_training(
         )
         final_val_metrics = trainer.last_val_metrics if trainer.last_val_metrics is not None else val_metric.compute()
     finally:
-        try:
-            tracker.close()
-        except Exception:
-            logger.exception("tracking backend failed while closing; training artifacts remain valid")
-        store.flush()
+        _close_tracker_and_flush_store(tracker, store)
 
     feature_cache_fingerprint = _stable_fingerprint(sorted(store.list_keys()))
     run_dir.write_provenance(

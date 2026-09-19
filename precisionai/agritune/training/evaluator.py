@@ -64,15 +64,17 @@ def evaluate(
     sample_count = 0
     resolved_device = device if device is not None else torch.device("cpu")
     non_blocking = device is not None and device.type == "cuda"
-    prefetcher = PrefetchingFeatureLoader(batches, feature_provider, device=resolved_device, non_blocking=non_blocking)
-    progress = progress_iter(prefetcher, desc="evaluate", unit="batch", disable=not show_progress)
-    with torch.no_grad():
-        for batch, features, targets in progress:
-            outputs = task.forward(features)
-            metric.update(outputs, targets)
-            batch_size = len(batch.samples)
-            loss_total += task.compute_loss(outputs, targets).item() * batch_size
-            sample_count += batch_size
+    with PrefetchingFeatureLoader(
+        batches, feature_provider, device=resolved_device, non_blocking=non_blocking
+    ) as prefetcher:
+        progress = progress_iter(prefetcher, desc="evaluate", unit="batch", disable=not show_progress)
+        with torch.no_grad():
+            for batch, features, targets in progress:
+                outputs = task.forward(features)
+                metric.update(outputs, targets)
+                batch_size = len(batch.samples)
+                loss_total += task.compute_loss(outputs, targets).item() * batch_size
+                sample_count += batch_size
 
     result = metric.compute()
     result["loss"] = loss_total / sample_count if sample_count > 0 else 0.0

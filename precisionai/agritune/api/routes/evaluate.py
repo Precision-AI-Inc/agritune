@@ -36,6 +36,7 @@ def evaluate(request: EvaluateRequest) -> EvaluateResponse:
         decoder_name=request.decoder,
         batch_size=request.batch_size,
         sample_ids=request.sample_ids,
+        device=request.device,
         loss=SegmentationLossConfig(
             name=request.loss.name,
             ignore_index=request.loss.ignore_index,

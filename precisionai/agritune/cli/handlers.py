@@ -231,6 +231,7 @@ def evaluate(args: argparse.Namespace) -> int:
         decoder_kwargs=json.loads(args.decoder_kwargs),
         batch_size=args.batch_size,
         sample_ids=args.sample_ids or None,
+        device=args.device,
         loss=SegmentationLossConfig(
             name=args.loss_name,
             ignore_index=args.loss_ignore_index,
@@ -268,6 +269,8 @@ def predict(args: argparse.Namespace) -> int:
         decoder_kwargs=json.loads(args.decoder_kwargs),
         batch_size=args.batch_size,
         sample_ids=args.sample_ids or None,
+        device=args.device,
+        resize=tuple(args.resize) if args.resize else None,
         write_overlays=args.overlays,
         overlay_alpha=args.overlay_alpha,
         augmentation_mode=augmentation.mode,

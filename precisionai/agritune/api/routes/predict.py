@@ -37,6 +37,8 @@ def predict(request: PredictRequest) -> PredictResponse:
         decoder_name=request.decoder,
         batch_size=request.batch_size,
         sample_ids=request.sample_ids,
+        device=request.device,
+        resize=request.resize,
         write_overlays=request.overlays,
         overlay_alpha=request.overlay_alpha,
     )

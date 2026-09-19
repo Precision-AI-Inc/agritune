@@ -17,6 +17,8 @@ from PIL import Image
 
 from precisionai.agritune.augmentations.image.pipeline import (
     AugmentationMode,
+    AugmentationPipelineConfig,
+    GeometricConfig,
     ImageAugmentationPipeline,
     prepare_sample,
 )
@@ -32,6 +34,7 @@ from precisionai.agritune.services.segmentation_common import (
     build_static_augmented_batches,
     mask_output_size,
     probe_feature_dims,
+    validate_device,
 )
 from precisionai.agritune.tasks.segmentation.postprocessing import logits_to_predictions
 from precisionai.agritune.tasks.segmentation.visualization import overlay_predictions_on_image
@@ -64,6 +67,18 @@ class PredictionRunConfig:
     batch_size : int
     sample_ids : list[str] | None
         Restrict to these sample IDs; ``None`` predicts every row in the manifest.
+    device : str
+        Where the decoder and every batch's features are moved before inference — ``"cpu"`` (the
+        default), ``"cuda"``, or a specific GPU like ``"cuda:3"``. Rejected up front if it names a
+        CUDA device that either isn't available at all or is out of range for this machine's GPU
+        count — this never silently falls back to CPU. Independent of whatever ``device`` the
+        checkpoint was trained under.
+    resize : tuple[int, int] | None
+        ``(width, height)`` every image is deterministically resized to before batching — must
+        match the checkpoint's training run (its ``augmentation.geometric.resize``). Required
+        whenever the dataset's images do not already share one native size. Ignored under
+        ``augmentation_mode: offline``, whose own ``augmentation_pipeline`` already includes
+        whatever resize the training run used.
     write_overlays : bool
         Also write ``{sample_id}_overlay.png``: the original image with the predicted mask
         alpha-blended on top, for quick visual review — see
@@ -104,6 +119,8 @@ class PredictionRunConfig:
     decoder_kwargs: dict[str, Any] = field(default_factory=dict)
     batch_size: int = 4
     sample_ids: list[str] | None = None
+    device: str = "cpu"
+    resize: tuple[int, int] | None = None
     write_overlays: bool = False
     overlay_alpha: float = 0.5
     augmentation_mode: AugmentationMode = AugmentationMode.NONE
@@ -112,7 +129,8 @@ class PredictionRunConfig:
     augmentation_variant: int = 0
 
     def __post_init__(self) -> None:
-        """Reject augmentation modes a fixed inference pass cannot meaningfully use."""
+        """Reject augmentation modes a fixed inference pass cannot meaningfully use, and validate ``device``."""
+        validate_device(self.device)
         if self.augmentation_mode not in (AugmentationMode.NONE, AugmentationMode.OFFLINE):
             raise ValueError(
                 f"prediction supports augmentation_mode 'none' or 'offline'; got {self.augmentation_mode.value!r}"
@@ -124,7 +142,7 @@ def _build_sample_batches(
 ) -> Iterable[Sequence[PreparedSample]]:
     """Return the per-batch sample lists ``run_prediction`` reads features and images from."""
     if config.augmentation_mode is AugmentationMode.NONE:
-        return build_prediction_batches(dataset, batch_size=config.batch_size)
+        return build_prediction_batches(dataset, batch_size=config.batch_size, resize=config.resize)
     return (
         batch.samples
         for batch in build_static_augmented_batches(
@@ -172,7 +190,17 @@ def run_prediction(config: PredictionRunConfig, *, store: FeatureStore, show_pro
     first_sample = dataset[0]
     if config.augmentation_mode is AugmentationMode.NONE:
         probe_sample = PreparedSample(sample_id=first_sample.sample_id, image=None, target=None)
-        output_size = mask_output_size(first_sample.target)
+        if config.resize is not None:
+            resize_pipeline = ImageAugmentationPipeline(
+                AugmentationPipelineConfig(geometric=GeometricConfig(resize=config.resize))
+            )
+            # From the resized target, not first_sample.target directly: config.resize (when set)
+            # changes the spatial size every prediction batch's image actually has, so probing the
+            # pre-resize sample would build a decoder upsampling to the wrong resolution — see
+            # training_service.run_training's identical probe for why.
+            output_size = mask_output_size(resize_pipeline.apply(first_sample, seed=0).target)
+        else:
+            output_size = mask_output_size(first_sample.target)
     else:
         prepared_probe = prepare_sample(
             first_sample,
@@ -204,6 +232,8 @@ def run_prediction(config: PredictionRunConfig, *, store: FeatureStore, show_pro
     )
     checkpoint = CheckpointManager(Path(config.checkpoint_path).parent).load(config.checkpoint_path)
     decoder.load_state_dict(checkpoint.decoder_state)
+    device = torch.device(config.device)
+    decoder = decoder.to(device)
     decoder.eval()
 
     output_dir = Path(config.output_dir)
@@ -216,8 +246,8 @@ def run_prediction(config: PredictionRunConfig, *, store: FeatureStore, show_pro
         for batch in progress_iter(
             batches, desc="predict", unit="batch", disable=not show_progress, total=total_batches
         ):
-            features = provider.get_features(batch)
-            predictions = logits_to_predictions(decoder(features))
+            features = provider.get_features(batch).to(device)
+            predictions = logits_to_predictions(decoder(features)).cpu()
             for sample, prediction in zip(batch, predictions, strict=True):
                 path = output_dir / f"{sample.sample_id}.png"
                 Image.fromarray(prediction.numpy().astype(np.uint8)).save(path)

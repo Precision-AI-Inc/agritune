@@ -36,6 +36,7 @@ from precisionai.agritune.services.segmentation_common import (
     build_training_batches,
     mask_to_target_tensor,
     probe_feature_dims,
+    validate_device,
 )
 from precisionai.agritune.tasks.segmentation.decoders.aspp import ASPPDecoder
 from precisionai.agritune.tasks.segmentation.decoders.mask_former import MaskFormerDecoder
@@ -202,6 +203,22 @@ def test_build_prediction_batches_is_lazy(tmp_path: Path) -> None:
     batches = build_prediction_batches(dataset, batch_size=2)
     assert next(batches) is not None
     assert isinstance(batches, Iterator)
+
+
+def test_build_prediction_batches_resize_normalizes_image_size(tmp_path: Path) -> None:
+    """Regression test: build_prediction_batches previously had no resize parameter at all, so
+    predicting against a checkpoint trained with a resize had no way to match it — see
+    test_build_training_batches_resize_normalizes_varying_native_sizes for the training-side
+    equivalent this mirrors."""
+    make_image((8, 6)).save(tmp_path / "s0_image.png")
+    make_mask((8, 6)).save(tmp_path / "s0_mask.png")
+    manifest_path = tmp_path / "manifest.csv"
+    manifest_path.write_text("sample_id,image_path,mask_path\ns0,s0_image.png,s0_mask.png\n")
+    dataset = ManifestDataset(manifest_path)
+
+    batches = list(build_prediction_batches(dataset, batch_size=1, resize=(4, 3)))
+
+    assert batches[0][0].image.size == (4, 3)
 
 
 async def test_build_cached_feature_provider_reads_what_was_precomputed(tmp_path: Path) -> None:
@@ -571,3 +588,30 @@ def test_online_augmented_batches_hybrid_mode_is_deterministic_per_epoch(tmp_pat
     second_run = _run()
     for first_image, second_image in zip(first_run, second_run, strict=True):
         assert np.array_equal(first_image, second_image)  # epoch 0 is deterministic across runs
+
+
+def test_validate_device_accepts_cpu() -> None:
+    assert validate_device("cpu") == torch.device("cpu")
+
+
+def test_validate_device_rejects_invalid_device_string() -> None:
+    with pytest.raises(ValueError, match="invalid device"):
+        validate_device("not-a-real-device")
+
+
+@pytest.mark.skipif(torch.cuda.is_available(), reason="requires a CPU-only machine")
+def test_validate_device_rejects_cuda_when_unavailable() -> None:
+    with pytest.raises(ValueError, match="requests CUDA"):
+        validate_device("cuda:0")
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA-enabled machine")
+def test_validate_device_rejects_out_of_range_cuda_index() -> None:
+    out_of_range = torch.cuda.device_count()
+    with pytest.raises(ValueError, match="only has"):
+        validate_device(f"cuda:{out_of_range}")
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA-enabled machine")
+def test_validate_device_accepts_a_valid_cuda_device() -> None:
+    assert validate_device("cuda:0") == torch.device("cuda:0")

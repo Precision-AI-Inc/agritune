@@ -113,3 +113,29 @@ def test_is_its_own_iterator() -> None:
     provider = FakeFeatureProvider(patch_dim=4, cls_dim=None, patch_grid=(2, 2))
     loader = PrefetchingFeatureLoader([_batch("a")], provider, device=torch.device("cpu"), non_blocking=False)
     assert iter(loader) is loader
+
+
+def test_context_manager_shuts_down_executor_when_abandoned_before_exhaustion() -> None:
+    """Regression test: without __enter__/__exit__, a consumer loop abandoned early (e.g. via an
+    exception raised elsewhere in the loop body) never reached __next__'s own StopIteration-time
+    shutdown, leaking the background thread. Using the loader as a context manager must free it
+    regardless of how the ``with`` block exits."""
+    provider = FakeFeatureProvider(patch_dim=4, cls_dim=None, patch_grid=(2, 2))
+    loader = PrefetchingFeatureLoader(
+        [_batch("a"), _batch("b")], provider, device=torch.device("cpu"), non_blocking=False
+    )
+
+    with loader:
+        next(loader)  # only the first of two batches consumed; loop abandoned early
+
+    assert loader._executor._shutdown
+
+
+def test_context_manager_shuts_down_executor_when_the_body_raises() -> None:
+    provider = FakeFeatureProvider(patch_dim=4, cls_dim=None, patch_grid=(2, 2))
+    loader = PrefetchingFeatureLoader([_batch("a")], provider, device=torch.device("cpu"), non_blocking=False)
+
+    with pytest.raises(RuntimeError, match="boom"), loader:
+        raise RuntimeError("boom")
+
+    assert loader._executor._shutdown

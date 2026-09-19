@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from PIL import Image
 
 from precisionai.agritune.cli.main import main
 from precisionai.agritune.features.store import DirectoryFeatureStore
@@ -318,6 +319,74 @@ def _build_features_and_train_via_cli(tmp_path: Path, capsys: pytest.CaptureFixt
 
     checkpoint_path = tmp_path / "runs" / "cli-fixture-run" / "checkpoints" / "last.ckpt"
     return manifest_path, store_path, checkpoint_path
+
+
+def _build_features_and_train_via_cli_with_resize(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], *, resize: tuple[int, int]
+) -> tuple[Path, Path, Path]:
+    """Like ``_build_features_and_train_via_cli``, but trained under ``augmentation.mode: none``
+    with ``geometric.resize`` set — so the checkpoint's decoder is sized for ``resize``, not the
+    dataset's native 8x8 image/mask size."""
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    store_path = tmp_path / "features"
+    main(["features", "build", "--manifest", str(manifest_path), "--store", str(store_path)])
+    capsys.readouterr()
+
+    config = {
+        "manifest_path": str(manifest_path),
+        "feature_store_dir": str(store_path),
+        "run_root": str(tmp_path / "runs"),
+        "run_id": "cli-resize-fixture-run",
+        "num_classes": 2,
+        "encoder_fingerprint": {"model": "fake-encoder", "revision": "fake-v1", "preprocessing": ""},
+        "batch_size": 2,
+        "val_fraction": 0.34,
+        "optimizer": {"name": "adamw", "lr": 0.05},
+        "trainer": {"max_epochs": 1},
+        "augmentation": {"mode": "none", "geometric": {"resize": list(resize)}},
+    }
+    config_path = tmp_path / "train.yaml"
+    config_path.write_text(yaml.safe_dump(config))
+    main(["train", "--config", str(config_path)])
+    capsys.readouterr()
+
+    checkpoint_path = tmp_path / "runs" / "cli-resize-fixture-run" / "checkpoints" / "last.ckpt"
+    return manifest_path, store_path, checkpoint_path
+
+
+def test_predict_resize_matches_the_checkpoints_trained_resolution(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Regression test: `agritune predict` had no --resize flag at all, so it had no way to match
+    a checkpoint trained with `augmentation.geometric.resize` — see
+    services/test_prediction_service.py for the identical concern at the service layer."""
+    manifest_path, store_path, checkpoint_path = _build_features_and_train_via_cli_with_resize(
+        tmp_path, capsys, resize=(4, 4)
+    )
+    output_dir = tmp_path / "predictions"
+
+    exit_code = main(
+        [
+            "predict",
+            "--manifest",
+            str(manifest_path),
+            "--store",
+            str(store_path),
+            "--checkpoint",
+            str(checkpoint_path),
+            "--num-classes",
+            "2",
+            "--output",
+            str(output_dir),
+            "--resize",
+            "4",
+            "4",
+        ]
+    )
+
+    assert exit_code == 0
+    written = sorted(output_dir.glob("*.png"))
+    assert Image.open(written[0]).size == (4, 4)
 
 
 def test_features_verify_reports_ok_for_clean_store(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

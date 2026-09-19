@@ -625,6 +625,43 @@ def test_reduce_on_plateau_scheduler_is_stepped_on_validation() -> None:
     assert trainer.scheduler.last_epoch >= 1  # ReduceLROnPlateau.step() was called at least once
 
 
+def test_reduce_on_plateau_without_validation_raises() -> None:
+    """Regression test: ReduceLROnPlateau only ever steps from _after_validation, which never runs
+    without both val_batches and val_metric — omitting either must fail fast rather than silently
+    never stepping the learning rate for the entire run."""
+    scheduler_config = SchedulerConfig(name="plateau", plateau_patience=0)
+    trainer, _ = _build_trainer(max_epochs=1, scheduler_config=scheduler_config)
+    train_batch = TrainingBatch(samples=[_sample("a"), _sample("b")], targets=torch.randint(0, 2, (2, 2, 2)))
+
+    with pytest.raises(ValueError, match="ReduceLROnPlateau"):
+        trainer.fit([train_batch])
+
+
+def test_validation_checkpoint_never_pairs_a_stale_epoch_with_a_full_batch_in_epoch(tmp_path: Path) -> None:
+    """Regression test: last.ckpt/the periodic file written from _after_validation must already
+    reflect the advanced epoch (and batch_in_epoch reset to 0) — never the just-finished epoch's
+    number paired with batch_in_epoch already at the full epoch length, which is exactly the state
+    a crash there would otherwise leave behind for _train_one_epoch's resume-skip logic to silently
+    replay as a no-op epoch."""
+    manager = CheckpointManager(tmp_path)
+    trainer, _ = _build_trainer(max_epochs=2, checkpoint_manager=manager)
+    train_batch = TrainingBatch(samples=[_sample("a"), _sample("b")], targets=torch.randint(0, 2, (2, 2, 2)))
+    val_batch = TrainingBatch(samples=[_sample("a"), _sample("b")], targets=torch.randint(0, 2, (2, 2, 2)))
+
+    observed: list[tuple[int, int]] = []
+    original_save = CheckpointManager.save
+
+    def _spying_save(self: CheckpointManager, checkpoint: Any, **kwargs: Any) -> Path:
+        observed.append((checkpoint.training_state.epoch, checkpoint.training_state.batch_in_epoch))
+        return original_save(self, checkpoint, **kwargs)
+
+    manager.save = _spying_save.__get__(manager, CheckpointManager)  # type: ignore[method-assign]
+    trainer.fit([train_batch], [val_batch], val_metric=SegmentationMetric(num_classes=2))
+
+    full_epoch_length = 1  # one batch per epoch in this fixture
+    assert not any(epoch == 0 and batch_in_epoch == full_epoch_length for epoch, batch_in_epoch in observed)
+
+
 def test_construction_does_not_raise_for_parameterless_decoder() -> None:
     # _device() must fall back to torch.device("cpu") rather than raising when the decoder has no
     # parameters to inspect.

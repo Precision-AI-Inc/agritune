@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import torch
+
 from precisionai.agritune.augmentations.image.pipeline import (
     AugmentationMode,
     ImageAugmentationPipeline,
@@ -29,6 +31,7 @@ from precisionai.agritune.services.segmentation_common import (
     build_training_batches,
     mask_output_size,
     probe_feature_dims,
+    validate_device,
 )
 from precisionai.agritune.tasks.segmentation.losses import SegmentationLoss, SegmentationLossConfig
 from precisionai.agritune.tasks.segmentation.metrics import SegmentationMetric
@@ -62,6 +65,12 @@ class EvaluationRunConfig:
     sample_ids : list[str] | None
         Restrict evaluation to these sample IDs (e.g. a held-out test split); ``None`` evaluates
         every row in the manifest.
+    device : str
+        Where the decoder and every batch's features/targets are moved before evaluation —
+        ``"cpu"`` (the default), ``"cuda"``, or a specific GPU like ``"cuda:3"``. Rejected up front
+        if it names a CUDA device that either isn't available at all or is out of range for this
+        machine's GPU count — this never silently falls back to CPU. Independent of whatever
+        ``device`` the checkpoint was trained under.
     loss : SegmentationLossConfig
         Should match the loss the checkpoint was trained under, or the reported ``"loss"`` value
         won't be comparable to training/validation loss from that run.
@@ -101,6 +110,7 @@ class EvaluationRunConfig:
     decoder_kwargs: dict[str, Any] = field(default_factory=dict)
     batch_size: int = 4
     sample_ids: list[str] | None = None
+    device: str = "cpu"
     loss: SegmentationLossConfig = field(default_factory=SegmentationLossConfig)
     resize: tuple[int, int] | None = None
     augmentation_mode: AugmentationMode = AugmentationMode.NONE
@@ -109,11 +119,12 @@ class EvaluationRunConfig:
     augmentation_variant: int = 0
 
     def __post_init__(self) -> None:
-        """Reject augmentation modes a fixed evaluation pass cannot meaningfully use."""
+        """Reject augmentation modes a fixed evaluation pass cannot meaningfully use, and validate ``device``."""
         if self.augmentation_mode not in (AugmentationMode.NONE, AugmentationMode.OFFLINE):
             raise ValueError(
                 f"evaluation supports augmentation_mode 'none' or 'offline'; got {self.augmentation_mode.value!r}"
             )
+        validate_device(self.device)
 
 
 def _build_batches(
@@ -206,8 +217,10 @@ def run_evaluation(
     )
     checkpoint = CheckpointManager(Path(config.checkpoint_path).parent).load(config.checkpoint_path)
     decoder.load_state_dict(checkpoint.decoder_state)
+    device = torch.device(config.device)
+    decoder = decoder.to(device)
     decoder.eval()
 
     task = SegmentationTask(decoder, SegmentationLoss(config.loss, num_classes=config.num_classes))
     metric = SegmentationMetric(num_classes=config.num_classes)
-    return evaluate(task, provider, batches, metric, show_progress=show_progress)
+    return evaluate(task, provider, batches, metric, device=device, show_progress=show_progress)

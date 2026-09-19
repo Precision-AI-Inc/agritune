@@ -524,6 +524,7 @@ def build_prediction_batches(
     dataset: ManifestDataset,
     *,
     batch_size: int,
+    resize: tuple[int, int] | None = None,
     num_workers: int = 0,
     pin_memory: bool = False,
     prefetch_factor: int | None = None,
@@ -538,10 +539,32 @@ def build_prediction_batches(
     simultaneously before the first prediction is even written. Loading is delegated to a
     :class:`torch.utils.data.DataLoader`, so ``num_workers``/``pin_memory``/``prefetch_factor``
     behave exactly as they do for :func:`build_training_batches`.
+
+    Parameters
+    ----------
+    dataset : ManifestDataset
+    batch_size : int
+    resize : tuple[int, int] | None, optional
+        ``(width, height)`` every sample's image is deterministically resized to before batching —
+        dimensional normalization, not augmentation, matching :func:`build_training_batches`'s
+        identically-named parameter. Required whenever the dataset's own images do not already
+        share one native size, since :func:`torch.stack`-based batching (inside the feature
+        provider/decoder) cannot combine unequal-size images together. ``None`` (the default)
+        leaves every image at its native size.
+    num_workers : int, optional
+    pin_memory : bool, optional
+    prefetch_factor : int | None, optional
     """
+    resize_pipeline = (
+        ImageAugmentationPipeline(AugmentationPipelineConfig(geometric=GeometricConfig(resize=resize)))
+        if resize is not None
+        else None
+    )
 
     def item(index: int) -> PreparedSample:
         sample = dataset[index]
+        if resize_pipeline is not None:
+            sample = resize_pipeline.apply(sample, seed=0)
         return PreparedSample(sample_id=sample.sample_id, image=sample.image, target=None)
 
     loader = DataLoader(
@@ -554,6 +577,49 @@ def build_prediction_batches(
         collate_fn=list,
     )
     yield from loader
+
+
+def validate_device(device: str) -> torch.device:
+    """Parse ``device``, rejecting a CUDA device that isn't actually usable on this machine.
+
+    Shared by :mod:`training_service`/:mod:`evaluation_service`/:mod:`prediction_service` so all
+    three ever validate a ``device`` config field the same way — never silently falling back to
+    CPU when the requested CUDA device is unavailable or out of range.
+
+    Parameters
+    ----------
+    device : str
+        ``"cpu"``, ``"cuda"``, or a specific GPU like ``"cuda:3"``.
+
+    Returns
+    -------
+    torch.device
+
+    Raises
+    ------
+    ValueError
+        If ``device`` does not parse, or names a CUDA device that either isn't available at all or
+        is out of range for this machine's GPU count.
+    """
+    try:
+        resolved = torch.device(device)
+    except RuntimeError as exc:
+        raise ValueError(f"invalid device: {device!r} ({exc})") from exc
+    if resolved.type != "cuda":
+        return resolved
+    if not torch.cuda.is_available():
+        raise ValueError(
+            f"device={device!r} requests CUDA, but torch.cuda.is_available() is False on this machine "
+            "— this never silently falls back to CPU"
+        )
+    device_count = torch.cuda.device_count()
+    index = resolved.index if resolved.index is not None else 0
+    if index >= device_count:
+        raise ValueError(
+            f"device={device!r} names GPU index {index}, but this machine only has {device_count} "
+            f"GPU(s) (0..{device_count - 1})"
+        )
+    return resolved
 
 
 def build_decoder(

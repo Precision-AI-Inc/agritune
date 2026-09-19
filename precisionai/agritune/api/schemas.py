@@ -173,6 +173,18 @@ class ScoredRunRequest(BaseModel):
     batch_size: int = 4
     sample_ids: list[str] | None = None
     encoder_fingerprint: EncoderFingerprintRequest = Field(default_factory=EncoderFingerprintRequest)
+    resize: tuple[int, int] | None = Field(
+        default=None,
+        description="(width, height) every image/mask is deterministically resized to before "
+        "batching — must match the checkpoint's training run (its augmentation.geometric.resize). "
+        "Required whenever the dataset's images/masks do not already share one native size.",
+    )
+    device: str = Field(
+        default="cpu",
+        description="Where the decoder and every batch's features/targets are moved before "
+        "running — 'cpu' (default), 'cuda', or a specific GPU like 'cuda:3'. Independent of "
+        "whatever device the checkpoint was trained under.",
+    )
 
 
 class LossConfigRequest(BaseModel):
@@ -192,12 +204,6 @@ class EvaluateRequest(ScoredRunRequest):
     """Body for ``POST /evaluate``."""
 
     loss: LossConfigRequest = Field(default_factory=LossConfigRequest)
-    resize: tuple[int, int] | None = Field(
-        default=None,
-        description="(width, height) every image/mask is deterministically resized to before "
-        "batching — must match the checkpoint's training run (its augmentation.geometric.resize). "
-        "Required whenever the dataset's images/masks do not already share one native size.",
-    )
 
 
 class EvaluateResponse(BaseModel):

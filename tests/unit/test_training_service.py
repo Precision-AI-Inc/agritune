@@ -582,6 +582,49 @@ def test_tracker_close_failure_does_not_invalidate_completed_training(
     assert (result.run_directory.path / "run.json").is_file()
 
 
+def test_run_training_fit_failure_is_not_masked_by_a_flush_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test: trainer.fit() failing must surface as the run's own exception even if
+    store.flush() (called unconditionally in the finally block) also fails — previously the flush
+    error, not fit()'s original one, was what the caller ended up seeing."""
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    store = DirectoryFeatureStore(tmp_path / "features")
+    _precompute(manifest_path, store)
+
+    def _failing_fit(self: object, *args: object, **kwargs: object) -> None:
+        raise RuntimeError("trainer fit failed")
+
+    def _failing_flush() -> None:
+        raise OSError("store flush failed")
+
+    monkeypatch.setattr(training_service.Trainer, "fit", _failing_fit)
+    monkeypatch.setattr(store, "flush", _failing_flush)
+
+    config = _base_config(tmp_path, manifest_path, run_id="fit-and-flush-fail-run")
+    with pytest.raises(RuntimeError, match="trainer fit failed"):
+        run_training(config, store=store)
+
+
+def test_run_training_flush_failure_propagates_when_fit_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A store.flush() failure is still a real error the caller must see when nothing else went
+    wrong — only a failure already propagating from trainer.fit() should suppress it."""
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    store = DirectoryFeatureStore(tmp_path / "features")
+    _precompute(manifest_path, store)
+
+    def _failing_flush() -> None:
+        raise OSError("store flush failed")
+
+    monkeypatch.setattr(store, "flush", _failing_flush)
+
+    config = _base_config(tmp_path, manifest_path, run_id="flush-fail-only-run")
+    with pytest.raises(OSError, match="store flush failed"):
+        run_training(config, store=store)
+
+
 def test_run_training_with_no_tracking_backends(tmp_path: Path) -> None:
     manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
     store = DirectoryFeatureStore(tmp_path / "features")

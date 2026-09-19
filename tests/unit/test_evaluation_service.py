@@ -6,6 +6,7 @@
 from pathlib import Path
 
 import pytest
+import torch
 
 from precisionai.agritune.augmentations.image.pipeline import (
     AugmentationMode,
@@ -202,3 +203,45 @@ async def test_run_evaluation_empty_sample_set_raises(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="no samples to evaluate"):
         run_evaluation(config, store=store)
+
+
+def test_evaluation_run_config_rejects_invalid_device() -> None:
+    with pytest.raises(ValueError, match="invalid device"):
+        EvaluationRunConfig(
+            manifest_path="manifest.csv",
+            checkpoint_path="last.ckpt",
+            num_classes=2,
+            encoder_fingerprint=_FINGERPRINT,
+            device="not-a-real-device",
+        )
+
+
+@pytest.mark.skipif(torch.cuda.is_available(), reason="requires a CPU-only machine")
+def test_evaluation_run_config_rejects_cuda_when_unavailable() -> None:
+    with pytest.raises(ValueError, match="requests CUDA"):
+        EvaluationRunConfig(
+            manifest_path="manifest.csv",
+            checkpoint_path="last.ckpt",
+            num_classes=2,
+            encoder_fingerprint=_FINGERPRINT,
+            device="cuda:0",
+        )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA-enabled machine")
+async def test_run_evaluation_moves_the_decoder_to_the_configured_cuda_device(tmp_path: Path) -> None:
+    """Regression test: evaluation previously had no device field at all and always ran on CPU,
+    even when the checkpoint was trained on CUDA."""
+    manifest_path, checkpoint_path = await _train_a_checkpoint(tmp_path)
+    store = DirectoryFeatureStore(tmp_path / "features")
+
+    config = EvaluationRunConfig(
+        manifest_path=str(manifest_path),
+        checkpoint_path=str(checkpoint_path),
+        num_classes=2,
+        encoder_fingerprint=_FINGERPRINT,
+        device="cuda:0",
+    )
+    metrics = run_evaluation(config, store=store)
+
+    assert "mean_iou" in metrics

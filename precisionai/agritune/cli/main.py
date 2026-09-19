@@ -210,11 +210,6 @@ def _add_scored_run_arguments(parser: argparse.ArgumentParser) -> None:
         help="Encoder revision the feature store was built with (default: the fake encoder's).",
     )
     parser.add_argument("--preprocessing", default="", help="Preprocessing label used when the store was built.")
-
-
-def _build_evaluate_parser(subparsers: argparse._SubParsersAction) -> None:
-    parser = subparsers.add_parser("evaluate", help="Evaluate a trained checkpoint.")
-    _add_scored_run_arguments(parser)
     parser.add_argument(
         "--resize",
         type=int,
@@ -225,6 +220,18 @@ def _build_evaluate_parser(subparsers: argparse._SubParsersAction) -> None:
         "the checkpoint's training run (its augmentation.geometric.resize). Required whenever the "
         "dataset's images/masks do not already share one native size.",
     )
+    parser.add_argument(
+        "--device",
+        default="cpu",
+        help="Where the decoder and every batch's features/targets are moved before running — "
+        "'cpu' (default), 'cuda', or a specific GPU like 'cuda:3'. Independent of whatever device "
+        "the checkpoint was trained under.",
+    )
+
+
+def _build_evaluate_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser("evaluate", help="Evaluate a trained checkpoint.")
+    _add_scored_run_arguments(parser)
     parser.add_argument(
         "--loss-name",
         default="ce",
@@ -274,12 +281,12 @@ def _build_predict_parser(subparsers: argparse._SubParsersAction) -> None:
         "--augmentation-config",
         default=None,
         help="Path to a YAML file shaped like configs/augmentation/{none,offline}.yaml; omit to predict "
-        "on each sample's native, unaugmented image (the default). Set this — pointed at the exact same "
-        "file the training run's augmentation: block used — whenever that run used 'augmentation.mode: "
-        "offline' with a random_crop: a decoder trained only on small fixed-size crops has no spatial "
-        "context beyond a single patch and generalizes poorly to a much larger, differently-shaped native "
-        "patch grid it never saw in training, which shows up as content-independent prediction artifacts, "
-        "not just lower accuracy.",
+        "on each sample's native, unaugmented (optionally --resize'd) image (the default). Set this — "
+        "pointed at the exact same file the training run's augmentation: block used — whenever that run "
+        "used 'augmentation.mode: offline' with a random_crop: a decoder trained only on small fixed-size "
+        "crops has no spatial context beyond a single patch and generalizes poorly to a much larger, "
+        "differently-shaped native patch grid it never saw in training, which shows up as "
+        "content-independent prediction artifacts, not just lower accuracy.",
     )
     parser.add_argument(
         "--seed",

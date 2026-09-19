@@ -83,3 +83,18 @@ class PrefetchingFeatureLoader(Iterator[tuple[TrainingBatch, EncoderFeatures, to
         features, targets = future.result()
         self._pending = self._submit_next()
         return batch, features, targets
+
+    def __enter__(self) -> "PrefetchingFeatureLoader":
+        """Return ``self`` — use as a context manager to guarantee the background thread is freed."""
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        """Shut down the background executor even if the consuming loop was abandoned early.
+
+        ``__next__`` already shuts it down once the iterator is exhausted; calling
+        ``shutdown`` again here is a no-op in that case. If the caller's loop instead exits via an
+        exception or a ``break`` partway through, this is the only thing that still frees the
+        worker thread — without it, the thread (and any in-flight fetch) would otherwise leak for
+        the life of the process.
+        """
+        self._executor.shutdown(wait=False, cancel_futures=True)
