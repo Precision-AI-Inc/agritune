@@ -37,9 +37,11 @@ encoder_base_url: https://embeddings.precision.ai/v1
 encoder_api_key: ${oc.env:AGRITUNE_ENCODER_API_KEY,null}
 
 # --- Image augmentation -------------------------------------------------------
-# mode "none" (default) applies no augmentation at all and ignores every field below it — matches
-# every pre-v0.2 run exactly. "online"/"hybrid" require feature_provider to also be "online"/
-# "hybrid" (a "cached" provider's key would only ever match the first epoch's augmentation
+# mode "none" (default) applies no real augmentation (no flips/crops/photometric transforms).
+# geometric.resize is the one exception: applied to every batch regardless of mode — deterministic
+# dimensional normalization, not augmentation, required whenever the dataset's own images/masks do
+# not already share one native size. "online"/"hybrid" require feature_provider to also be
+# "online"/"hybrid" (a "cached" provider's key would only ever match the first epoch's augmentation
 # fingerprint). Validation samples are never augmented, regardless of mode.
 augmentation:
   mode: none                             # none | offline | online | hybrid

@@ -91,26 +91,28 @@ fresh-online path for a configurable fraction of `(sample, epoch)` combinations.
 
 These are two different code paths, not two settings of the same knob:
 
-- **Resize-only** (dimensional normalization, not augmentation): validation batches are *always*
-  resized to `augmentation.geometric.resize` — regardless of `augmentation.mode` — since
-  `torch.stack` needs every mask in a batch to share one size, and validation must never apply
-  flips/crops/photometric transforms. This is the only resizing that ever touches validation data.
+- **Resize-only** (dimensional normalization, not augmentation): both training *and* validation
+  batches are *always* resized to `augmentation.geometric.resize` — regardless of
+  `augmentation.mode`, including `none` — since `torch.stack` needs every mask in a batch to share
+  one size, and this step never applies flips/crops/photometric transforms and never counts as
+  "real" augmentation (it does not create an `AugmentationRecord`, so it never changes a cached
+  feature's lookup key either). This is the *only* transform `mode: none` ever applies.
 - **The full pipeline** (geometric + photometric transforms, `offline`/`online`/`hybrid` modes
-  only): applied to *training* batches, starting with `geometric.resize` (if set) and then
-  layering random crop, flips, rotation, and photometric transforms on top — see
+  only): applied to *training* batches, starting with `geometric.resize` (if set, otherwise a
+  no-op) and then layering random crop, flips, rotation, and photometric transforms on top — see
   [docs/augmentation.md](../docs/augmentation.md).
 
-The consequence worth knowing: under `augmentation.mode: none`, **training batches are not resized
-at all** — training relies on every image in the dataset already sharing one native size (exactly
-what `prepare_cwfid.py --size 384`/`prepare_phenobench.py --size 384` guarantee). If your dataset's
-images are not already uniform in size, `none` will fail to `torch.stack` a training batch — switch
-to `offline`/`online` (whose pipeline resizes training images too) or pre-resize the dataset
-itself.
+The consequence worth knowing: under `augmentation.mode: none` with `geometric.resize` left unset,
+**training batches are not resized at all** — training relies on every image in the dataset already
+sharing one native size (exactly what `prepare_cwfid.py --size 384`/`prepare_phenobench.py --size
+384` guarantee). If your dataset's images are not already uniform in size, either set
+`geometric.resize` (works under any mode, including `none`) or switch to `offline`/`online` for the
+full pipeline, or pre-resize the dataset itself.
 
 To see the difference directly: `examples/segmentation/cwfid.yaml`'s `augmentation.geometric.resize`
-is `[256, 256]`, but since `mode: none` "ignores every field below it" for training, that value is
-only ever consulted for validation. Switch to `offline`/`online` (as above) and it also governs the
-first step of every training sample's augmentation.
+is `[256, 256]`, applied under `mode: none` to both training and validation batches alike. Switch to
+`offline`/`online` and that same value becomes only the *first* step of every training sample's
+augmentation — random crop, flips, rotation, and photometric transforms layer on top of it.
 
 ---
 

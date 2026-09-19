@@ -224,6 +224,7 @@ class Trainer:
 
             if val_batches is not None and val_metric is not None:
                 val_metric.reset()
+                self.decoder.eval()  # restored to train() by the next epoch's _train_one_epoch
                 metrics = evaluate(
                     self.task,
                     self.feature_provider,

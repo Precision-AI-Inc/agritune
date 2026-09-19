@@ -160,6 +160,45 @@ def test_fit_with_show_progress_still_advances_state() -> None:
     assert trainer.state.epoch == 1
 
 
+def test_fit_runs_validation_with_decoder_in_eval_mode() -> None:
+    """Regression test: validation must run the decoder in eval() mode, not the train() mode
+    _train_one_epoch leaves it in — otherwise a decoder with dropout/batchnorm computes
+    validation metrics using training-time stochasticity/statistics."""
+
+    class _ModeSpyDecoder(nn.Module):
+        def __init__(self, inner: nn.Module) -> None:
+            super().__init__()
+            self.inner = inner
+            self.observed_training_modes: list[bool] = []
+
+        def forward(self, features: EncoderFeatures) -> torch.Tensor:
+            self.observed_training_modes.append(self.training)
+            return self.inner(features)
+
+    set_deterministic_seed(0)
+    decoder = _ModeSpyDecoder(MLPProbeDecoder(patch_dim=4, num_classes=2, output_size=(2, 2)))
+    loss = SegmentationLoss(SegmentationLossConfig(name="ce"), num_classes=2)
+    task = SegmentationTask(decoder, loss)
+    provider = _DeterministicFeatureProvider(patch_dim=4, patch_grid=(2, 2))
+    optimizer = SGD(decoder.parameters(), lr=0.1)
+    config = TrainerConfig(max_epochs=1, fingerprints={"encoder": "deterministic-fake"})
+    trainer = Trainer(
+        task=task,
+        decoder=decoder,
+        feature_provider=provider,
+        optimizer=optimizer,
+        scheduler=None,
+        config=config,
+    )
+
+    train_batch = TrainingBatch(samples=[_sample("a"), _sample("b")], targets=torch.randint(0, 2, (2, 2, 2)))
+    val_batch = TrainingBatch(samples=[_sample("c")], targets=torch.randint(0, 2, (1, 2, 2)))
+    trainer.fit([train_batch], [val_batch], val_metric=SegmentationMetric(num_classes=2))
+
+    assert decoder.observed_training_modes[0] is True
+    assert decoder.observed_training_modes[-1] is False
+
+
 def test_fit_enables_progress_on_main_rank(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[dict[str, object]] = []
 

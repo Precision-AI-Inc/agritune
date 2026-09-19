@@ -13,6 +13,7 @@ import asyncio
 from enum import Enum
 from pathlib import Path
 
+import numpy as np
 import pytest
 import torch
 import yaml
@@ -587,6 +588,65 @@ def test_run_training_with_no_tracking_backends(tmp_path: Path) -> None:
     _precompute(manifest_path, store)
 
     config = _base_config(tmp_path, manifest_path, run_id="no-tracking-run", tracking=TrackingSelection(backends=[]))
+    result = run_training(config, store=store)
+
+    assert result.final_train_state["epoch"] == 1
+
+
+def _build_manifest_with_varying_native_sizes(tmp_path: Path) -> Path:
+    """Write a manifest where each sample's own image/mask match, but sizes vary across samples.
+
+    ``build_manifest`` only supports one uniform ``image_size`` for every row (or a single sample
+    whose *mask alone* mismatches its own image — a shape albumentations rejects outright, even
+    before any resize runs, since it requires an image and its own mask to already agree). Neither
+    shape reproduces the real failure mode: different samples natively sized differently, each
+    internally consistent — the actual shape a raw agricultural dataset can have.
+    """
+    lines = ["sample_id,image_path,mask_path,field_id"]
+    for index, size in enumerate([(8, 8), (8, 8), (8, 8), (8, 8), (10, 9), (8, 8)]):
+        sample_id = f"sample-{index}"
+        image_path, mask_path = f"{sample_id}_image.png", f"{sample_id}_mask.png"
+        lines.append(f"{sample_id},{image_path},{mask_path},field-a")
+        Image.fromarray(np.zeros((size[1], size[0], 3), dtype=np.uint8)).save(tmp_path / image_path)
+        Image.fromarray(np.zeros((size[1], size[0]), dtype=np.uint8)).save(tmp_path / mask_path)
+    manifest_path = tmp_path / "manifest.csv"
+    manifest_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return manifest_path
+
+
+def test_run_training_mode_none_with_non_uniform_native_sizes_requires_resize(tmp_path: Path) -> None:
+    """Without geometric.resize, augmentation.mode: none collates a non-uniform-size dataset's
+    training batches straight from disk and fails — see
+    test_run_training_mode_none_applies_configured_resize for confirmation that setting one now
+    fixes this without switching mode."""
+    manifest_path = _build_manifest_with_varying_native_sizes(tmp_path)
+    store = DirectoryFeatureStore(tmp_path / "features")
+
+    config = _base_config(tmp_path, manifest_path, run_id="nonuniform-none-run", feature_provider="online")
+    assert config.augmentation.mode is AugmentationMode.NONE
+    assert config.augmentation.geometric.resize is None
+
+    with pytest.raises(RuntimeError, match="stack expects each tensor to be equal size"):
+        run_training(config, store=store)
+
+
+def test_run_training_mode_none_applies_configured_resize(tmp_path: Path) -> None:
+    """geometric.resize now applies even under augmentation.mode: none (dimensional normalization,
+    not real augmentation — see _build_train_batches), fixing the collate crash above without
+    switching mode. Critically, this must not disturb the "none" augmentation fingerprint a feature
+    cache built with no --augmentation-config is keyed under, or every cached lookup would miss —
+    this exercises exactly that: a feature_provider: cached run against a store precomputed under
+    the default (mode: none) fingerprint, on a dataset with non-uniform native mask sizes."""
+    manifest_path = _build_manifest_with_varying_native_sizes(tmp_path)
+    store = DirectoryFeatureStore(tmp_path / "features")
+    _precompute(manifest_path, store)
+
+    config = _base_config(
+        tmp_path,
+        manifest_path,
+        run_id="mode-none-with-resize-run",
+        augmentation=AugmentationSelection(mode=AugmentationMode.NONE, geometric=GeometricConfig(resize=(8, 8))),
+    )
     result = run_training(config, store=store)
 
     assert result.final_train_state["epoch"] == 1

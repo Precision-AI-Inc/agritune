@@ -171,8 +171,11 @@ class AugmentationSelection:
     Attributes
     ----------
     mode : AugmentationMode
-        ``NONE`` (default — matches every pre-v0.2 behavior exactly, no augmentation applied),
-        ``OFFLINE``, ``ONLINE``, or ``HYBRID``.
+        ``NONE`` (default — no real augmentation: no flips/crops/photometric transforms), ``OFFLINE``,
+        ``ONLINE``, or ``HYBRID``. ``geometric.resize`` is the one exception: applied to every
+        training *and* validation batch regardless of ``mode`` — deterministic dimensional
+        normalization, not augmentation, required whenever the dataset's own images/masks do not
+        already share one native size (``torch.stack`` cannot batch unequal-size targets together).
     variant : int
         Offline variant index; ignored outside ``OFFLINE``/``HYBRID``.
     hybrid_online_probability : float
@@ -449,9 +452,16 @@ def _build_train_batches(
     # is safe to skip decoding the image for entirely.
     load_images = config.feature_provider != "cached"
     if config.augmentation.mode is AugmentationMode.NONE:
+        # geometric.resize is dimensional normalization, not augmentation — apply it here exactly
+        # like val_batches always does below, regardless of mode. Otherwise a dataset whose
+        # images/masks are not already one uniform native size fails deep in a DataLoader worker
+        # with a confusing torch.stack size-mismatch, even though resize was configured — this
+        # never creates an AugmentationRecord (see _ResizedBatches._item), so it does not change
+        # the "none" augmentation fingerprint cached features/lookups key off.
         return build_training_batches(
             train_dataset,
             batch_size=config.batch_size,
+            resize=config.augmentation.geometric.resize,
             show_progress=show_progress,
             num_workers=config.num_workers,
             pin_memory=config.pin_memory,
