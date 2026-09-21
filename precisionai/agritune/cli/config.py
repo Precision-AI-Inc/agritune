@@ -11,13 +11,13 @@ composition: ``compose()`` selects one variant per group (``dataset``/``encoder`
 ``feature_augmentation``/``feature_provider``/``task``/``decoder``/``optimizer``/``scheduler``/
 ``tracking``), and the same
 ``overrides`` list can both override plain fields (``trainer.max_epochs=3``) and swap group
-variants (``decoder=token_fpn``, ``augmentation=online``) — see ``agritune_implementation_plan.md``
-§23 and ``docs/configuration.md``.
+variants (``decoder=token_fpn``, ``augmentation=online``) — see ``docs/configuration.md``.
 """
 
 from pathlib import Path
 from typing import Any
 
+import torch
 from hydra import compose, initialize_config_dir
 from omegaconf import DictConfig, OmegaConf
 
@@ -209,6 +209,8 @@ def _config_from_dict(data: dict[str, Any]) -> TrainingRunConfig:
 
     trainer_data = dict(data.get("trainer") or {})
     loss_data = dict(data.get("loss") or {})
+    if loss_data.get("class_weights") is not None:
+        loss_data["class_weights"] = torch.tensor(loss_data["class_weights"], dtype=torch.float32)
     seed = data.get("seed", 0)
 
     return TrainingRunConfig(
@@ -223,6 +225,8 @@ def _config_from_dict(data: dict[str, Any]) -> TrainingRunConfig:
             preprocessing=encoder_data.get("preprocessing", ""),
         ),
         feature_provider=data.get("feature_provider", "cached"),
+        store_type=data.get("store_type", "directory"),
+        entries_per_shard=data.get("entries_per_shard", 1000),
         encoder_base_url=data.get("encoder_base_url"),
         encoder_api_key=data.get("encoder_api_key"),
         augmentation=_augmentation_from_dict(dict(data.get("augmentation") or {})),
@@ -230,6 +234,11 @@ def _config_from_dict(data: dict[str, Any]) -> TrainingRunConfig:
         decoder_name=data.get("decoder_name", "mlp_probe"),
         decoder_kwargs=dict(data.get("decoder_kwargs") or {}),
         batch_size=data.get("batch_size", 4),
+        device=data.get("device", "cpu"),
+        num_workers=data.get("num_workers", 0),
+        pin_memory=data.get("pin_memory", False),
+        prefetch_factor=data.get("prefetch_factor"),
+        feature_read_workers=data.get("feature_read_workers", 32),
         val_fraction=data.get("val_fraction", 0.2),
         seed=seed,
         optimizer=OptimizerConfig(**optimizer_data),
@@ -242,6 +251,7 @@ def _config_from_dict(data: dict[str, Any]) -> TrainingRunConfig:
             seed=trainer_data.get("seed", seed),
             early_stopping_patience=trainer_data.get("early_stopping_patience"),
             checkpoint_every_n_steps=trainer_data.get("checkpoint_every_n_steps"),
+            strict_resume=trainer_data.get("strict_resume", True),
         ),
         loss=SegmentationLossConfig(**loss_data),
         val_metric_name=data.get("val_metric_name", "mean_iou"),

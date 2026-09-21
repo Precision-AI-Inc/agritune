@@ -462,3 +462,48 @@ def test_select_one_handles_no_cls_tokens() -> None:
     batch = _make_features(batch_size=2, cls_dim=None)
     selected = select_one(batch, 0)
     assert selected.cls_tokens is None
+
+
+def test_to_moves_patch_tokens_patch_grid_and_cls_tokens() -> None:
+    features = _make_features(cls_dim=5)
+    moved = features.to("cpu")
+    assert moved.patch_tokens.device == torch.device("cpu")
+    assert moved.patch_grid.device == torch.device("cpu")
+    assert moved.cls_tokens is not None
+    assert moved.cls_tokens.device == torch.device("cpu")
+
+
+def test_to_leaves_cls_tokens_none_when_absent() -> None:
+    features = _make_features(cls_dim=None)
+    moved = features.to("cpu")
+    assert moved.cls_tokens is None
+
+
+def test_to_moves_valid_patch_mask_when_present() -> None:
+    mask = torch.tensor([[True, True, True, True, True, True], [True, True, True, True, False, False]])
+    features = _make_features(num_patches=6, patch_grid=[(2, 3), (2, 2)], valid_patch_mask=mask)
+    moved = features.to("cpu")
+    assert moved.valid_patch_mask is not None
+    assert moved.valid_patch_mask.device == torch.device("cpu")
+
+
+def test_to_leaves_valid_patch_mask_none_when_absent() -> None:
+    features = _make_features(valid_patch_mask=None)
+    moved = features.to("cpu")
+    assert moved.valid_patch_mask is None
+
+
+def test_to_preserves_values_and_non_tensor_fields() -> None:
+    features = _make_features()
+    moved = features.to("cpu")
+    assert torch.equal(moved.patch_tokens, features.patch_tokens)
+    assert moved.image_sizes == features.image_sizes
+    assert moved.encoder_model == features.encoder_model
+    assert moved.encoder_revision == features.encoder_revision
+    assert moved.metadata == features.metadata
+
+
+def test_to_accepts_a_torch_device_object() -> None:
+    features = _make_features()
+    moved = features.to(torch.device("cpu"))
+    assert moved.patch_tokens.device == torch.device("cpu")

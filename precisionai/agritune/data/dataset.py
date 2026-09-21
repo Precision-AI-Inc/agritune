@@ -64,3 +64,14 @@ class ManifestDataset:
         image = Image.open(self._base_dir / row.image_path).convert("RGB")
         mask = Image.open(self._base_dir / row.mask_path)
         return Sample(sample_id=row.sample_id, image=image, target=mask, metadata=dict(row.metadata))
+
+    def load_target(self, index: int) -> Sample:
+        """Load and return the sample at ``index``, without ever opening its image (``image=None``).
+
+        For ``feature_provider: cached`` batch-building, which never consults ``Sample.image`` (the
+        encoder features are already computed) — skips the most expensive part of loading a sample
+        entirely. Never valid for ``online``/``hybrid`` providers, which do need the real image.
+        """
+        row = self._rows[index]
+        mask = Image.open(self._base_dir / row.mask_path)
+        return Sample(sample_id=row.sample_id, image=None, target=mask, metadata=dict(row.metadata))

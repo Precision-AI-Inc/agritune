@@ -2,3 +2,7 @@
 # convolutional refinement -> upsampling. Should beat the linear baseline, or something upstream
 # is wrong.
 name: token_fpn
+hidden_dim: 128
+num_layers: 2                          # stacked 3x3 conv + ReLU blocks in the refinement stack
+cls_fusion: none                       # none | concat | film — how (if at all) to fuse the CLS
+                                        # token; concat/film require the encoder to produce one

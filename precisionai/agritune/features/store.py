@@ -12,6 +12,7 @@ per entry to support ``agritune features inspect``/``verify`` without loading fu
 
 import hashlib
 import json
+import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -224,6 +225,8 @@ class ShardedFeatureStore:
             json.loads(self._index_path.read_text()) if self._index_path.is_file() else {}
         )
         self._pending: dict[str, EncoderFeatures] = {}
+        self._shard_cache: tuple[str, dict[str, torch.Tensor]] | None = None
+        self._shard_cache_lock = threading.Lock()
 
     def has(self, key: str) -> bool:
         """Return whether an entry exists for ``key`` (flushed, or buffered in this process)."""
@@ -236,7 +239,7 @@ class ShardedFeatureStore:
         if key not in self._index:
             raise KeyError(key)
         entry = self._index[key]
-        tensors = load_file(str(self._root / entry["shard"]))
+        tensors = self._load_shard(entry["shard"])
         prefixed = {name[len(key) + 2 :]: tensor for name, tensor in tensors.items() if name.startswith(f"{key}::")}
         return _features_from_tensors(
             prefixed,
@@ -328,6 +331,26 @@ class ShardedFeatureStore:
     def _known_shards(self) -> set[str]:
         return {entry["shard"] for entry in self._index.values()}
 
+    def _load_shard(self, shard_name: str) -> dict[str, torch.Tensor]:
+        """Load ``shard_name``'s tensors, reusing the most-recently loaded shard when possible.
+
+        Reads within one batch typically land on runs of keys from the same shard (samples are
+        packed into shards in stable order), so caching only the single most-recently loaded shard
+        avoids re-reading it from disk for every sample it contains, without holding multiple
+        shards' tensors in memory at once.
+
+        ``CachedFeatureProvider`` reads a batch's keys from a thread pool, so the check-and-load
+        below is lock-guarded: without it, every thread that misses the cache for a not-yet-loaded
+        shard would independently re-read that same (potentially multi-gigabyte) shard file from
+        disk at once, rather than one thread loading it while the rest wait and reuse the result.
+        """
+        with self._shard_cache_lock:
+            if self._shard_cache is not None and self._shard_cache[0] == shard_name:
+                return self._shard_cache[1]
+            tensors = load_file(str(self._root / shard_name))
+            self._shard_cache = (shard_name, tensors)
+            return tensors
+
     def __enter__(self) -> "ShardedFeatureStore":
         """Return ``self`` for use as a context manager."""
         return self
@@ -335,3 +358,40 @@ class ShardedFeatureStore:
     def __exit__(self, *_exc_info: object) -> None:
         """Flush any buffered entries on context exit."""
         self.flush()
+
+
+FEATURE_STORE_TYPES = ("directory", "sharded")
+
+
+def build_feature_store(
+    store_type: str, path: str | Path, *, entries_per_shard: int = 1000
+) -> DirectoryFeatureStore | ShardedFeatureStore:
+    """Construct the feature store implementation named by ``store_type``.
+
+    The single place every CLI command and service constructs a feature store from a plain
+    directory path, so a store built as ``"sharded"`` can actually be read back consistently
+    everywhere — see ``docs/feature-caching.md``.
+
+    Parameters
+    ----------
+    store_type : str
+        ``"directory"`` or ``"sharded"``.
+    path : str | Path
+        Directory to store entries in (created if missing).
+    entries_per_shard : int, optional
+        Samples packed per shard file; only consulted when ``store_type == "sharded"``.
+
+    Returns
+    -------
+    DirectoryFeatureStore | ShardedFeatureStore
+
+    Raises
+    ------
+    ValueError
+        If ``store_type`` is not one of :data:`FEATURE_STORE_TYPES`.
+    """
+    if store_type == "directory":
+        return DirectoryFeatureStore(path)
+    if store_type == "sharded":
+        return ShardedFeatureStore(path, entries_per_shard=entries_per_shard)
+    raise ValueError(f"unsupported store_type: {store_type!r}; expected one of {FEATURE_STORE_TYPES}")

@@ -3,9 +3,8 @@
 
 """Unit tests for precisionai.agritune.training.trainer.Trainer.
 
-Covers definition-of-done items from ``agritune_implementation_plan.md`` §22: gradient
-accumulation equivalence, scheduler stepping (per optimizer step, not per micro-batch), and exact
-checkpoint resume.
+Covers gradient accumulation equivalence, scheduler stepping (per optimizer step, not per
+micro-batch), and exact checkpoint resume.
 """
 
 from collections.abc import Sequence
@@ -25,7 +24,7 @@ from precisionai.agritune.tasks.segmentation.decoders.mlp_probe import MLPProbeD
 from precisionai.agritune.tasks.segmentation.losses import SegmentationLoss, SegmentationLossConfig
 from precisionai.agritune.tasks.segmentation.metrics import SegmentationMetric
 from precisionai.agritune.tasks.segmentation.task import SegmentationTask
-from precisionai.agritune.training.checkpointing import CheckpointManager
+from precisionai.agritune.training.checkpointing import CheckpointManager, CheckpointMismatchError
 from precisionai.agritune.training.distributed import DistributedContext
 from precisionai.agritune.training.evaluator import TrainingBatch
 from precisionai.agritune.training.state import set_deterministic_seed
@@ -112,6 +111,8 @@ def _build_trainer(
     feature_augmentation: FeatureAugmentation | None = None,
     show_progress: bool = False,
     distributed: DistributedContext | None = None,
+    fingerprints: dict[str, str] | None = None,
+    strict_resume: bool = True,
 ) -> tuple[Trainer, MLPProbeDecoder]:
     set_deterministic_seed(seed)  # ensures identical decoder initialization across builds
     decoder = MLPProbeDecoder(patch_dim=4, num_classes=2, output_size=(2, 2))
@@ -127,7 +128,8 @@ def _build_trainer(
         grad_clip_norm=grad_clip_norm,
         checkpoint_every_n_steps=checkpoint_every_n_steps,
         early_stopping_patience=early_stopping_patience,
-        fingerprints={"encoder": "deterministic-fake"},
+        fingerprints=fingerprints if fingerprints is not None else {"encoder": "deterministic-fake"},
+        strict_resume=strict_resume,
     )
     trainer = Trainer(
         task=task,
@@ -159,6 +161,45 @@ def test_fit_with_show_progress_still_advances_state() -> None:
     val_batch = TrainingBatch(samples=[_sample("c")], targets=torch.randint(0, 2, (1, 2, 2)))
     trainer.fit([train_batch], [val_batch], val_metric=SegmentationMetric(num_classes=2))
     assert trainer.state.epoch == 1
+
+
+def test_fit_runs_validation_with_decoder_in_eval_mode() -> None:
+    """Regression test: validation must run the decoder in eval() mode, not the train() mode
+    _train_one_epoch leaves it in — otherwise a decoder with dropout/batchnorm computes
+    validation metrics using training-time stochasticity/statistics."""
+
+    class _ModeSpyDecoder(nn.Module):
+        def __init__(self, inner: nn.Module) -> None:
+            super().__init__()
+            self.inner = inner
+            self.observed_training_modes: list[bool] = []
+
+        def forward(self, features: EncoderFeatures) -> torch.Tensor:
+            self.observed_training_modes.append(self.training)
+            return self.inner(features)
+
+    set_deterministic_seed(0)
+    decoder = _ModeSpyDecoder(MLPProbeDecoder(patch_dim=4, num_classes=2, output_size=(2, 2)))
+    loss = SegmentationLoss(SegmentationLossConfig(name="ce"), num_classes=2)
+    task = SegmentationTask(decoder, loss)
+    provider = _DeterministicFeatureProvider(patch_dim=4, patch_grid=(2, 2))
+    optimizer = SGD(decoder.parameters(), lr=0.1)
+    config = TrainerConfig(max_epochs=1, fingerprints={"encoder": "deterministic-fake"})
+    trainer = Trainer(
+        task=task,
+        decoder=decoder,
+        feature_provider=provider,
+        optimizer=optimizer,
+        scheduler=None,
+        config=config,
+    )
+
+    train_batch = TrainingBatch(samples=[_sample("a"), _sample("b")], targets=torch.randint(0, 2, (2, 2, 2)))
+    val_batch = TrainingBatch(samples=[_sample("c")], targets=torch.randint(0, 2, (1, 2, 2)))
+    trainer.fit([train_batch], [val_batch], val_metric=SegmentationMetric(num_classes=2))
+
+    assert decoder.observed_training_modes[0] is True
+    assert decoder.observed_training_modes[-1] is False
 
 
 def test_fit_enables_progress_on_main_rank(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -362,6 +403,37 @@ def test_exact_checkpoint_resume(tmp_path: Path) -> None:
         continuous_decoder.parameters(), resumed_decoder.parameters(), strict=True
     ):
         assert torch.allclose(continuous_param, resumed_param, atol=1e-6)
+
+
+def test_resume_raises_on_fingerprint_mismatch_by_default(tmp_path: Path) -> None:
+    batch = TrainingBatch(samples=[_sample("a"), _sample("b")], targets=torch.randint(0, 2, (2, 2, 2)))
+    manager = CheckpointManager(tmp_path)
+    first, _ = _build_trainer(max_epochs=1, seed=7, checkpoint_manager=manager, fingerprints={"encoder": "fake-v1"})
+    first.fit([batch])
+
+    with pytest.raises(CheckpointMismatchError, match="fingerprint mismatch"):
+        _build_trainer(max_epochs=2, seed=7, checkpoint_manager=manager, fingerprints={"encoder": "fake-v2"})
+
+
+def test_resume_with_strict_resume_false_warns_and_resumes_anyway(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    batch = TrainingBatch(samples=[_sample("a"), _sample("b")], targets=torch.randint(0, 2, (2, 2, 2)))
+    manager = CheckpointManager(tmp_path)
+    first, _ = _build_trainer(max_epochs=1, seed=7, checkpoint_manager=manager, fingerprints={"encoder": "fake-v1"})
+    first.fit([batch])
+
+    with caplog.at_level("WARNING"):
+        resumed, _ = _build_trainer(
+            max_epochs=2,
+            seed=7,
+            checkpoint_manager=manager,
+            fingerprints={"encoder": "fake-v2"},
+            strict_resume=False,
+        )
+    assert resumed._resumed
+    assert resumed.state.epoch == first.state.epoch
+    assert "fingerprint mismatch" in caplog.text
 
 
 def test_mid_epoch_checkpoint_resume_skips_already_consumed_batches(tmp_path: Path) -> None:
@@ -587,12 +659,81 @@ def test_reduce_on_plateau_scheduler_is_stepped_on_validation() -> None:
     assert trainer.scheduler.last_epoch >= 1  # ReduceLROnPlateau.step() was called at least once
 
 
+def test_reduce_on_plateau_without_validation_raises() -> None:
+    """Regression test: ReduceLROnPlateau only ever steps from _after_validation, which never runs
+    without both val_batches and val_metric — omitting either must fail fast rather than silently
+    never stepping the learning rate for the entire run."""
+    scheduler_config = SchedulerConfig(name="plateau", plateau_patience=0)
+    trainer, _ = _build_trainer(max_epochs=1, scheduler_config=scheduler_config)
+    train_batch = TrainingBatch(samples=[_sample("a"), _sample("b")], targets=torch.randint(0, 2, (2, 2, 2)))
+
+    with pytest.raises(ValueError, match="ReduceLROnPlateau"):
+        trainer.fit([train_batch])
+
+
+def test_validation_checkpoint_never_pairs_a_stale_epoch_with_a_full_batch_in_epoch(tmp_path: Path) -> None:
+    """Regression test: last.ckpt/the periodic file written from _after_validation must already
+    reflect the advanced epoch (and batch_in_epoch reset to 0) — never the just-finished epoch's
+    number paired with batch_in_epoch already at the full epoch length, which is exactly the state
+    a crash there would otherwise leave behind for _train_one_epoch's resume-skip logic to silently
+    replay as a no-op epoch."""
+    manager = CheckpointManager(tmp_path)
+    trainer, _ = _build_trainer(max_epochs=2, checkpoint_manager=manager)
+    train_batch = TrainingBatch(samples=[_sample("a"), _sample("b")], targets=torch.randint(0, 2, (2, 2, 2)))
+    val_batch = TrainingBatch(samples=[_sample("a"), _sample("b")], targets=torch.randint(0, 2, (2, 2, 2)))
+
+    observed: list[tuple[int, int]] = []
+    original_save = CheckpointManager.save
+
+    def _spying_save(self: CheckpointManager, checkpoint: Any, **kwargs: Any) -> Path:
+        observed.append((checkpoint.training_state.epoch, checkpoint.training_state.batch_in_epoch))
+        return original_save(self, checkpoint, **kwargs)
+
+    manager.save = _spying_save.__get__(manager, CheckpointManager)  # type: ignore[method-assign]
+    trainer.fit([train_batch], [val_batch], val_metric=SegmentationMetric(num_classes=2))
+
+    full_epoch_length = 1  # one batch per epoch in this fixture
+    assert not any(epoch == 0 and batch_in_epoch == full_epoch_length for epoch, batch_in_epoch in observed)
+
+
 def test_construction_does_not_raise_for_parameterless_decoder() -> None:
-    # _device_type() must fall back to "cpu" rather than raising when the decoder has no
+    # _device() must fall back to torch.device("cpu") rather than raising when the decoder has no
     # parameters to inspect.
     decoder = nn.Module()
     task = SegmentationTask(decoder, SegmentationLoss(SegmentationLossConfig(name="ce"), num_classes=2))
     provider = _DeterministicFeatureProvider(patch_dim=4, patch_grid=(2, 2))
     optimizer = SGD([torch.nn.Parameter(torch.zeros(1))], lr=0.1)
     config = TrainerConfig(max_epochs=1)
-    Trainer(task=task, decoder=decoder, feature_provider=provider, optimizer=optimizer, scheduler=None, config=config)
+    trainer = Trainer(
+        task=task, decoder=decoder, feature_provider=provider, optimizer=optimizer, scheduler=None, config=config
+    )
+    assert trainer.device == torch.device("cpu")
+
+
+def test_device_reflects_wherever_the_decoders_parameters_live() -> None:
+    trainer, _ = _build_trainer(max_epochs=1)
+    assert trainer.device == next(trainer.decoder.parameters()).device
+
+
+def test_train_one_epoch_moves_features_and_targets_to_the_trainers_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A CPU-only CI machine can't prove data actually lands on a GPU, but it can prove every
+    # feature/target passes through .to(trainer.device) with the right device argument — the same
+    # code path that matters on a real CUDA device.
+    trainer, _ = _build_trainer(max_epochs=1)
+    train_batch = TrainingBatch(samples=[_sample("a"), _sample("b")], targets=torch.randint(0, 2, (2, 2, 2)))
+
+    seen_devices: list[torch.device] = []
+    original_to = EncoderFeatures.to
+
+    def spy_to(self: EncoderFeatures, device: torch.device | str, *, non_blocking: bool = False) -> EncoderFeatures:
+        seen_devices.append(torch.device(device))
+        return original_to(self, device, non_blocking=non_blocking)
+
+    monkeypatch.setattr(EncoderFeatures, "to", spy_to)
+
+    trainer.fit([train_batch])
+
+    assert seen_devices
+    assert all(device == trainer.device for device in seen_devices)

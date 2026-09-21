@@ -75,8 +75,7 @@ FeatureStore ← FeatureProvider
 
 If this separation stays clean, AgriTune can grow from an agricultural segmentation repo into a
 general agricultural downstream-training framework (classification, regression, depth, detection)
-without a rewrite of the training engine — see `agritune_implementation_plan.md` §26 for the
-release roadmap this repository follows.
+without a rewrite of the training engine.
 
 ## Orchestration layering
 
@@ -91,6 +90,17 @@ Python ──┘
 `precisionai.agritune.services` is the single orchestration layer. The CLI (`precisionai.agritune.cli`)
 and the thin FastAPI layer (`precisionai.agritune.api`) both call the same services — neither
 duplicates business logic.
+
+## API path containment
+
+The CLI is a trusted local tool and accepts any path the invoking user can read or write. The API
+is not: every request field that names a filesystem path (`manifest_path`, `store`,
+`checkpoint_path`, `output_dir`, `config_path`, `augmentation_config_path`) is resolved through
+`precisionai.agritune.api.paths.resolve_under_root` against the directory
+`precisionai.agritune.api.config.get_api_root` returns (`AGRITUNE_API_ROOT`, defaulting to the
+server's current working directory). An absolute path or a `..` segment that would resolve outside
+that root is rejected with HTTP 400 before any file is touched. This API has no built-in
+authentication — see `SECURITY.md` for what that means for deployment.
 
 See also: [configuration.md](configuration.md), [datasets.md](datasets.md), [encoder.md](encoder.md),
 [feature-caching.md](feature-caching.md), [augmentation.md](augmentation.md),

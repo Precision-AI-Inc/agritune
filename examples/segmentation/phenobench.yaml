@@ -1,0 +1,166 @@
+# Flat (non-Hydra) training config for the CWFID sanity check.
+# Prepare the dataset first: python examples/datasets/prepare_cwfid.py
+#
+# agritune train --config examples/segmentation/cwfid.yaml
+#
+# The API key is read from AGRITUNE_ENCODER_API_KEY (.env or the environment), never stored here.
+#
+# This file spells out every field TrainingRunConfig accepts (see
+# precisionai/agritune/cli/config.py and precisionai/agritune/services/training_service.py for the
+# authoritative schema) — including fields already equal to their default — as a single reference
+# for every knob available to `agritune train`. Any of these can also be overridden from the CLI
+# instead of editing the file, e.g.:
+#   agritune train --config examples/segmentation/cwfid.yaml trainer.max_epochs=10 optimizer.lr=1e-4
+
+# --- Dataset / run identity -------------------------------------------------
+manifest_path: examples/datasets/phenobench/manifest.csv
+feature_store_dir: examples/datasets/phenobench/features
+run_root: examples/datasets/phenobench/runs   # runs/<run_id>/ is created here
+run_id: phenobench-sanity-token_fpn_1
+num_classes: 3
+seed: 0                                  # global seed; trainer.seed falls back to this when unset
+
+# --- Encoder identity --------------------------------------------------------
+# encoder_fingerprint must match whatever the feature store at feature_store_dir was built with
+# under feature_provider "cached"/"hybrid" (every lookup misses otherwise).
+encoder_fingerprint:
+  model: pai-embedding
+  revision: null                         # null unless the hosted API exposes one (see docs/encoder.md)
+  preprocessing: ""                      # stable label for preprocessing params, for cache invalidation
+
+# --- Feature provider ---------------------------------------------------------
+# "cached" (default) reads only from feature_store_dir; "online" calls the encoder for every
+# sample every epoch; "hybrid" reads the cache and write-through populates whatever is missing.
+# encoder_base_url/encoder_api_key are ignored entirely under "cached".
+feature_provider: cached                 # cached | online | hybrid
+encoder_base_url: https://embeddings.precision.ai/v1
+encoder_api_key: ${oc.env:AGRITUNE_ENCODER_API_KEY,null}
+
+# --- Image augmentation -------------------------------------------------------
+# mode "none" (default) applies no real augmentation (no flips/crops/photometric transforms).
+# geometric.resize is the one exception: applied to every batch regardless of mode — deterministic
+# dimensional normalization, not augmentation, required whenever the dataset's own images/masks do
+# not already share one native size. "online"/"hybrid" require feature_provider to also be
+# "online"/"hybrid" (a "cached" provider's key would only ever match the first epoch's augmentation
+# fingerprint). Validation samples are never augmented, regardless of mode.
+augmentation:
+  mode: none                             # none | offline | online | hybrid
+  variant: 0                             # offline variant index; ignored outside offline/hybrid
+  hybrid_online_probability: 0.3         # forwarded to prepare_sample under hybrid; ignored otherwise
+  geometric:
+    resize: [256, 256]                         # [width, height]; applied first if set
+    random_crop: [224, 224]                     # [width, height]; applied after resize if set
+    horizontal_flip_probability: 0.5
+    vertical_flip_probability: 0.5
+    rotation_max_degrees: 0.45
+  photometric:
+    brightness_range: [0,0.4]               # [min, max] multiplicative factor around 1.0
+    contrast_range: [0,0.4]                 # [min, max] multiplicative factor around 1.0
+    saturation_range: [0,0.4]               # [min, max] multiplicative factor around 1.0
+    hue_max_degrees: 0.3
+    blur_probability: 0.3
+    blur_radius_range: [0.1, 2.0]
+    noise_probability: 0.4
+    noise_std_range: [0.01, 0.05]
+    channel_dropout_probability: 0.3
+    gsd_jitter_probability: 0.3
+    gsd_jitter_scale_range: [0.5, 0.9]
+    vegetation_index_jitter_probability: 0.3
+    vegetation_index_jitter_range: [-15.0, 15.0]
+    seasonal_color_shift_probability: 0.3
+    seasonal_hue_shift_degrees: 0.1
+
+# --- Feature-space augmentation ---------------------------------------------------
+# Applied to training batches' features only (after feature_provider.get_features, before the
+# decoder) — never to validation, and never touches the feature cache/store, so it composes freely
+# with any feature_provider and any augmentation.mode above. A 0.0 probability/std disables that
+# transform; all zero (the default) is a no-op.
+feature_augmentation:
+  patch_dropout_probability: 0         # drop probability per patch, in [0, 1)
+  token_masking_probability: 0         # mask probability per patch, in [0, 1]
+  token_mask_value: 0                  # constant value masked patches are set to
+  gaussian_noise_std: 0                # std of additive Gaussian noise on patch/CLS tokens
+  cls_dropout_probability: 0           # drop probability per sample's CLS token, in [0, 1)
+  channel_dropout_probability: 0       # drop probability per embedding channel, in [0, 1)
+
+# --- Decoder -------------------------------------------------------------------
+# decoder_name: mlp_probe | token_fpn | aspp | ppm | segmenter | mask_former
+# decoder_kwargs is forwarded verbatim to the selected decoder's constructor — shown below are
+# mlp_probe's own kwargs (matching its defaults); swapping decoder_name requires swapping these
+# keys too (e.g. atrous_rates/hidden_dim/num_layers for aspp, pool_sizes/hidden_dim/num_layers for
+# ppm, num_queries/hidden_dim/num_layers/num_heads/mlp_ratio/dropout for mask_former,
+# cls_fusion/hidden_dim/num_layers for token_fpn).
+decoder_name: token_fpn
+decoder_kwargs:
+  cls_fusion: "film"                     # how to fuse the CLS token with patch tokens, e.g., "concat" or "add"
+  hidden_dim: 128                        # channel width used throughout the refinement stack
+  num_layers: 2                          # stacked 3x3 conv + ReLU blocks in the refinement stack
+# --- Batching / split ------------------------------------------------------------
+batch_size: 32
+num_workers: 0                           # DataLoader worker subprocesses for batch decode/augmentation;
+                                          # 0 runs everything in the main process. Raise this (e.g. 4-8)
+                                          # if "building batches" is slow at your batch_size/storage speed.
+pin_memory: false                        # pins batch tensors in host memory for a faster host->device
+                                          # copy; only helps when training on a CUDA device, no-op on CPU.
+prefetch_factor: 1                    # batches each worker buffers ahead; null defers to DataLoader's
+                                          # own default (2), only meaningful when num_workers > 0. Peak
+                                          # memory scales with num_workers * prefetch_factor * batch_size
+                                          # — cap this (e.g. 1) if a high num_workers gets killed (OOM)
+                                          # at a large batch_size.
+val_fraction: 0.25                       # fraction of samples held out for validation (random split)
+
+# --- Optimizer -------------------------------------------------------------------
+optimizer:
+  name: adamw                              # adamw | adam | sgd
+  lr: 0.001
+  weight_decay: 0.01
+  betas: [0.9, 0.999]                    # ignored for sgd
+  momentum: 0.9                          # ignored for adam/adamw
+
+# --- LR scheduler ------------------------------------------------------------------
+# enabled: false (or an empty mapping) disables the scheduler entirely, equivalent to omitting
+# this section. "constant" (shown) is a no-op multiplier of 1.0, identical in effect to no
+# scheduler at all — included here only to document every field.
+scheduler:
+  enabled: false                          # false disables the scheduler regardless of the fields below
+  name: linear_warmup                         # constant | cosine | linear_warmup | polynomial | plateau
+  warmup_steps: 10                        # ignored by constant/plateau
+  total_steps: 20                      # required by cosine/linear_warmup/polynomial
+  polynomial_power: 1.0                  # only used by polynomial
+  plateau_factor: 0.5                    # only used by plateau
+  plateau_patience: 10                   # only used by plateau
+
+# --- Trainer -----------------------------------------------------------------------
+trainer:
+  max_epochs: 100
+  accumulation_steps: 1                 # micro-batches accumulated before each optimizer step
+  grad_clip_norm: null                   # max gradient norm for clipping; null disables clipping
+  precision: fp16                        # fp32 | fp16 | bf16
+  seed: 0                                # defaults to the top-level seed when omitted
+  early_stopping_patience: null          # stop after this many validation passes with no improvement
+  checkpoint_every_n_steps: null         # also checkpoint periodically, in addition to end-of-epoch/best
+
+# --- Loss ------------------------------------------------------------------------
+loss:
+  name: dice                               # ce | bce | dice | ce_dice | bce_dice
+  ignore_index: -100                     # pixel value excluded from every term
+  class_weights: null                    # per-class weights (CE "weight" / BCE "pos_weight")
+  ce_weight: 1.0                         # weight applied to the CE/BCE term in a combined loss
+  dice_weight: 1.0                       # weight applied to the Dice term in a combined loss
+
+# --- Validation / checkpointing ---------------------------------------------------
+val_metric_name: loss
+higher_is_better: false
+checkpoint_top_k: 3                      # best-by-val-metric checkpoints retained; 0 keeps every one
+
+# --- Tracking ----------------------------------------------------------------------
+# backends: any of null, jsonl, tensorboard, mlflow, wandb, neptune, comet (a list — combine
+# several to fan out to multiple backends at once). Only the settings for backends you actually
+# select are consulted.
+tracking:
+  backends: [jsonl]
+  mlflow_experiment_name: my_experiment
+  mlflow_tracking_uri: null
+  wandb_project: agritune
+  neptune_project: null                  # required, as "workspace/project", if neptune is selected
+  comet_project_name: agritune

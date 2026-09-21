@@ -19,7 +19,12 @@ T = TypeVar("T")
 
 
 def progress_iter(
-    iterable: Iterable[T], *, desc: str | None = None, unit: str = "it", disable: bool = False
+    iterable: Iterable[T],
+    *,
+    desc: str | None = None,
+    unit: str = "it",
+    disable: bool = False,
+    total: int | None = None,
 ) -> Iterable[T]:
     """Wrap ``iterable`` with a ``tqdm`` progress bar.
 
@@ -35,10 +40,14 @@ def progress_iter(
     disable : bool, optional
         When ``True``, no bar is rendered but ``iterable`` still yields normally — the hook a
         future multi-process rank check should set.
+    total : int | None, optional
+        Explicit item count, for an ``iterable`` that has no ``len()`` (e.g. a generator) but
+        whose length is still known up front — a lazily-chunked dataset walk, say. ``None`` (the
+        default) falls back to ``tqdm``'s own ``len()`` inference.
 
     Returns
     -------
     Iterable[T]
         ``iterable``, wrapped for display.
     """
-    return tqdm(iterable, desc=desc, unit=unit, disable=disable, leave=False)
+    return tqdm(iterable, desc=desc, unit=unit, disable=disable, leave=False, total=total)

@@ -3,8 +3,8 @@
 
 """Minimal distributed-readiness context.
 
-Full DDP wiring is deliberately deferred to Phase 17 (``agritune_implementation_plan.md`` §20) —
-single-GPU training must be reliable first. This module exists so the trainer and checkpointing
+Full DDP wiring is deliberately deferred — single-GPU training must be reliable first. This
+module exists so the trainer and checkpointing
 code can already ask "am I the main process" and "how many ranks" without hardcoding
 single-process assumptions everywhere they matter (e.g. only rank 0 should write checkpoints or
 log to a tracker).

@@ -8,11 +8,19 @@ same underlying services through the other entry point.
 
 from pathlib import Path
 
+import pytest
 import yaml
 from fastapi.testclient import TestClient
 
 from precisionai.agritune.api import create_app
 from tests.fixtures.manifest_factory import build_manifest
+
+
+@pytest.fixture(autouse=True)
+def _api_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Scope the API's path-containment root to this test's ``tmp_path``."""
+    monkeypatch.setenv("AGRITUNE_API_ROOT", str(tmp_path))
+
 
 _ROWS = [
     ("sample-0", "field-a", 0),
@@ -263,6 +271,57 @@ def test_predict_empty_sample_set_returns_400(tmp_path: Path) -> None:
     )
 
     assert response.status_code == 400
+
+
+def test_train_rejects_a_config_path_outside_the_api_root(tmp_path_factory: pytest.TempPathFactory) -> None:
+    outside = tmp_path_factory.mktemp("outside")
+    config_path = outside / "train.yaml"
+    config_path.write_text(yaml.safe_dump({"manifest_path": "x", "num_classes": 2}))
+
+    response = _client().post("/train", json={"config_path": str(config_path)})
+
+    assert response.status_code == 400
+    assert "config_path" in response.json()["detail"]
+
+
+def test_predict_rejects_an_output_dir_outside_the_api_root(
+    tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    client = _client()
+    manifest_path, store_path, checkpoint_path = _train_a_checkpoint(client, tmp_path)
+    outside_output_dir = tmp_path_factory.mktemp("outside") / "predictions"
+
+    response = client.post(
+        "/predict",
+        json={
+            "manifest_path": str(manifest_path),
+            "store": str(store_path),
+            "checkpoint_path": str(checkpoint_path),
+            "num_classes": 2,
+            "output_dir": str(outside_output_dir),
+        },
+    )
+
+    assert response.status_code == 400
+    assert "output_dir" in response.json()["detail"]
+
+
+def test_evaluate_rejects_a_checkpoint_path_that_escapes_the_api_root_with_dotdot(tmp_path: Path) -> None:
+    client = _client()
+    manifest_path, store_path, _ = _train_a_checkpoint(client, tmp_path)
+
+    response = client.post(
+        "/evaluate",
+        json={
+            "manifest_path": str(manifest_path),
+            "store": str(store_path),
+            "checkpoint_path": "../../escaped.ckpt",
+            "num_classes": 2,
+        },
+    )
+
+    assert response.status_code == 400
+    assert "checkpoint_path" in response.json()["detail"]
 
 
 def test_encoder_benchmark_reports_recommended_settings() -> None:

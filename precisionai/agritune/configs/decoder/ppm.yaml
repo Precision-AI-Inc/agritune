@@ -3,3 +3,4 @@
 name: ppm
 hidden_dim: 128
 pool_sizes: [1, 2, 3, 6]
+num_layers: 1                          # stacked 3x3 conv + ReLU blocks fusing the pooled features

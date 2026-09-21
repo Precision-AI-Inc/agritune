@@ -29,6 +29,18 @@ def test_output_shape_matches_output_size_and_num_classes() -> None:
     assert logits.shape == (3, 5, 64, 64)
 
 
+def test_output_shape_with_more_project_layers() -> None:
+    decoder = ASPPDecoder(patch_dim=8, num_classes=5, output_size=(64, 64), hidden_dim=16, num_layers=3)
+    assert len(decoder.project) == 3 * 2  # each layer is a (Conv2d, ReLU) pair
+    logits = decoder(_features(batch_size=3, grid=(4, 4), patch_dim=8))
+    assert logits.shape == (3, 5, 64, 64)
+
+
+def test_num_layers_must_be_positive() -> None:
+    with pytest.raises(ValueError, match="num_layers must be positive"):
+        ASPPDecoder(patch_dim=8, num_classes=4, output_size=(32, 32), num_layers=0)
+
+
 def test_custom_atrous_rates_are_stored_and_produce_one_branch_each() -> None:
     decoder = ASPPDecoder(patch_dim=8, num_classes=4, output_size=(8, 8), hidden_dim=8, atrous_rates=(2, 4))
     assert decoder.atrous_rates == (2, 4)

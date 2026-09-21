@@ -7,6 +7,7 @@ Definition of done this covers: training can run entirely disconnected from the 
 completed feature store — precompute writes under exactly the keys this provider reads under.
 """
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -88,3 +89,47 @@ async def test_different_encoder_fingerprint_misses_cache(tmp_path: Path) -> Non
 
     with pytest.raises(FeatureNotCachedError):
         provider.get_features(samples)
+
+
+async def test_max_read_workers_bounds_the_read_thread_pool(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    samples = _samples(3)
+    store = await _build_store(tmp_path, samples)
+    provider = CachedFeatureProvider(
+        store, encoder_fingerprint=_FINGERPRINT, image_hash_fn=_hash_fn, max_read_workers=2
+    )
+
+    seen_max_workers: list[int | None] = []
+    original_init = ThreadPoolExecutor.__init__
+
+    def spy_init(self: ThreadPoolExecutor, *args: object, max_workers: int | None = None, **kwargs: object) -> None:
+        seen_max_workers.append(max_workers)
+        original_init(self, *args, max_workers=max_workers, **kwargs)
+
+    monkeypatch.setattr(ThreadPoolExecutor, "__init__", spy_init)
+
+    provider.get_features(samples)
+
+    # min(max_read_workers, len(samples)) = min(2, 3) = 2.
+    assert seen_max_workers == [2]
+
+
+async def test_default_max_read_workers_does_not_restrict_a_small_batch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    samples = _samples(3)
+    store = await _build_store(tmp_path, samples)
+    provider = CachedFeatureProvider(store, encoder_fingerprint=_FINGERPRINT, image_hash_fn=_hash_fn)
+
+    seen_max_workers: list[int | None] = []
+    original_init = ThreadPoolExecutor.__init__
+
+    def spy_init(self: ThreadPoolExecutor, *args: object, max_workers: int | None = None, **kwargs: object) -> None:
+        seen_max_workers.append(max_workers)
+        original_init(self, *args, max_workers=max_workers, **kwargs)
+
+    monkeypatch.setattr(ThreadPoolExecutor, "__init__", spy_init)
+
+    provider.get_features(samples)
+
+    # min(default _MAX_READ_WORKERS=32, len(samples)) = min(32, 3) = 3.
+    assert seen_max_workers == [3]

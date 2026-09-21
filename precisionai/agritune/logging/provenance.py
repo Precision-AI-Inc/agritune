@@ -4,8 +4,7 @@
 """Run provenance capture.
 
 Every training run gets a ``runs/<run_id>/`` directory capturing everything needed to reproduce
-it — this is a core v1 requirement, not an optional enhancement (see
-``agritune_implementation_plan.md`` §16).
+it — this is a core v1 requirement, not an optional enhancement.
 """
 
 import importlib.metadata

@@ -3,6 +3,7 @@
 
 """Unit tests for precisionai.agritune.services.segmentation_common."""
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import numpy as np
@@ -15,11 +16,13 @@ from precisionai.agritune.augmentations.image.pipeline import (
     AugmentationPipelineConfig,
     GeometricConfig,
     ImageAugmentationPipeline,
+    PhotometricConfig,
     prepare_sample,
 )
 from precisionai.agritune.data.dataset import ManifestDataset
 from precisionai.agritune.encoder.fake import FakeEncoderBackend
-from precisionai.agritune.features.keys import EncoderFingerprint
+from precisionai.agritune.features.keys import EncoderFingerprint, hash_augmentation
+from precisionai.agritune.features.provider import _MAX_READ_WORKERS
 from precisionai.agritune.features.store import DirectoryFeatureStore
 from precisionai.agritune.schemas.samples import PreparedSample
 from precisionai.agritune.services.feature_service import build_features
@@ -33,6 +36,7 @@ from precisionai.agritune.services.segmentation_common import (
     build_training_batches,
     mask_to_target_tensor,
     probe_feature_dims,
+    validate_device,
 )
 from precisionai.agritune.tasks.segmentation.decoders.aspp import ASPPDecoder
 from precisionai.agritune.tasks.segmentation.decoders.mask_former import MaskFormerDecoder
@@ -112,12 +116,109 @@ def test_build_training_batches_chunks_correctly(tmp_path: Path) -> None:
     assert [len(batch.samples) for batch in batches] == [3, 1]
 
 
+def test_build_training_batches_is_reiterable(tmp_path: Path) -> None:
+    """Trainer.fit() walks train/val batches once per epoch — a one-shot generator would silently
+    yield nothing from epoch 2 onward, so every pass must independently re-read from disk."""
+    manifest_path = build_manifest(tmp_path)
+    dataset = ManifestDataset(manifest_path)
+    batches = build_training_batches(dataset, batch_size=3)
+
+    first_pass = [len(batch.samples) for batch in batches]
+    second_pass = [len(batch.samples) for batch in batches]
+
+    assert first_pass == second_pass == [3, 1]
+
+
+def test_build_training_batches_supports_multiple_dataloader_workers(tmp_path: Path) -> None:
+    manifest_path = build_manifest(tmp_path)
+    dataset = ManifestDataset(manifest_path)
+    batches = build_training_batches(dataset, batch_size=3, num_workers=2)
+    assert [len(batch.samples) for batch in batches] == [3, 1]
+
+
+def test_build_training_batches_supports_prefetch_factor_with_workers(tmp_path: Path) -> None:
+    manifest_path = build_manifest(tmp_path)
+    dataset = ManifestDataset(manifest_path)
+    batches = build_training_batches(dataset, batch_size=3, num_workers=2, prefetch_factor=1)
+    assert [len(batch.samples) for batch in batches] == [3, 1]
+
+
+def test_build_training_batches_rejects_prefetch_factor_without_workers(tmp_path: Path) -> None:
+    manifest_path = build_manifest(tmp_path)
+    dataset = ManifestDataset(manifest_path)
+    with pytest.raises(ValueError, match="prefetch_factor"):
+        list(build_training_batches(dataset, batch_size=3, num_workers=0, prefetch_factor=1))
+
+
+def test_build_training_batches_pin_memory_does_not_error(tmp_path: Path) -> None:
+    manifest_path = build_manifest(tmp_path)
+    dataset = ManifestDataset(manifest_path)
+    batches = list(build_training_batches(dataset, batch_size=3, pin_memory=True))
+    assert [len(batch.samples) for batch in batches] == [3, 1]
+
+
+def test_build_training_batches_without_resize_rejects_varying_native_sizes(tmp_path: Path) -> None:
+    """Reproduces the bug: unequal native mask sizes cannot be torch.stack-ed without a resize."""
+    make_image((8, 6)).save(tmp_path / "s0_image.png")
+    make_mask((8, 6)).save(tmp_path / "s0_mask.png")
+    make_image((10, 7)).save(tmp_path / "s1_image.png")
+    make_mask((10, 7)).save(tmp_path / "s1_mask.png")
+    manifest_path = tmp_path / "manifest.csv"
+    manifest_path.write_text(
+        "sample_id,image_path,mask_path\ns0,s0_image.png,s0_mask.png\ns1,s1_image.png,s1_mask.png\n"
+    )
+    dataset = ManifestDataset(manifest_path)
+
+    with pytest.raises(RuntimeError, match="stack expects each tensor to be equal size"):
+        list(build_training_batches(dataset, batch_size=2))
+
+
+def test_build_training_batches_resize_normalizes_varying_native_sizes(tmp_path: Path) -> None:
+    make_image((8, 6)).save(tmp_path / "s0_image.png")
+    make_mask((8, 6)).save(tmp_path / "s0_mask.png")
+    make_image((10, 7)).save(tmp_path / "s1_image.png")
+    make_mask((10, 7)).save(tmp_path / "s1_mask.png")
+    manifest_path = tmp_path / "manifest.csv"
+    manifest_path.write_text(
+        "sample_id,image_path,mask_path\ns0,s0_image.png,s0_mask.png\ns1,s1_image.png,s1_mask.png\n"
+    )
+    dataset = ManifestDataset(manifest_path)
+
+    batches = list(build_training_batches(dataset, batch_size=2, resize=(8, 6)))
+
+    assert batches[0].targets.shape == (2, 6, 8)
+
+
 def test_build_prediction_batches_have_no_targets(tmp_path: Path) -> None:
     manifest_path = build_manifest(tmp_path)
     dataset = ManifestDataset(manifest_path)
-    batches = build_prediction_batches(dataset, batch_size=2)
+    batches = list(build_prediction_batches(dataset, batch_size=2))
     assert [len(batch) for batch in batches] == [2, 2]
     assert all(sample.target is None for batch in batches for sample in batch)
+
+
+def test_build_prediction_batches_is_lazy(tmp_path: Path) -> None:
+    manifest_path = build_manifest(tmp_path)
+    dataset = ManifestDataset(manifest_path)
+    batches = build_prediction_batches(dataset, batch_size=2)
+    assert next(batches) is not None
+    assert isinstance(batches, Iterator)
+
+
+def test_build_prediction_batches_resize_normalizes_image_size(tmp_path: Path) -> None:
+    """Regression test: build_prediction_batches previously had no resize parameter at all, so
+    predicting against a checkpoint trained with a resize had no way to match it — see
+    test_build_training_batches_resize_normalizes_varying_native_sizes for the training-side
+    equivalent this mirrors."""
+    make_image((8, 6)).save(tmp_path / "s0_image.png")
+    make_mask((8, 6)).save(tmp_path / "s0_mask.png")
+    manifest_path = tmp_path / "manifest.csv"
+    manifest_path.write_text("sample_id,image_path,mask_path\ns0,s0_image.png,s0_mask.png\n")
+    dataset = ManifestDataset(manifest_path)
+
+    batches = list(build_prediction_batches(dataset, batch_size=1, resize=(4, 3)))
+
+    assert batches[0][0].image.size == (4, 3)
 
 
 async def test_build_cached_feature_provider_reads_what_was_precomputed(tmp_path: Path) -> None:
@@ -133,6 +234,32 @@ async def test_build_cached_feature_provider_reads_what_was_precomputed(tmp_path
     sample = PreparedSample(sample_id="sample-0", image=None, target=None)
     features = provider.get_features([sample])
     assert features.batch_size == 1
+
+
+async def test_build_cached_feature_provider_forwards_max_read_workers(tmp_path: Path) -> None:
+    manifest_path = build_manifest(tmp_path)
+    store = DirectoryFeatureStore(tmp_path / "features")
+    await build_features(
+        str(manifest_path), store=store, encoder=FakeEncoderBackend(), encoder_fingerprint=_FINGERPRINT
+    )
+
+    provider, _ = build_cached_feature_provider(
+        str(manifest_path), store=store, encoder_fingerprint=_FINGERPRINT, max_read_workers=4
+    )
+
+    assert provider._max_read_workers == 4
+
+
+async def test_build_cached_feature_provider_defaults_max_read_workers_when_omitted(tmp_path: Path) -> None:
+    manifest_path = build_manifest(tmp_path)
+    store = DirectoryFeatureStore(tmp_path / "features")
+    await build_features(
+        str(manifest_path), store=store, encoder=FakeEncoderBackend(), encoder_fingerprint=_FINGERPRINT
+    )
+
+    provider, _ = build_cached_feature_provider(str(manifest_path), store=store, encoder_fingerprint=_FINGERPRINT)
+
+    assert provider._max_read_workers == _MAX_READ_WORKERS
 
 
 async def test_probe_feature_dims_reports_patch_and_cls_dims(tmp_path: Path) -> None:
@@ -182,9 +309,11 @@ def test_build_static_augmented_batches_none_mode_matches_build_training_batches
     dataset = ManifestDataset(manifest_path)
     pipeline = ImageAugmentationPipeline()
 
-    plain = build_training_batches(dataset, batch_size=2)
-    augmented = build_static_augmented_batches(
-        dataset, pipeline=pipeline, mode=AugmentationMode.NONE, global_seed=0, batch_size=2
+    plain = list(build_training_batches(dataset, batch_size=2))
+    augmented = list(
+        build_static_augmented_batches(
+            dataset, pipeline=pipeline, mode=AugmentationMode.NONE, global_seed=0, batch_size=2
+        )
     )
 
     assert torch.equal(plain[0].targets, augmented[0].targets)
@@ -199,8 +328,10 @@ def test_build_static_augmented_batches_offline_applies_augmentation(tmp_path: P
         AugmentationPipelineConfig(geometric=GeometricConfig(horizontal_flip_probability=1.0))
     )
 
-    batches = build_static_augmented_batches(
-        dataset, pipeline=pipeline, mode=AugmentationMode.OFFLINE, global_seed=0, batch_size=2, variant=0
+    batches = list(
+        build_static_augmented_batches(
+            dataset, pipeline=pipeline, mode=AugmentationMode.OFFLINE, global_seed=0, batch_size=2, variant=0
+        )
     )
 
     original = dataset[0].image
@@ -216,14 +347,146 @@ def test_build_static_augmented_batches_offline_is_deterministic(tmp_path: Path)
         AugmentationPipelineConfig(geometric=GeometricConfig(rotation_max_degrees=30.0))
     )
 
-    first = build_static_augmented_batches(
-        dataset, pipeline=pipeline, mode=AugmentationMode.OFFLINE, global_seed=7, batch_size=2, variant=0
+    first = list(
+        build_static_augmented_batches(
+            dataset, pipeline=pipeline, mode=AugmentationMode.OFFLINE, global_seed=7, batch_size=2, variant=0
+        )
     )
-    second = build_static_augmented_batches(
-        dataset, pipeline=pipeline, mode=AugmentationMode.OFFLINE, global_seed=7, batch_size=2, variant=0
+    second = list(
+        build_static_augmented_batches(
+            dataset, pipeline=pipeline, mode=AugmentationMode.OFFLINE, global_seed=7, batch_size=2, variant=0
+        )
     )
 
     for first_sample, second_sample in zip(first[0].samples, second[0].samples, strict=True):
+        assert np.array_equal(np.array(first_sample.image), np.array(second_sample.image))
+
+
+def test_build_static_augmented_batches_load_images_false_never_sets_image(tmp_path: Path) -> None:
+    manifest_path = _build_gradient_manifest(tmp_path)
+    dataset = ManifestDataset(manifest_path)
+    pipeline = ImageAugmentationPipeline(
+        AugmentationPipelineConfig(geometric=GeometricConfig(horizontal_flip_probability=1.0))
+    )
+
+    batches = list(
+        build_static_augmented_batches(
+            dataset,
+            pipeline=pipeline,
+            mode=AugmentationMode.OFFLINE,
+            global_seed=0,
+            batch_size=2,
+            load_images=False,
+        )
+    )
+
+    for sample in batches[0].samples:
+        assert sample.image is None
+        assert sample.augmentation_metadata is not None
+
+
+def test_build_static_augmented_batches_load_images_false_matches_load_images_true_targets(tmp_path: Path) -> None:
+    manifest_path = _build_gradient_manifest(tmp_path)
+    dataset = ManifestDataset(manifest_path)
+    pipeline = ImageAugmentationPipeline(
+        AugmentationPipelineConfig(
+            geometric=GeometricConfig(horizontal_flip_probability=1.0, rotation_max_degrees=15.0),
+            photometric=PhotometricConfig(brightness_range=(0.6, 1.4), blur_probability=1.0),
+        )
+    )
+
+    with_images = list(
+        build_static_augmented_batches(
+            dataset, pipeline=pipeline, mode=AugmentationMode.OFFLINE, global_seed=3, batch_size=2, variant=1
+        )
+    )
+    without_images = list(
+        build_static_augmented_batches(
+            dataset,
+            pipeline=pipeline,
+            mode=AugmentationMode.OFFLINE,
+            global_seed=3,
+            batch_size=2,
+            variant=1,
+            load_images=False,
+        )
+    )
+
+    assert torch.equal(with_images[0].targets, without_images[0].targets)
+    for with_sample, without_sample in zip(with_images[0].samples, without_images[0].samples, strict=True):
+        assert hash_augmentation(with_sample.augmentation_metadata) == hash_augmentation(
+            without_sample.augmentation_metadata
+        )
+
+
+async def test_build_static_augmented_batches_load_images_false_still_hits_the_cache(tmp_path: Path) -> None:
+    """The end-to-end proof: features cached from the real image+mask pipeline must still be found
+    by a provider fed samples built by the image-free (mask-only) batch-building path — even with
+    both geometric and photometric randomness active, mirroring a real offline flip/rotate/color
+    config."""
+    manifest_path = _build_gradient_manifest(tmp_path)
+    store = DirectoryFeatureStore(tmp_path / "features")
+    pipeline = ImageAugmentationPipeline(
+        AugmentationPipelineConfig(
+            geometric=GeometricConfig(horizontal_flip_probability=1.0, rotation_max_degrees=20.0),
+            photometric=PhotometricConfig(contrast_range=(0.5, 1.5), noise_probability=1.0),
+        )
+    )
+    await build_features(
+        str(manifest_path),
+        store=store,
+        encoder=FakeEncoderBackend(),
+        encoder_fingerprint=_FINGERPRINT,
+        augmentation_mode=AugmentationMode.OFFLINE,
+        augmentation_pipeline=pipeline,
+        global_seed=9,
+        augmentation_variant=0,
+    )
+
+    dataset = ManifestDataset(manifest_path)
+    provider, _ = build_cached_feature_provider(str(manifest_path), store=store, encoder_fingerprint=_FINGERPRINT)
+    batches = list(
+        build_static_augmented_batches(
+            dataset,
+            pipeline=pipeline,
+            mode=AugmentationMode.OFFLINE,
+            global_seed=9,
+            batch_size=2,
+            variant=0,
+            load_images=False,
+        )
+    )
+
+    features = provider.get_features(batches[0].samples)
+    assert features.batch_size == 2
+
+
+def test_build_training_batches_load_images_false_never_sets_image(tmp_path: Path) -> None:
+    manifest_path = build_manifest(tmp_path)
+    dataset = ManifestDataset(manifest_path)
+
+    batches = list(build_training_batches(dataset, batch_size=2, resize=(4, 3), load_images=False))
+
+    for sample in batches[0].samples:
+        assert sample.image is None
+    assert batches[0].targets.shape[1:] == (3, 4)
+
+
+def test_build_static_augmented_batches_is_reiterable(tmp_path: Path) -> None:
+    """Same re-iterability requirement as build_training_batches — see that test's docstring."""
+    manifest_path = _build_gradient_manifest(tmp_path)
+    dataset = ManifestDataset(manifest_path)
+    pipeline = ImageAugmentationPipeline(
+        AugmentationPipelineConfig(geometric=GeometricConfig(rotation_max_degrees=30.0))
+    )
+    batches = build_static_augmented_batches(
+        dataset, pipeline=pipeline, mode=AugmentationMode.OFFLINE, global_seed=7, batch_size=2, variant=0
+    )
+
+    first_pass = list(batches)
+    second_pass = list(batches)
+
+    for first_sample, second_sample in zip(first_pass[0].samples, second_pass[0].samples, strict=True):
         assert np.array_equal(np.array(first_sample.image), np.array(second_sample.image))
 
 
@@ -325,3 +588,30 @@ def test_online_augmented_batches_hybrid_mode_is_deterministic_per_epoch(tmp_pat
     second_run = _run()
     for first_image, second_image in zip(first_run, second_run, strict=True):
         assert np.array_equal(first_image, second_image)  # epoch 0 is deterministic across runs
+
+
+def test_validate_device_accepts_cpu() -> None:
+    assert validate_device("cpu") == torch.device("cpu")
+
+
+def test_validate_device_rejects_invalid_device_string() -> None:
+    with pytest.raises(ValueError, match="invalid device"):
+        validate_device("not-a-real-device")
+
+
+@pytest.mark.skipif(torch.cuda.is_available(), reason="requires a CPU-only machine")
+def test_validate_device_rejects_cuda_when_unavailable() -> None:
+    with pytest.raises(ValueError, match="requests CUDA"):
+        validate_device("cuda:0")
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA-enabled machine")
+def test_validate_device_rejects_out_of_range_cuda_index() -> None:
+    out_of_range = torch.cuda.device_count()
+    with pytest.raises(ValueError, match="only has"):
+        validate_device(f"cuda:{out_of_range}")
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA-enabled machine")
+def test_validate_device_accepts_a_valid_cuda_device() -> None:
+    assert validate_device("cuda:0") == torch.device("cuda:0")

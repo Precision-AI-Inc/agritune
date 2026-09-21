@@ -3,7 +3,7 @@
 
 """``PrefetchingFeatureProvider`` — overlaps encoding with training via a bounded background queue.
 
-Desired execution, per ``agritune_implementation_plan.md`` §19::
+Desired execution::
 
     CPU            prepare batch N+2
     Network        encode batch N+1

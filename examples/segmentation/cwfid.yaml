@@ -37,9 +37,11 @@ encoder_base_url: https://embeddings.precision.ai/v1
 encoder_api_key: ${oc.env:AGRITUNE_ENCODER_API_KEY,null}
 
 # --- Image augmentation -------------------------------------------------------
-# mode "none" (default) applies no augmentation at all and ignores every field below it — matches
-# every pre-v0.2 run exactly. "online"/"hybrid" require feature_provider to also be "online"/
-# "hybrid" (a "cached" provider's key would only ever match the first epoch's augmentation
+# mode "none" (default) applies no real augmentation (no flips/crops/photometric transforms).
+# geometric.resize is the one exception: applied to every batch regardless of mode — deterministic
+# dimensional normalization, not augmentation, required whenever the dataset's own images/masks do
+# not already share one native size. "online"/"hybrid" require feature_provider to also be
+# "online"/"hybrid" (a "cached" provider's key would only ever match the first epoch's augmentation
 # fingerprint). Validation samples are never augmented, regardless of mode.
 augmentation:
   mode: none                             # none | offline | online | hybrid
@@ -85,8 +87,9 @@ feature_augmentation:
 # decoder_name: mlp_probe | token_fpn | aspp | ppm | segmenter | mask_former
 # decoder_kwargs is forwarded verbatim to the selected decoder's constructor — shown below are
 # mlp_probe's own kwargs (matching its defaults); swapping decoder_name requires swapping these
-# keys too (e.g. atrous_rates/hidden_dim for aspp, pool_sizes for ppm, num_queries for
-# mask_former, cls_fusion/hidden_dim for token_fpn).
+# keys too (e.g. atrous_rates/hidden_dim/num_layers for aspp, pool_sizes/hidden_dim/num_layers for
+# ppm, num_queries/hidden_dim/num_layers/num_heads/mlp_ratio/dropout for mask_former,
+# cls_fusion/hidden_dim/num_layers for token_fpn).
 decoder_name: mlp_probe
 decoder_kwargs:
   hidden_dims: []                        # empty = a single nn.Linear(patch_dim, num_classes)
@@ -94,6 +97,16 @@ decoder_kwargs:
 
 # --- Batching / split ------------------------------------------------------------
 batch_size: 4
+num_workers: 0                           # DataLoader worker subprocesses for batch decode/augmentation;
+                                          # 0 runs everything in the main process. Raise this (e.g. 4-8)
+                                          # if "building batches" is slow at your batch_size/storage speed.
+pin_memory: false                        # pins batch tensors in host memory for a faster host->device
+                                          # copy; only helps when training on a CUDA device, no-op on CPU.
+prefetch_factor: null                    # batches each worker buffers ahead; null defers to DataLoader's
+                                          # own default (2), only meaningful when num_workers > 0. Peak
+                                          # memory scales with num_workers * prefetch_factor * batch_size
+                                          # — cap this (e.g. 1) if a high num_workers gets killed (OOM)
+                                          # at a large batch_size.
 val_fraction: 0.25                       # fraction of samples held out for validation (random split)
 
 # --- Optimizer -------------------------------------------------------------------

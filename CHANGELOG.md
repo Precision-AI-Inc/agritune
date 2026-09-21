@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Every API request field naming a filesystem path (`manifest_path`, `store`, `checkpoint_path`,
+  `output_dir`, `config_path`, `augmentation_config_path`) is now resolved through a new
+  `precisionai.agritune.api.paths.resolve_under_root` helper and rejected with HTTP 400 if it
+  would resolve outside the configured API root (`AGRITUNE_API_ROOT`, defaulting to the server's
+  current working directory) — closing a path-traversal gap where an absolute path or a `..`
+  segment let a request read or write anywhere the server process could access (e.g.
+  `checkpoint_path` into `torch.load`, `output_dir` for prediction PNGs, `config_path` into
+  training). This API still has no built-in authentication by design — see `SECURITY.md`.
 - Pull-request CI now requests `contents: read` only, reusable unit-test/pre-commit jobs declare
   the same, and their checkouts set `persist-credentials: false` so pull-request code cannot run
   with a repository write token.
@@ -19,9 +27,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Pyright optional-palette subscript in `colorize_predictions` and live-test API-key narrowing
   after `pytest.skip`.
+- `SegmentationMetric.update` now follows `outputs`/`targets` onto whatever device they're
+  actually on (its confusion-matrix accumulator used to stay fixed on CPU, raising a
+  device-mismatch error the first time `Trainer`/`evaluate()` moved a batch to CUDA).
+- Feature-space augmentation (`augmentations.feature.transforms`) now moves every random
+  mask/noise tensor it draws onto the same device as the features it perturbs, instead of
+  leaving it on the CPU-based checkpointed RNG's device — the same class of device-mismatch bug,
+  triggered whenever `feature_augmentation` is enabled on a CUDA training run.
 
 ### Added
 
+- `TrainingRunConfig.device` (`"cpu"`, `"cuda"`, or `"cuda:N"`): the decoder and every batch's
+  features/targets now actually move to the configured device before `forward`/`compute_loss`
+  (previously nothing in the training pipeline ever called `.to()`, so `trainer.precision: fp16`
+  silently never engaged CUDA's gradient scaler). Rejected up front via a new
+  `_validate_device_config` if it names a CUDA device that is unavailable or out of range for the
+  machine's GPU count — never a silent fallback to CPU. Added `EncoderFeatures.to(device)` and a
+  `device` parameter on `evaluate()` to support this.
+- `TrainingRunConfig.feature_read_workers`: exposes `CachedFeatureProvider`'s internal read
+  thread-pool size (previously a fixed constant) so it can be tuned independently of the
+  `DataLoader`'s `num_workers` — the dominant per-batch cost once `feature_provider: cached` skips
+  image loading entirely.
+- `precisionai.agritune.training.prefetch.PrefetchingFeatureLoader`: overlaps one batch's feature
+  fetch (a `FeatureProvider.get_features` call — a disk/store read for `cached`/`hybrid`) with the
+  previous batch's model compute in a single background thread, wired into both `Trainer`'s
+  training loop and `evaluate()`, so the GPU is no longer idle waiting on a synchronous feature
+  read every batch.
 - Info/debug/warning logging across previously-silent modules (services, encoder, evaluator),
   plus `tqdm` progress bars over every long-running loop (training/validation batches,
   evaluation, prediction, feature precompute, encoder benchmarking, and the CWFID/PhenoBench prep
@@ -136,12 +167,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- README: primary header is now "Precision AI AgriTune"; badges moved below the description; the
+  stale "Status" section (internal build-phase notes) was removed; `Installation` no longer opens
+  the document — a runnable `Quick Start` does, followed by `Project layout`, with a new
+  "FastAPI server" subsection under `Installation` covering the `[api]` extra and `uvicorn`.
+  `Quick Start` walks the packaged CWFID example end-to-end (dataset prep, validate, feature
+  build, train, evaluate) instead of a synthetic placeholder manifest, with a `fake-encoder`
+  fallback for anyone without hosted-encoder access yet.
+- `pyproject.toml`'s `api` extra now also installs `uvicorn`, so `pip install "pai-agritune[api]"`
+  is sufficient to run the FastAPI server (previously required a separate manual `pip install
+  uvicorn`).
 - The image augmentation pipeline (`augmentations.image`) now composes
   [albumentations](https://albumentations.ai/) transforms instead of hand-rolled PIL/numpy code,
   using `Compose.set_random_seed` for the same exact-reproducibility guarantee as before.
 
 ### Fixed
 
+- `requirements.txt` no longer hard-pins a CUDA build of `torch` (`torch==2.14.0+cu130` via
+  `--extra-index-url .../cu130`) — that install fails outright on CPU-only/non-Linux machines,
+  contradicting this repo's own CPU-only CI. Now a plain `torch>=2.2`, matching `pyproject.toml`;
+  a comment (and a matching README note) shows the two-step CPU-only install
+  (`pip install torch --index-url https://download.pytorch.org/whl/cpu`, same as
+  `unit-test.yml`) needed on Linux, where PyPI's default wheel still bundles the full CUDA
+  runtime even on a machine with no GPU, plus how to opt into a specific CUDA build instead.
+- `CODE_OF_CONDUCT.md` was missing the "Enforcement Guidelines" section (Correction/Warning/
+  Temporary Ban/Permanent Ban) from the official Contributor Covenant v2.1 text — restored
+  verbatim.
+- `LICENSE.md` had several small wording drifts from the canonical Apache 2.0 text — replaced with
+  the exact upstream text.
+- `.github/dependabot.yml` was missing the `groups: python-dependencies: patterns: ["*"]` block on
+  its `pip` update, so routine dependency bumps opened one PR per package instead of one grouped
+  weekly PR.
+- `examples/SANITY_CHECK.md` and `examples/FEATURE_TEST_COMMANDS.md` pointed evaluate/predict at
+  `runs/cwfid-sanity/checkpoints/...`, a run_id `examples/segmentation/cwfid.yaml` never actually
+  produces (it sets `run_id: cwfid-sanity-mlp_probe-feature_aug`) — the checkpoint path in both
+  docs never existed. Corrected to the run_id the config actually writes.
 - Flush partial gradient-accumulation windows instead of silently dropping their gradients.
 - Execute gateway-split encoder batches concurrently while preserving response order.
 - Preserve augmentation fingerprints through training batches so hybrid cache keys cannot reuse

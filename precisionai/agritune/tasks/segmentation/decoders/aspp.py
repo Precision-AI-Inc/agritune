@@ -38,6 +38,13 @@ class ASPPDecoder(nn.Module):
     atrous_rates : Sequence[int], optional
         Dilation rates for the parallel 3x3 branches, in addition to a 1x1 branch and a
         global-average-pooling branch.
+    num_layers : int, optional
+        Number of stacked 1x1 conv + ReLU blocks in the post-fusion projection.
+
+    Raises
+    ------
+    ValueError
+        If ``num_layers`` is not positive.
     """
 
     def __init__(
@@ -48,8 +55,11 @@ class ASPPDecoder(nn.Module):
         output_size: tuple[int, int],
         hidden_dim: int = 128,
         atrous_rates: Sequence[int] = (6, 12, 18),
+        num_layers: int = 1,
     ) -> None:
         super().__init__()
+        if num_layers < 1:
+            raise ValueError(f"num_layers must be positive; got {num_layers}")
         self.output_size = output_size
         self.atrous_rates = tuple(atrous_rates)
 
@@ -68,9 +78,13 @@ class ASPPDecoder(nn.Module):
         self.global_branch = nn.Sequential(nn.Conv2d(patch_dim, hidden_dim, kernel_size=1), nn.ReLU(inplace=True))
 
         num_branches = len(self.branches) + 1
-        self.project = nn.Sequential(
-            nn.Conv2d(hidden_dim * num_branches, hidden_dim, kernel_size=1), nn.ReLU(inplace=True)
-        )
+        project_layers: list[nn.Module] = []
+        in_channels = hidden_dim * num_branches
+        for _ in range(num_layers):
+            project_layers.append(nn.Conv2d(in_channels, hidden_dim, kernel_size=1))
+            project_layers.append(nn.ReLU(inplace=True))
+            in_channels = hidden_dim
+        self.project = nn.Sequential(*project_layers)
         self.classifier = nn.Conv2d(hidden_dim, num_classes, kernel_size=1)
 
     def forward(self, features: EncoderFeatures) -> torch.Tensor:

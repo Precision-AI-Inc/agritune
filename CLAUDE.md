@@ -2,7 +2,7 @@
 
 Apply these standards when writing, reviewing, or refactoring code in AgriTune. This document extends the Precision AI Python project standards ([agri-template](https://github.com/Precision-AI-Inc/agri-template)) with rules specific to this repository's domain: training agricultural segmentation decoders on frozen features from a remote ViT encoder.
 
-See [agritune_implementation_plan.md](agritune_implementation_plan.md) for the phased build-out this repository follows, and [README.md](README.md) for current status.
+See [README.md](README.md) for current status.
 
 ---
 

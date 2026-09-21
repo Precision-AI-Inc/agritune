@@ -6,7 +6,7 @@
 Decoder, optimizer, and scheduler state; the gradient scaler; full training progress and RNG
 state; and fingerprints of the configuration, dataset, and encoder used to produce it. Resuming
 warns or fails when critical fingerprints differ (encoder revision changed, class count changed,
-decoder architecture changed) — see ``agritune_implementation_plan.md`` §14.
+decoder architecture changed).
 """
 
 from dataclasses import asdict, dataclass, field, fields
@@ -62,15 +62,18 @@ class CheckpointManager:
 
     Top-``k`` periodic-checkpoint pruning is tracked in-memory for the life of this instance only
     — it is a best-effort disk-space optimization, not required for exact resume (which relies on
-    ``last.ckpt``).
+    ``last.ckpt``). Metric-ranked and recency-ranked periodic checkpoints (see :meth:`save`) are
+    pruned as two independent pools, each capped at ``top_k``, since a mid-epoch snapshot without a
+    validation metric is not comparable to one that has one.
 
     Parameters
     ----------
     directory : str | Path
         Directory to write checkpoints into; created if missing.
     top_k : int, optional
-        Maximum number of periodic checkpoints to retain, ranked by metric value (lower is
-        better). Set to ``0`` to keep every periodic checkpoint.
+        Maximum number of periodic checkpoints to retain per pool (see above), ranked by metric
+        value (lower is better) or, absent one, by recency. Set to ``0`` to keep every periodic
+        checkpoint.
     """
 
     def __init__(self, directory: str | Path, *, top_k: int = 3) -> None:
@@ -78,6 +81,7 @@ class CheckpointManager:
         self._directory.mkdir(parents=True, exist_ok=True)
         self._top_k = top_k
         self._ranked: list[tuple[float, Path]] = []
+        self._recent: list[Path] = []
 
     @property
     def last_path(self) -> Path:
@@ -113,7 +117,9 @@ class CheckpointManager:
             Also write a step-numbered periodic checkpoint file.
         metric_value : float | None, optional
             Used to rank periodic checkpoints for top-``k`` pruning (lower is better); ignored
-            unless ``periodic=True``.
+            unless ``periodic=True``. ``None`` (e.g. a mid-epoch ``checkpoint_every_n_steps`` save
+            with no validation metric available yet) instead prunes by recency, keeping only the
+            ``top_k`` most recent such checkpoints — otherwise they would never be pruned at all.
 
         Returns
         -------
@@ -131,6 +137,8 @@ class CheckpointManager:
             torch.save(payload, step_path)
             if metric_value is not None:
                 self._prune_to_top_k(step_path, metric_value)
+            else:
+                self._prune_to_recent(step_path)
 
         return self.last_path
 
@@ -213,5 +221,14 @@ class CheckpointManager:
         self._ranked.sort(key=lambda entry: entry[0])
         while len(self._ranked) > self._top_k:
             _, stale_path = self._ranked.pop()
+            if stale_path.is_file():
+                stale_path.unlink()
+
+    def _prune_to_recent(self, path: Path) -> None:
+        if self._top_k <= 0:
+            return
+        self._recent.append(path)
+        while len(self._recent) > self._top_k:
+            stale_path = self._recent.pop(0)
             if stale_path.is_file():
                 stale_path.unlink()

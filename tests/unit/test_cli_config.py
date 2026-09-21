@@ -5,6 +5,7 @@
 
 from pathlib import Path
 
+import torch
 import yaml
 
 from precisionai.agritune.augmentations.image.pipeline import AugmentationMode
@@ -37,6 +38,19 @@ def test_scheduler_is_none_when_omitted(tmp_path: Path) -> None:
     path = _write_config(tmp_path, {})
     config = load_training_run_config(str(path))
     assert config.scheduler is None
+
+
+def test_loss_class_weights_are_converted_to_a_tensor(tmp_path: Path) -> None:
+    path = _write_config(tmp_path, {"loss": {"name": "ce_dice", "class_weights": [0.5, 1.0]}})
+    config = load_training_run_config(str(path))
+    assert isinstance(config.loss.class_weights, torch.Tensor)
+    assert torch.equal(config.loss.class_weights, torch.tensor([0.5, 1.0]))
+
+
+def test_loss_class_weights_default_to_none_when_omitted(tmp_path: Path) -> None:
+    path = _write_config(tmp_path, {})
+    config = load_training_run_config(str(path))
+    assert config.loss.class_weights is None
 
 
 def test_load_augmentation_selection_defaults_to_none_mode() -> None:
@@ -115,3 +129,31 @@ def test_checkpoint_top_k_is_configurable(tmp_path: Path) -> None:
     path = _write_config(tmp_path, {"checkpoint_top_k": 1})
     config = load_training_run_config(str(path))
     assert config.checkpoint_top_k == 1
+
+
+def test_num_workers_and_pin_memory_default_to_main_process_only(tmp_path: Path) -> None:
+    path = _write_config(tmp_path, {})
+    config = load_training_run_config(str(path))
+    assert config.num_workers == 0
+    assert config.pin_memory is False
+
+
+def test_num_workers_and_pin_memory_are_configurable(tmp_path: Path) -> None:
+    path = _write_config(tmp_path, {"num_workers": 4, "pin_memory": True})
+    config = load_training_run_config(str(path))
+    assert config.num_workers == 4
+    assert config.pin_memory is True
+
+
+def test_store_type_and_entries_per_shard_default_to_directory(tmp_path: Path) -> None:
+    path = _write_config(tmp_path, {})
+    config = load_training_run_config(str(path))
+    assert config.store_type == "directory"
+    assert config.entries_per_shard == 1000
+
+
+def test_store_type_and_entries_per_shard_are_configurable(tmp_path: Path) -> None:
+    path = _write_config(tmp_path, {"store_type": "sharded", "entries_per_shard": 500})
+    config = load_training_run_config(str(path))
+    assert config.store_type == "sharded"
+    assert config.entries_per_shard == 500

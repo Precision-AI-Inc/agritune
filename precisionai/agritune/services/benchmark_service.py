@@ -5,7 +5,7 @@
 
 Empirically measures achievable throughput/latency for different ``(batch_size, concurrency)``
 combinations against a live (or fake) encoder, so rate-limit settings come from data rather than
-guesses — see ``agritune_implementation_plan.md`` §18. Benchmarks the raw
+guesses. Benchmarks the raw
 :class:`~precisionai.agritune.schemas.protocols.EncoderBackend` directly (not a gateway-wrapped
 one) since the whole point is to discover good gateway settings.
 """

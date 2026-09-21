@@ -90,7 +90,7 @@ store was keyed with `revision=None`.
 agritune evaluate \
     --manifest examples/datasets/cwfid/manifest.csv \
     --store examples/datasets/cwfid/features \
-    --checkpoint examples/datasets/cwfid/runs/cwfid-sanity/checkpoints/best.ckpt \
+    --checkpoint examples/datasets/cwfid/runs/cwfid-sanity-mlp_probe-feature_aug/checkpoints/best.ckpt \
     --num-classes 3 \
     --decoder mlp_probe \
     --encoder-model pai-embedding \
@@ -104,7 +104,7 @@ agritune evaluate \
 agritune predict \
     --manifest examples/datasets/cwfid/manifest.csv \
     --store examples/datasets/cwfid/features \
-    --checkpoint examples/datasets/cwfid/runs/cwfid-sanity/checkpoints/best.ckpt \
+    --checkpoint examples/datasets/cwfid/runs/cwfid-sanity-mlp_probe-feature_aug/checkpoints/best.ckpt \
     --num-classes 3 \
     --decoder mlp_probe \
     --encoder-model pai-embedding \
@@ -120,7 +120,7 @@ Overlays: `examples/datasets/cwfid/predictions/{sample_id}_overlay.png`
 ## 7. What a successful run directory contains
 
 ```text
-examples/datasets/cwfid/runs/cwfid-sanity/
+examples/datasets/cwfid/runs/cwfid-sanity-mlp_probe-feature_aug/
 ├── config.original.yaml
 ├── config.resolved.yaml      # API key redacted
 ├── run.json

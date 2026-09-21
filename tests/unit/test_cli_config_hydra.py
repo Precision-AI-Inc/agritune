@@ -89,6 +89,25 @@ def test_decoder_group_variant_overrides_carry_their_own_kwargs(tmp_path: Path) 
     assert config.decoder_name == "aspp"
     assert config.decoder_kwargs["hidden_dim"] == 64
     assert config.decoder_kwargs["atrous_rates"] == [6, 12, 18]
+    assert config.decoder_kwargs["num_layers"] == 1
+
+
+def test_ppm_group_kwargs_include_num_layers(tmp_path: Path) -> None:
+    config = load_training_run_config(str(_CONFIG_PATH), _overrides(tmp_path, "decoder=ppm"))
+    assert config.decoder_kwargs == {"hidden_dim": 128, "pool_sizes": [1, 2, 3, 6], "num_layers": 1}
+
+
+def test_token_fpn_group_kwargs_include_num_layers(tmp_path: Path) -> None:
+    config = load_training_run_config(str(_CONFIG_PATH), _overrides(tmp_path, "decoder=token_fpn"))
+    assert config.decoder_kwargs == {"hidden_dim": 128, "num_layers": 2, "cls_fusion": "none"}
+
+
+def test_token_fpn_group_num_layers_is_overridable(tmp_path: Path) -> None:
+    config = load_training_run_config(
+        str(_CONFIG_PATH), _overrides(tmp_path, "decoder=token_fpn", "decoder.num_layers=6", "decoder.hidden_dim=256")
+    )
+    assert config.decoder_kwargs["num_layers"] == 6
+    assert config.decoder_kwargs["hidden_dim"] == 256
 
 
 def test_augmentation_offline_group_populates_geometric_and_photometric(tmp_path: Path) -> None:
@@ -221,6 +240,20 @@ def test_neptune_tracking_group_composes_with_required_project(tmp_path: Path) -
 def test_trainer_max_epochs_override(tmp_path: Path) -> None:
     config = load_training_run_config(str(_CONFIG_PATH), _overrides(tmp_path, "trainer.max_epochs=5"))
     assert config.trainer.max_epochs == 5
+
+
+def test_store_type_defaults_to_directory(tmp_path: Path) -> None:
+    config = load_training_run_config(str(_CONFIG_PATH), _overrides(tmp_path))
+    assert config.store_type == "directory"
+    assert config.entries_per_shard == 1000
+
+
+def test_store_type_override(tmp_path: Path) -> None:
+    config = load_training_run_config(
+        str(_CONFIG_PATH), _overrides(tmp_path, "store_type=sharded", "entries_per_shard=250")
+    )
+    assert config.store_type == "sharded"
+    assert config.entries_per_shard == 250
 
 
 def test_scheduler_none_group_disables_the_scheduler(tmp_path: Path) -> None:

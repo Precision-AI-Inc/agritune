@@ -2,13 +2,7 @@
   <img src="assets/logo.svg" alt="Precision AI Agritune Logo" width="120"/>
 </p>
 
-# AgriTune
-
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE.md)
-[![PyPI](https://img.shields.io/pypi/v/pai-agritune.svg?include_prereleases)](https://pypi.org/project/pai-agritune/)
-[![Python](https://img.shields.io/pypi/pyversions/pai-agritune.svg?include_prereleases)](https://pypi.org/project/pai-agritune/)
-
----
+# Precision AI AgriTune
 
 Train and evaluate agricultural segmentation decoders on frozen features from a remote ViT encoder, with reproducible offline feature generation and optional rate-limit-aware online feature extraction.
 
@@ -20,26 +14,106 @@ AgriTune never trains or fine-tunes the encoder itself — it consumes features 
 Dataset → Augmentation → FeatureProvider → EncoderFeatures → SegmentationTask → Decoder → Loss/Metrics → Trainer
 ```
 
-Coding standards, naming conventions, and tooling configuration are governed by [CLAUDE.md](CLAUDE.md). See [agritune_implementation_plan.md](agritune_implementation_plan.md) for the full phased build-out this repository follows.
+Coding standards, naming conventions, and tooling configuration are governed by [CLAUDE.md](CLAUDE.md).
+
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE.md)
+[![PyPI](https://img.shields.io/pypi/v/pai-agritune.svg?include_prereleases)](https://pypi.org/project/pai-agritune/)
+[![Python](https://img.shields.io/pypi/pyversions/pai-agritune.svg?include_prereleases)](https://pypi.org/project/pai-agritune/)
 
 ---
 
-## Status
+## Quick Start
 
-This repository is under active build-out following the phased plan in [agritune_implementation_plan.md](agritune_implementation_plan.md). The `v0.1.0` target ("first usable release") — offline/no augmentation → remote encoder precomputation → local feature store → linear + TokenFPN decoders → AdamW + cosine schedule → AMP + gradient accumulation → checkpoint/resume → mIoU/Dice metrics → JSONL + TensorBoard tracking → a fully reproducible run directory — is complete. Most of `v0.2` has landed too: `OnlineFeatureProvider`/`HybridFeatureProvider`, a background-thread prefetch queue that overlaps encoding with training, `augmentation.mode: hybrid`, feature-space augmentation, an albumentations-based augmentation engine with agricultural domain-specific transforms, and a thin FastAPI layer alongside the CLI. Configuration now composes via Hydra/OmegaConf config groups (`dataset`, `encoder`, `augmentation`, `feature_provider`, `task`, `decoder`, `optimizer`, `scheduler`, `tracking`), and the decoder lineup has grown to six: `mlp_probe`, `token_fpn`, `aspp`, `ppm`, `segmenter`, and `mask_former`. Distributed (multi-GPU) training remains `v0.3`.
+`pip install pai-agritune` gets you the library and the `agritune` CLI. The fastest way to see the
+whole pipeline run end-to-end is the packaged [CWFID](https://github.com/cwfid/dataset) example —
+a small (24-image), real public crop/weed segmentation dataset with a ready-made manifest prep
+script and training config, so it needs the repository itself, not just the PyPI package:
+
+```bash
+git clone https://github.com/Precision-AI-Inc/agritune && cd agritune
+pip install -e ".[dev,dotenv]"    # dotenv loads AGRITUNE_ENCODER_API_KEY from a .env file
+
+# Download 24 CWFID frames and write an AgriTune manifest (examples/datasets/cwfid/manifest.csv)
+python examples/datasets/prepare_cwfid.py --output examples/datasets/cwfid --max-samples 24 --size 384
+agritune dataset validate --manifest examples/datasets/cwfid/manifest.csv --num-classes 3
+
+# Precompute features against the hosted encoder (needs AGRITUNE_ENCODER_API_KEY in .env)
+agritune features build --manifest examples/datasets/cwfid/manifest.csv \
+    --store examples/datasets/cwfid/features \
+    --base-url https://embeddings.precision.ai/v1 --model pai-embedding
+
+# Train the packaged example config, then evaluate the checkpoint it writes
+agritune train --config examples/segmentation/cwfid.yaml
+agritune evaluate --manifest examples/datasets/cwfid/manifest.csv --store examples/datasets/cwfid/features \
+    --checkpoint examples/datasets/cwfid/runs/cwfid-sanity-mlp_probe-feature_aug/checkpoints/best.ckpt \
+    --num-classes 3 --decoder mlp_probe --encoder-model pai-embedding --encoder-revision ""
+```
+
+No encoder access yet? Swap the `features build` command for `--model fake-encoder` (and drop
+`--base-url`) to dry-run the same pipeline against synthetic features — every unit test and CI run
+does exactly that via `FakeEncoderBackend`, no network or API key required.
+
+See [examples/README.md](examples/README.md) for task-oriented tutorials (training with
+`none`/`offline`/`online` augmentation, evaluation, prediction, and resize-only normalization vs.
+the full augmentation pipeline), [examples/SANITY_CHECK.md](examples/SANITY_CHECK.md) for the full
+walkthrough (encoder benchmarking, decoder swaps, resuming, predicting with overlays, and what a
+run directory contains), [examples/FEATURE_TEST_COMMANDS.md](examples/FEATURE_TEST_COMMANDS.md) to
+exercise every decoder/provider/augmentation combination, [CLI](#cli) below for the full command
+list, and [docs/](docs/) for architecture, configuration, and dataset format guides.
+
+---
+
+## Project layout
+
+```
+precisionai/agritune/
+  api/            # thin FastAPI layer — delegates to services/
+  augmentations/  # image/ (geometric+photometric) and feature/ (patch dropout etc.) transforms
+  cli/            # `agritune` entry point and subcommands
+  configs/        # Hydra config groups (dataset, encoder, augmentation, feature_provider, task, decoder, ...)
+  data/           # dataset adapters, manifests, split strategies
+  encoder/        # EncoderBackend protocol, FakeEncoderBackend, RemoteEncoderBackend, gateway, rate limiter
+  features/       # FeatureProvider (cached/online/hybrid/prefetching), FeatureStore, cache keys, resumable precomputation
+  logging/        # configure_logging (stderr), secret redaction, progress bars, run provenance
+  metrics/        # pure computation (segmentation metrics, etc.)
+  optimization/   # optimizer/scheduler registries
+  schemas/        # EncoderFeatures, Sample, PreparedSample, and core protocols
+  services/       # orchestration used by both the CLI and the API
+  tasks/segmentation/decoders/   # MLP probe, TokenFPN, ASPP, pyramid pooling, Segmenter, MaskFormer
+  tracking/       # Tracker protocol + JSONL/TensorBoard/MLflow/W&B/Neptune/Comet backends
+  training/       # Trainer, evaluator, checkpointing, distributed
+  utils/
+docs/             # Sphinx (HTML + LaTeX/PDF) plus architecture/config/dataset/etc. guides
+tests/            # unit/, integration/, distributed/, fixtures/
+examples/         # runnable config examples (segmentation/*.yaml) and dataset samples
+```
+
+See [CLAUDE.md](CLAUDE.md) for the full coding standard covering imports, docstrings, type hints, testing, and what to avoid.
 
 ---
 
 ## Installation
 
+Requires Python 3.10+.
+
+```bash
+pip install pai-agritune
+```
+
+That's all most users need. **On Linux**, this pulls in PyPI's default `torch` wheel, which bundles the full CUDA runtime (`nvidia-*`/`triton` packages, several GB) even on a machine with no GPU. If you don't need CUDA, install the CPU-only build first (Windows and macOS already get a CPU-only wheel by default, so this only matters on Linux):
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install pai-agritune
+```
+
+For local development (tests, linting, type checking, pre-commit):
+
 ```bash
 python -m venv .venv
 source .venv/bin/activate      # Windows: .venv\Scripts\activate
 
-# Runtime only
-pip install -r requirements.txt
-
-# Full development (tests, pre-commit, type checking)
+pip install torch --index-url https://download.pytorch.org/whl/cpu   # Linux, CPU-only — see above
 pip install -e ".[dev]"
 pre-commit install
 ```
@@ -49,6 +123,17 @@ Optional tracking backends (TensorBoard/MLflow/W&B/Neptune/Comet) are not requir
 ```bash
 pip install -e ".[tracking]"
 ```
+
+### FastAPI server
+
+The CLI, the FastAPI layer, and direct Python usage all call the same `precisionai.agritune.services.*` functions — no logic is duplicated between entry points. To install and run the server:
+
+```bash
+pip install "pai-agritune[api]"
+uvicorn precisionai.agritune.api.app:create_app --factory --reload --port 8000
+```
+
+Then open `http://127.0.0.1:8000/docs` for interactive API docs. Every request-supplied path (`manifest_path`, `store`, `checkpoint_path`, `output_dir`, `config_path`, ...) is resolved and restricted to `AGRITUNE_API_ROOT` (defaults to the current working directory) — see [docs/architecture.md](docs/architecture.md).
 
 ---
 
@@ -86,35 +171,6 @@ The CLI, the FastAPI layer (`precisionai.agritune.api.create_app()`, one route p
 AgriTune's remote encoder backend integrates with an OpenAI-SDK-compatible embeddings API (see `precisionai.agritune.encoder`): the CLS token is returned as the embedding vector, and patch tokens are returned via the `patch_embeddings` (channels-first `[D, H, W]`, base64 float32) and `patch_shape` fields of the response — enabled per-request with `extra_body={"return_patch_tokens": True}`. The API does not expose a queryable encoder revision, so AgriTune fingerprints the encoder from the configured model alias plus the dimensions actually observed at runtime — see [docs/encoder.md](docs/encoder.md).
 
 Nothing in the training path depends on this specific API being reachable: CI, and any offline development, run entirely against `FakeEncoderBackend`.
-
----
-
-## Project layout
-
-```
-precisionai/agritune/
-  api/            # thin FastAPI layer — delegates to services/
-  augmentations/  # image/ (geometric+photometric) and feature/ (patch dropout etc.) transforms
-  cli/            # `agritune` entry point and subcommands
-  configs/        # Hydra config groups (dataset, encoder, augmentation, feature_provider, task, decoder, ...)
-  data/           # dataset adapters, manifests, split strategies
-  encoder/        # EncoderBackend protocol, FakeEncoderBackend, RemoteEncoderBackend, gateway, rate limiter
-  features/       # FeatureProvider (cached/online/hybrid/prefetching), FeatureStore, cache keys, resumable precomputation
-  logging/        # configure_logging (stderr), secret redaction, progress bars, run provenance
-  metrics/        # pure computation (segmentation metrics, etc.)
-  optimization/   # optimizer/scheduler registries
-  schemas/        # EncoderFeatures, Sample, PreparedSample, and core protocols
-  services/       # orchestration used by both the CLI and the API
-  tasks/segmentation/decoders/   # MLP probe, TokenFPN, ASPP, pyramid pooling, Segmenter, MaskFormer
-  tracking/       # Tracker protocol + JSONL/TensorBoard/MLflow/W&B/Neptune/Comet backends
-  training/       # Trainer, evaluator, checkpointing, distributed
-  utils/
-docs/             # Sphinx (HTML + LaTeX/PDF) plus architecture/config/dataset/etc. guides
-tests/            # unit/, integration/, distributed/, fixtures/
-examples/         # runnable config examples (segmentation/*.yaml) and dataset samples
-```
-
-See [CLAUDE.md](CLAUDE.md) for the full coding standard covering imports, docstrings, type hints, testing, and what to avoid.
 
 ---
 

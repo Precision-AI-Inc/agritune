@@ -14,7 +14,7 @@ per-sample metadata) into `Sample` objects. Three split strategies (`precisionai
 `detect_group_leakage` flags group values that ended up split across more than one subset, useful
 even on a split produced by `random_split`. `agritune dataset validate` / `agritune dataset
 inspect` check for missing files, duplicate IDs, image/mask dimension mismatches, invalid labels,
-and report class-pixel-count statistics. See `agritune_implementation_plan.md` §5.
+and report class-pixel-count statistics.
 
 `agritune dataset init --output manifest.csv` writes an example manifest with a header row and a
 few placeholder samples (`sample_id`, `image_path`, `mask_path`, plus `field_id`/`farm_id`/

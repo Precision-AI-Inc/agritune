@@ -168,3 +168,30 @@ def test_confusion_matrix_matches_expected_counts() -> None:
 
 def test_segmentation_metric_satisfies_metric_protocol() -> None:
     assert isinstance(SegmentationMetric(num_classes=2), Metric)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA-enabled machine")
+def test_update_follows_a_cuda_devices_outputs_and_targets() -> None:
+    # The confusion matrix starts on CPU (see __init__); update() must migrate it to wherever
+    # outputs/targets actually are instead of raising a device-mismatch error, since Trainer moves
+    # every batch to a CUDA device before calling Metric.update.
+    metric = SegmentationMetric(num_classes=2)
+    targets = torch.tensor([[[0, 1], [1, 0]]], device="cuda")
+
+    metric.update(targets, targets)
+
+    assert metric.confusion_matrix().device.type == "cuda"
+    result = metric.compute()
+    assert result["mean_iou"] == 1.0
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA-enabled machine")
+def test_update_stays_on_cuda_across_multiple_batches() -> None:
+    metric = SegmentationMetric(num_classes=2)
+    targets = torch.tensor([[[0, 1], [1, 0]]], device="cuda")
+
+    metric.update(targets, targets)
+    metric.update(targets, targets)
+
+    assert metric.confusion_matrix().device.type == "cuda"
+    assert metric.confusion_matrix().sum().item() == 8  # 2 batches x 4 pixels
