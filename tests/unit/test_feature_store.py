@@ -355,3 +355,197 @@ class TestBuildFeatureStore:
     def test_unsupported_type_raises_value_error(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="unsupported store_type: 'bogus'"):
             build_feature_store("bogus", tmp_path)
+
+
+def _numbered_features(value: float, *, num_patches: int = 4) -> EncoderFeatures:
+    side = int(num_patches**0.5)
+    return EncoderFeatures(
+        patch_tokens=torch.full((1, num_patches, 3), value),
+        cls_tokens=torch.full((1, 2), value),
+        patch_grid=torch.tensor([[side, num_patches // side]]),
+        valid_patch_mask=None,
+        image_sizes=[(28, 28)],
+        encoder_model="pai-embedding",
+        encoder_revision=None,
+    )
+
+
+class TestDirectoryReadMany:
+    def test_yields_every_key_in_request_order(self, tmp_path: Path) -> None:
+        store = DirectoryFeatureStore(tmp_path)
+        for index in range(5):
+            store.write(f"k{index}", _numbered_features(float(index)))
+
+        results = list(store.read_many(["k3", "k0", "k4"], max_workers=2))
+
+        assert [key for key, _ in results] == ["k3", "k0", "k4"]
+        assert [features.patch_tokens[0, 0, 0].item() for _, features in results] == [3.0, 0.0, 4.0]
+
+    def test_missing_key_fails_before_any_file_is_read(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        store = DirectoryFeatureStore(tmp_path)
+        store.write("present", _numbered_features(1.0))
+        reads: list[str] = []
+        original_read = store.read
+        monkeypatch.setattr(store, "read", lambda key: reads.append(key) or original_read(key))
+
+        with pytest.raises(KeyError, match="absent"):
+            list(store.read_many(["present", "absent"]))
+        assert reads == []
+
+    def test_rejects_non_positive_max_workers(self, tmp_path: Path) -> None:
+        store = DirectoryFeatureStore(tmp_path)
+        store.write("k", _numbered_features(1.0))
+
+        with pytest.raises(ValueError, match="max_workers must be positive"):
+            list(store.read_many(["k"], max_workers=0))
+
+
+class TestShardedReadMany:
+    def _store_with_three_shards(self, tmp_path: Path) -> ShardedFeatureStore:
+        store = ShardedFeatureStore(tmp_path, entries_per_shard=2)
+        for index in range(6):
+            store.write(f"k{index}", _numbered_features(float(index)))
+        store.flush()
+        return store
+
+    def test_loads_each_shard_file_once_regardless_of_key_order(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store = self._store_with_three_shards(tmp_path)
+        loaded: list[str] = []
+        original_load = store_module.load_file
+
+        def counting_load(path: str) -> dict[str, torch.Tensor]:
+            loaded.append(Path(path).name)
+            return original_load(path)
+
+        monkeypatch.setattr(store_module, "load_file", counting_load)
+        # Interleaved across all three shards: read() would reload a shard for nearly every key.
+        keys = ["k0", "k2", "k4", "k1", "k3", "k5"]
+
+        results = dict(store.read_many(keys, max_workers=2))
+
+        assert sorted(loaded) == ["shard_00000.safetensors", "shard_00001.safetensors", "shard_00002.safetensors"]
+        assert set(results) == set(keys)
+        for key, features in results.items():
+            assert features.patch_tokens[0, 0, 0].item() == float(key[1:])
+
+    def test_groups_output_by_shard_in_first_reference_order(self, tmp_path: Path) -> None:
+        store = self._store_with_three_shards(tmp_path)
+
+        keys = [key for key, _ in store.read_many(["k4", "k0", "k5", "k1"])]
+
+        assert keys == ["k4", "k5", "k0", "k1"]
+
+    def test_yields_buffered_unflushed_entries_first(self, tmp_path: Path) -> None:
+        store = ShardedFeatureStore(tmp_path, entries_per_shard=10)
+        store.write("flushed", _numbered_features(1.0))
+        store.flush()
+        store.write("buffered", _numbered_features(2.0))
+
+        results = list(store.read_many(["flushed", "buffered"]))
+
+        assert [key for key, _ in results] == ["buffered", "flushed"]
+        assert results[0][1].patch_tokens[0, 0, 0].item() == 2.0
+
+    def test_missing_key_fails_before_any_shard_is_read(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        store = self._store_with_three_shards(tmp_path)
+        loaded: list[str] = []
+        monkeypatch.setattr(store_module, "load_file", lambda path: loaded.append(path) or {})
+
+        with pytest.raises(KeyError, match="nope"):
+            list(store.read_many(["k0", "nope"]))
+        assert loaded == []
+
+    def test_key_indexed_but_absent_from_its_shard_raises_key_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store = self._store_with_three_shards(tmp_path)
+        monkeypatch.setattr(store_module, "load_file", lambda _path: {})
+
+        with pytest.raises(KeyError, match="k0"):
+            list(store.read_many(["k0"]))
+
+    def test_read_matches_read_many(self, tmp_path: Path) -> None:
+        store = self._store_with_three_shards(tmp_path)
+
+        bulk = dict(store.read_many(["k1", "k2"]))
+
+        for key in ("k1", "k2"):
+            single = ShardedFeatureStore(tmp_path).read(key)
+            assert torch.equal(single.patch_tokens, bulk[key].patch_tokens)
+            single_cls, bulk_cls = single.cls_tokens, bulk[key].cls_tokens
+            assert single_cls is not None
+            assert bulk_cls is not None
+            assert torch.equal(single_cls, bulk_cls)
+            assert torch.equal(single.patch_grid, bulk[key].patch_grid)
+            assert single.image_sizes == bulk[key].image_sizes
+
+
+class TestShardedReadLookup:
+    def test_read_of_a_key_missing_from_its_loaded_shard_raises_key_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store = ShardedFeatureStore(tmp_path, entries_per_shard=2)
+        store.write("k0", _numbered_features(0.0))
+        store.flush()
+        monkeypatch.setattr(store_module, "load_file", lambda _path: {})
+
+        with pytest.raises(KeyError, match="k0"):
+            store.read("k0")
+
+    def test_group_shard_tensors_splits_on_the_last_separator(self) -> None:
+        tensors = {
+            "abc::patch_tokens": torch.zeros(1),
+            "abc::cls_tokens": torch.ones(1),
+            "d::patch_grid": torch.zeros(2),
+        }
+
+        grouped = store_module._group_shard_tensors(tensors)
+
+        assert set(grouped) == {"abc", "d"}
+        assert set(grouped["abc"]) == {"patch_tokens", "cls_tokens"}
+
+
+class TestBoundedMap:
+    def test_never_runs_more_than_max_workers_calls_at_once(self) -> None:
+        running = 0
+        peak = 0
+        lock = threading.Lock()
+
+        def work(item: int) -> int:
+            nonlocal running, peak
+            with lock:
+                running += 1
+                peak = max(peak, running)
+            time.sleep(0.01)
+            with lock:
+                running -= 1
+            return item * 2
+
+        results = list(store_module._bounded_map(work, range(12), max_workers=3))
+
+        assert results == [item * 2 for item in range(12)]
+        assert peak <= 3
+
+    def test_stops_submitting_when_the_consumer_stops_early(self) -> None:
+        submitted: list[int] = []
+
+        def work(item: int) -> int:
+            submitted.append(item)
+            return item
+
+        generator = store_module._bounded_map(work, range(100), max_workers=2)
+        assert next(generator) == 0
+        generator.close()
+
+        assert len(submitted) <= 3
+
+    def test_propagates_worker_exceptions(self) -> None:
+        def work(item: int) -> int:
+            if item == 2:
+                raise RuntimeError("boom")
+            return item
+
+        with pytest.raises(RuntimeError, match="boom"):
+            list(store_module._bounded_map(work, range(5), max_workers=2))

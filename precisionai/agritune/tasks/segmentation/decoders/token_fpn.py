@@ -15,9 +15,9 @@ from enum import Enum
 
 import torch
 from torch import nn
-from torch.nn import functional
 
 from precisionai.agritune.schemas.features import EncoderFeatures
+from precisionai.agritune.tasks.segmentation.upsample import bilinear_resize
 
 
 class CLSFusion(str, Enum):
@@ -112,7 +112,7 @@ class TokenFPNDecoder(nn.Module):
 
         refined = self.refine(grid)
         logits = self.classifier(refined)
-        return functional.interpolate(logits, size=self.output_size, mode="bilinear", align_corners=False)
+        return bilinear_resize(logits, self.output_size)
 
     def _fuse_cls(self, grid: torch.Tensor, features: EncoderFeatures) -> torch.Tensor:
         if self.cls_fusion is CLSFusion.NONE:

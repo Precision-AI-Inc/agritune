@@ -120,6 +120,18 @@ prefetch_factor: null                    # batches each worker buffers ahead; nu
 feature_read_workers: 32                 # thread-pool size for concurrent feature-store reads under
                                           # feature_provider: cached; raise to match available CPU cores
                                           # when disk/store read latency, not CPU, is the bottleneck.
+feature_preload: none                    # none | host | device. none reads every batch from the store
+                                          # each epoch. host reads the train+val features and masks once,
+                                          # before training, into RAM, then copies each batch to the GPU
+                                          # asynchronously. device keeps both in GPU memory (CUDA only),
+                                          # the fastest option when they fit. Requires
+                                          # feature_provider: cached. Memory needed: samples x patches x
+                                          # patch_dim x 2 bytes (float16) + samples x H x W bytes (masks).
+feature_preload_dtype: null              # null keeps the store's dtype | float16 | bfloat16 | float32.
+                                          # float16 halves preload memory and copy traffic; tokens are cast
+                                          # back to float32 on the device before the decoder.
+shuffle: false                           # reshuffle training samples every epoch (reproducible from seed
+                                          # and epoch, including on resume). Requires feature_preload.
 val_fraction: 0.2                        # fraction of samples held out for validation (random split)
 
 # --- Optimizer -------------------------------------------------------------------

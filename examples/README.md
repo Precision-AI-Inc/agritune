@@ -163,7 +163,10 @@ the augmented target's spatial size) — never set them in `decoder_kwargs`.
 | `pin_memory` | `false` | Faster host→device copy; only helps on a CUDA device. |
 | `prefetch_factor` | `null` | Batches each worker buffers ahead; `null` defers to `DataLoader`'s default (`2`); requires `num_workers > 0`. Peak memory scales with `num_workers * prefetch_factor * batch_size`. |
 | `feature_read_workers` | `32` | Thread-pool size for `CachedFeatureProvider`'s concurrent store reads (only under `feature_provider: cached`); independent of `num_workers`. |
-| `val_fraction` | `0.2` | Fraction of samples held out for validation (random split). Validation is always unaugmented, regardless of `augmentation.mode`. |
+| `feature_preload` | `none` | `none` \| `host` \| `device`. Read the train/val features and masks once, before training, into RAM (`host`) or GPU memory (`device`, CUDA only) instead of from the store every epoch. Requires `feature_provider: cached`. See `docs/feature-caching.md` for sizing. |
+| `feature_preload_dtype` | `null` | `float16` \| `bfloat16` \| `float32`: dtype the preloaded tokens are stored in (`null` keeps the store's dtype). Part of the config fingerprint. Requires `feature_preload`. |
+| `shuffle` | `false` | Reshuffle training samples every epoch, reproducibly from `seed` and the epoch index. Part of the config fingerprint. Requires `feature_preload`. |
+| `val_fraction` | `0.2` | Fraction of `manifest_path` held out for validation (random, per sample; the manifest's `split` column is ignored). Validation is always unaugmented, regardless of `augmentation.mode`. Every row of `manifest_path` is used for training or validation, so keep test samples in a separate manifest for `agritune evaluate` — see `docs/datasets.md`. |
 
 ### Optimizer — `optimizer`
 

@@ -4,6 +4,7 @@
 """Unit tests for precisionai.agritune.schemas.features.EncoderFeatures."""
 
 from dataclasses import replace
+from typing import Any
 
 import pytest
 import torch
@@ -507,3 +508,60 @@ def test_to_accepts_a_torch_device_object() -> None:
     features = _make_features()
     moved = features.to(torch.device("cpu"))
     assert moved.patch_tokens.device == torch.device("cpu")
+
+
+def _trusted_kwargs(**overrides: Any) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "patch_tokens": torch.randn(2, 4, 3),
+        "cls_tokens": torch.randn(2, 5),
+        "patch_grid": torch.tensor([[2, 2], [2, 2]]),
+        "valid_patch_mask": None,
+        "image_sizes": [(28, 28), (28, 28)],
+        "encoder_model": "pai-embedding",
+        "encoder_revision": "r1",
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
+def test_trusted_builds_an_equivalent_instance_to_the_validating_constructor() -> None:
+    kwargs = _trusted_kwargs()
+
+    trusted = EncoderFeatures.trusted(**kwargs)
+    checked = EncoderFeatures(**kwargs)
+
+    assert trusted == checked
+    assert trusted.metadata == {}
+
+
+def test_trusted_keeps_given_metadata() -> None:
+    trusted = EncoderFeatures.trusted(**_trusted_kwargs(), metadata={"farm": "f1"})
+
+    assert trusted.metadata == {"farm": "f1"}
+
+
+def test_trusted_skips_validation_that_the_constructor_enforces() -> None:
+    kwargs = _trusted_kwargs(patch_tokens=torch.full((2, 4, 3), float("nan")))
+
+    with pytest.raises(ValueError, match="finite"):
+        EncoderFeatures(**kwargs)
+    assert torch.isnan(EncoderFeatures.trusted(**kwargs).patch_tokens).all()
+
+
+def test_to_does_not_rerun_validation(monkeypatch: pytest.MonkeyPatch) -> None:
+    features = EncoderFeatures(**_trusted_kwargs(metadata={"k": "v"}))
+    calls: list[int] = []
+    monkeypatch.setattr(EncoderFeatures, "__post_init__", lambda self: calls.append(1))
+
+    moved = features.to("cpu")
+
+    assert calls == []
+    assert moved == features
+    assert moved.metadata == {"k": "v"}
+
+
+def test_uniform_patch_grid_reads_the_grid_in_one_transfer(monkeypatch: pytest.MonkeyPatch) -> None:
+    features = EncoderFeatures(**_trusted_kwargs(patch_grid=torch.tensor([[2, 2], [2, 2]])))
+    monkeypatch.setattr(EncoderFeatures, "patch_grid_hw", lambda self, index: pytest.fail("per-sample read"))
+
+    assert features.uniform_patch_grid() == (2, 2)

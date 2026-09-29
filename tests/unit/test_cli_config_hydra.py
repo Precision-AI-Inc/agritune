@@ -270,3 +270,22 @@ def test_manifest_path_missing_raises(tmp_path: Path) -> None:
     ]
     with pytest.raises(Exception, match="manifest_path"):
         load_training_run_config(str(_CONFIG_PATH), overrides)
+
+
+def test_packaged_config_defaults_to_no_preload(tmp_path: Path) -> None:
+    config = load_training_run_config(str(_CONFIG_PATH), _overrides(tmp_path))
+
+    assert config.feature_preload == "none"
+    assert config.feature_preload_dtype is None
+    assert config.shuffle is False
+
+
+def test_packaged_config_accepts_preload_overrides(tmp_path: Path) -> None:
+    config = load_training_run_config(
+        str(_CONFIG_PATH),
+        _overrides(tmp_path, "feature_preload=host", "feature_preload_dtype=float16", "shuffle=true"),
+    )
+
+    assert config.feature_preload == "host"
+    assert config.feature_preload_dtype == "float16"
+    assert config.shuffle is True

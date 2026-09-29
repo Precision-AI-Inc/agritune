@@ -14,9 +14,9 @@ from collections.abc import Sequence
 
 import torch
 from torch import nn
-from torch.nn import functional
 
 from precisionai.agritune.schemas.features import EncoderFeatures
+from precisionai.agritune.tasks.segmentation.upsample import bilinear_resize
 
 
 class ASPPDecoder(nn.Module):
@@ -95,9 +95,9 @@ class ASPPDecoder(nn.Module):
 
         outputs = [branch(grid) for branch in self.branches]
         pooled = self.global_branch(self.global_pool(grid))
-        pooled = functional.interpolate(pooled, size=(height, width), mode="bilinear", align_corners=False)
+        pooled = bilinear_resize(pooled, (height, width))
         outputs.append(pooled)
 
         fused = self.project(torch.cat(outputs, dim=1))
         logits = self.classifier(fused)
-        return functional.interpolate(logits, size=self.output_size, mode="bilinear", align_corners=False)
+        return bilinear_resize(logits, self.output_size)

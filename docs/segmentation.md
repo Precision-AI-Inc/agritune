@@ -32,6 +32,18 @@ Losses: CrossEntropy, BCEWithLogits, Dice, and CE/BCE + Dice combinations, with 
 class-weight support. Metrics (`SegmentationMetric`): mean/per-class IoU, precision, recall,
 Dice/F1, pixel accuracy, and a confusion matrix.
 
+## Output resolution
+
+Every decoder predicts on the patch grid and resizes its logits to the training targets' size
+(`output_size`), taken from the first training sample *after* `geometric.resize` (and any other
+geometric augmentation) is applied. The resize uses
+`precisionai.agritune.tasks.segmentation.upsample.bilinear_resize`, which computes exactly what
+`F.interpolate(mode="bilinear", align_corners=False)` computes as two small matrix products. The
+native CUDA backward for bilinear upsampling accumulates gradients with atomic adds and becomes the
+slowest part of a linear-probe step when a small grid (e.g. 16x16) is upsampled to a large mask;
+the matrix form avoids that. Loss and metric code accept targets in any integer dtype (for example
+`uint8` masks) and widen them to `int64` themselves.
+
 ## Visualization
 
 `precisionai.agritune.tasks.segmentation.visualization` colorizes a per-pixel class-index map

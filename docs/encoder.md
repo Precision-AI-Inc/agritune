@@ -19,12 +19,12 @@ from openai import OpenAI
 client = OpenAI(base_url="<deployment>/v1", api_key="sk-pai-...")
 
 resp = client.embeddings.create(
-    model="pai-embedding",              # public alias; server resolves the real backing model
-    input=data_uri,                     # "data:image/...;base64,..." or http(s) URL
-    encoding_format="base64",            # little-endian float32 buffer, more efficient than nested lists
+    model="pai-embedding",  # public alias; server resolves the real backing model
+    input=data_uri,  # "data:image/...;base64,..." or http(s) URL
+    encoding_format="base64",  # little-endian float32 buffer, more efficient than nested lists
     extra_body={
-        "return_patch_tokens": True,     # Precision AI extension, not part of the OpenAI API
-        "native_resolution": True,       # optional — grid becomes per-image and often non-square
+        "return_patch_tokens": True,  # Precision AI extension, not part of the OpenAI API
+        "native_resolution": True,  # optional — grid becomes per-image and often non-square
     },
 )
 ```

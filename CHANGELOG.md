@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+
+- `feature_preload: host | device` (new `TrainingRunConfig` field, default `none`): reads the
+  training and validation splits' cached features once, before training, into one contiguous
+  buffer in RAM or GPU memory (new `precisionai.agritune.features.memory.InMemoryFeatureProvider`),
+  and decodes every mask once into a compact `uint8` cache (new
+  `segmentation_common.PreloadedBatches`). Each batch then becomes one gather, instead of a
+  per-sample store read, validation, and concatenation plus a PNG decode per mask every epoch.
+  Measured on an A100 with 113,584 training and 37,707 validation samples and a linear probe,
+  with every change in this release, epoch times including validation went from 1,921 s (reading
+  a sharded store) to 51–62 s with 57x38 grids in host RAM and 7.5 s with 16x16 grids on the GPU.
+  A 100-epoch run at 798x532 masks that took about 80 hours now takes 3 h 45 min end to end, and
+  reaches the same test metrics (mean IoU within 0.05 pp). Requires `feature_provider: cached`.
+- Preloading reads each shard once and copies entries into the buffer on a small thread pool
+  (5.4 minutes for 252 GB of `float16` features, 3.2x faster than a single thread), and
+  `InMemoryFeatureProvider` resolves a sample's row by object identity after its first lookup, so
+  cache keys are not rehashed every epoch.
+- `feature_preload_dtype: float16 | bfloat16 | float32` stores preloaded tokens in a smaller
+  dtype (cast back to `float32` on the device before the decoder); a value that would overflow
+  is rejected while preloading.
+- `shuffle: true` (requires `feature_preload`) reshuffles training samples every epoch in an order
+  derived from `seed` and the epoch index, so a resumed run replays the same order.
+- Every decoder (and the loss/metric resize fallbacks) now resizes logits with
+  `tasks.segmentation.upsample.bilinear_resize`, which computes exactly what
+  `F.interpolate(mode="bilinear", align_corners=False)` does as two small matrix products.
+  PyTorch's CUDA backward for bilinear upsampling scatters gradients with atomic adds, which took
+  48 of 61 ms per linear-probe step when upsampling a 16x16 grid to 224x224; the matrix form takes
+  8 ms for the whole step. Values match `F.interpolate` to floating-point rounding.
+- `PrefetchingFeatureLoader` now issues its copies on a dedicated CUDA stream, so the next batch's
+  host-to-device transfer actually overlaps the current step instead of queueing behind it on the
+  default stream.
+- `CachedFeatureProvider` keys no longer re-read and re-hash every image file on every epoch:
+  `build_image_hash_fn` memoizes each sample's image hash for the life of the run.
+- `ShardedFeatureStore.read()` looks entries up in a per-shard index instead of scanning every
+  tensor name in the shard for each read, and both stores gain `read_many()`, which loads each
+  shard file once no matter what order keys are requested in.
+- `EncoderFeatures.to()` no longer re-runs full validation (a non-finite scan plus host reads,
+  which force a GPU sync on every batch); new `EncoderFeatures.trusted()` builds an instance from
+  already-validated tensors.
+
 ### Security
 
 - Every API request field naming a filesystem path (`manifest_path`, `store`, `checkpoint_path`,
@@ -23,8 +63,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Logging redacts API keys, Authorization values, sensitive Hydra/dotlist overrides, and URL
   userinfo/query credentials before emit, including DEBUG override dumps and encoder base URLs.
 
+### Documentation
+
+- `docs/datasets.md` explains that `agritune train` splits its own manifest into training and
+  validation (`val_fraction`, per sample, ignoring any `split` column), so test samples belong in a
+  separate manifest for `agritune evaluate`, with a worked example that holds out whole fields via
+  `grouped_split`. `docs/configuration.md`, `docs/reproducibility.md`, `docs/segmentation.md`,
+  `docs/feature-caching.md`, and the README cover preloading, shuffling, seeding, and output
+  resolution.
+
 ### Fixed
 
+- Training under `augmentation.mode: none` with `geometric.resize` built the decoder at the
+  dataset's *native* mask size, because the output-size probe skipped the resize that every
+  training batch still receives. The decoder then upsampled to the native size (8.5x more pixels
+  for 798x532 masks resized to 224x224), and the loss and metric resized every batch's logits back
+  down: three full-size resizes per step. The probe now applies `resize` exactly like
+  `build_training_batches` (and like `prediction_service` already did). On an A100 this alone cut
+  a 20,000-sample, two-epoch linear-probe run from 36.1 s to 4.7 s.
+- `EncoderFeatures.uniform_patch_grid` reads the batch's patch grids in one host transfer instead
+  of one per sample (each a GPU synchronization when the grid is on a CUDA device).
+- The decoder's initial weights are now drawn right after seeding the global RNG from
+  `trainer.seed`. Previously they depended on whatever had advanced the RNG earlier in the process
+  (every `DataLoader` pass draws a seed from it), so the same config could start from different
+  weights depending on unrelated code paths. New runs therefore start from different (but now
+  seed-determined) weights than earlier versions did for the same config; resuming an existing
+  checkpoint is unaffected.
+- `SegmentationLoss` and `SegmentationMetric` accept class-index targets in any integer dtype
+  (widened to `int64` internally); a `uint8` target used to overflow the metric's
+  `targets * num_classes + predictions` index.
+- Pyright generic-typing error in `segmentation_common._IndexDataset`.
 - Pyright optional-palette subscript in `colorize_predictions` and live-test API-key narrowing
   after `pytest.skip`.
 - `SegmentationMetric.update` now follows `outputs`/`targets` onto whatever device they're

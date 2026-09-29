@@ -9,7 +9,7 @@ image — the real encoder is served behind an API where all four vary by model 
 """
 
 from collections.abc import Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Any
 
 import torch
@@ -141,6 +141,53 @@ class EncoderFeatures:
                     f"sample {index}: patch_grid implies {expected_patches} patches but {valid_count} are marked valid"
                 )
 
+    @classmethod
+    def trusted(
+        cls,
+        *,
+        patch_tokens: torch.Tensor,
+        cls_tokens: torch.Tensor | None,
+        patch_grid: torch.Tensor,
+        valid_patch_mask: torch.Tensor | None,
+        image_sizes: list[tuple[int, int]],
+        encoder_model: str,
+        encoder_revision: str | None,
+        metadata: dict[str, Any] | None = None,
+    ) -> "EncoderFeatures":
+        """Build an instance without re-running :meth:`__post_init__`'s validation.
+
+        Validation scans every token for non-finite values and reads patch grids back to the
+        host, which forces a CPU-GPU synchronization for tensors on a CUDA device. Use this only
+        when every invariant is already guaranteed — e.g. the tensors are slices of a buffer that
+        was validated once when it was built, or they are the same validated tensors moved to
+        another device. Anything else must go through the normal constructor.
+
+        Parameters
+        ----------
+        patch_tokens : torch.Tensor of shape (B, N, D)
+        cls_tokens : torch.Tensor of shape (B, D_cls) or None
+        patch_grid : torch.Tensor of shape (B, 2)
+        valid_patch_mask : torch.Tensor of shape (B, N) or None
+        image_sizes : list[tuple[int, int]]
+        encoder_model : str
+        encoder_revision : str | None
+        metadata : dict[str, Any] | None, optional
+
+        Returns
+        -------
+        EncoderFeatures
+        """
+        instance = cls.__new__(cls)
+        instance.patch_tokens = patch_tokens
+        instance.cls_tokens = cls_tokens
+        instance.patch_grid = patch_grid
+        instance.valid_patch_mask = valid_patch_mask
+        instance.image_sizes = image_sizes
+        instance.encoder_model = encoder_model
+        instance.encoder_revision = encoder_revision
+        instance.metadata = {} if metadata is None else metadata
+        return instance
+
     @property
     def batch_size(self) -> int:
         """Return the batch size ``B``."""
@@ -166,9 +213,11 @@ class EncoderFeatures:
         Returns
         -------
         EncoderFeatures
+            Built via :meth:`trusted`: moving tensors between devices cannot break any invariant
+            ``self`` was already validated against, and re-validating on a CUDA device would
+            force a synchronization on every batch.
         """
-        return replace(
-            self,
+        return EncoderFeatures.trusted(
             patch_tokens=self.patch_tokens.to(device, non_blocking=non_blocking),
             cls_tokens=self.cls_tokens.to(device, non_blocking=non_blocking) if self.cls_tokens is not None else None,
             patch_grid=self.patch_grid.to(device, non_blocking=non_blocking),
@@ -177,6 +226,10 @@ class EncoderFeatures:
                 if self.valid_patch_mask is not None
                 else None
             ),
+            image_sizes=self.image_sizes,
+            encoder_model=self.encoder_model,
+            encoder_revision=self.encoder_revision,
+            metadata=self.metadata,
         )
 
     def patch_grid_hw(self, index: int) -> tuple[int, int]:
@@ -213,9 +266,12 @@ class EncoderFeatures:
         ValueError
             If samples in the batch have different patch grids.
         """
-        first = self.patch_grid_hw(0)
-        for index in range(1, self.batch_size):
-            other = self.patch_grid_hw(index)
+        # One host transfer for the whole batch: reading each sample's grid separately costs a
+        # device-to-host synchronization per sample when patch_grid lives on a GPU.
+        grids = self.patch_grid.tolist()
+        first = (int(grids[0][0]), int(grids[0][1]))
+        for index, grid in enumerate(grids[1:], start=1):
+            other = (int(grid[0]), int(grid[1]))
             if other != first:
                 raise ValueError(
                     f"batch has non-uniform patch grids (sample 0: {first}, sample {index}: {other}) "

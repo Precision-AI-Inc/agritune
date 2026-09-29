@@ -25,6 +25,7 @@ from torch import nn
 from torch.nn import functional
 
 from precisionai.agritune.schemas.features import EncoderFeatures
+from precisionai.agritune.tasks.segmentation.upsample import bilinear_resize
 
 
 class MaskFormerDecoder(nn.Module):
@@ -113,4 +114,4 @@ class MaskFormerDecoder(nn.Module):
         mask_probs = torch.sigmoid(torch.einsum("bqd,bdhw->bqhw", self.mask_embed(decoded), pixel_embed))
 
         combined = torch.einsum("bqc,bqhw->bchw", class_probs, mask_probs)
-        return functional.interpolate(combined, size=self.output_size, mode="bilinear", align_corners=False)
+        return bilinear_resize(combined, self.output_size)

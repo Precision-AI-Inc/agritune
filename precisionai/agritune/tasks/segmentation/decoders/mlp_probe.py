@@ -14,9 +14,9 @@ from collections.abc import Sequence
 
 import torch
 from torch import nn
-from torch.nn import functional
 
 from precisionai.agritune.schemas.features import EncoderFeatures
+from precisionai.agritune.tasks.segmentation.upsample import bilinear_resize
 
 
 class MLPProbeDecoder(nn.Module):
@@ -71,4 +71,4 @@ class MLPProbeDecoder(nn.Module):
         height, width = features.uniform_patch_grid()
         logits = self.mlp(features.patch_tokens)  # (B, N, num_classes)
         logits = logits.reshape(features.batch_size, height, width, -1).permute(0, 3, 1, 2)
-        return functional.interpolate(logits, size=self.output_size, mode="bilinear", align_corners=False)
+        return bilinear_resize(logits, self.output_size)

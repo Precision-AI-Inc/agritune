@@ -25,9 +25,11 @@ from precisionai.agritune.features.keys import EncoderFingerprint, hash_augmenta
 from precisionai.agritune.features.provider import _MAX_READ_WORKERS
 from precisionai.agritune.features.store import DirectoryFeatureStore
 from precisionai.agritune.schemas.samples import PreparedSample
+from precisionai.agritune.services import segmentation_common
 from precisionai.agritune.services.feature_service import build_features
 from precisionai.agritune.services.segmentation_common import (
     OnlineAugmentedBatches,
+    PreloadedBatches,
     build_cached_feature_provider,
     build_decoder,
     build_image_hash_fn,
@@ -44,6 +46,7 @@ from precisionai.agritune.tasks.segmentation.decoders.mlp_probe import MLPProbeD
 from precisionai.agritune.tasks.segmentation.decoders.pyramid_pooling import PyramidPoolingDecoder
 from precisionai.agritune.tasks.segmentation.decoders.segmenter import SegmenterMaskTransformerDecoder
 from precisionai.agritune.tasks.segmentation.decoders.token_fpn import CLSFusion, TokenFPNDecoder
+from precisionai.agritune.training.batch import TrainingBatch
 from tests.fixtures.image_factory import make_image, make_mask
 from tests.fixtures.manifest_factory import build_manifest
 
@@ -615,3 +618,218 @@ def test_validate_device_rejects_out_of_range_cuda_index() -> None:
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA-enabled machine")
 def test_validate_device_accepts_a_valid_cuda_device() -> None:
     assert validate_device("cuda:0") == torch.device("cuda:0")
+
+
+def test_build_image_hash_fn_reads_each_image_only_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    manifest_path = build_manifest(tmp_path)
+    hash_fn = build_image_hash_fn(str(manifest_path))
+    hashed: list[bytes] = []
+    original = segmentation_common.hash_image_bytes
+    monkeypatch.setattr(segmentation_common, "hash_image_bytes", lambda data: hashed.append(data) or original(data))
+    sample = PreparedSample(sample_id="sample-0", image=None, target=None)
+
+    first = hash_fn(sample)
+    second = hash_fn(sample)
+    hash_fn(PreparedSample(sample_id="sample-1", image=None, target=None))
+
+    assert first == second
+    assert len(hashed) == 2  # one read per distinct sample, none for the repeat
+
+
+class _CountingBatches:
+    """A re-iterable batches source that records how many times it was walked."""
+
+    def __init__(self, batches: list[TrainingBatch]) -> None:
+        self.batches = batches
+        self.passes = 0
+
+    def __iter__(self) -> Iterator[TrainingBatch]:
+        self.passes += 1
+        yield from self.batches
+
+
+def _source(values: list[int], *, batch_size: int = 2, size: tuple[int, int] = (2, 3)) -> _CountingBatches:
+    batches = []
+    for start in range(0, len(values), batch_size):
+        chunk = values[start : start + batch_size]
+        batches.append(
+            TrainingBatch(
+                samples=[PreparedSample(sample_id=f"s{value}", image=None, target=None) for value in chunk],
+                targets=torch.stack([torch.full(size, value, dtype=torch.long) for value in chunk]),
+            )
+        )
+    return _CountingBatches(batches)
+
+
+def _replay(preloaded: PreloadedBatches) -> list[tuple[list[str], torch.Tensor]]:
+    return [([sample.sample_id for sample in batch.samples], batch.targets) for batch in preloaded]
+
+
+def test_preloaded_batches_walk_the_source_exactly_once() -> None:
+    source = _source([0, 1, 2, 3, 4])
+    preloaded = PreloadedBatches(source, batch_size=2, storage_device=torch.device("cpu"))
+
+    for _ in range(3):
+        list(preloaded)
+
+    assert source.passes == 1
+
+
+def test_preloaded_batches_replay_the_source_batches_in_order() -> None:
+    source = _source([0, 1, 2, 3, 4])
+    preloaded = PreloadedBatches(source, batch_size=2, storage_device=torch.device("cpu"))
+
+    replayed = _replay(preloaded)
+
+    assert [ids for ids, _ in replayed] == [["s0", "s1"], ["s2", "s3"], ["s4"]]
+    for (_, targets), original in zip(replayed, source.batches, strict=True):
+        assert torch.equal(targets.long(), original.targets)
+    assert len(preloaded) == 3
+
+
+def test_preloaded_batches_rebatch_to_their_own_batch_size() -> None:
+    preloaded = PreloadedBatches(_source([0, 1, 2, 3, 4]), batch_size=4, storage_device=torch.device("cpu"))
+
+    assert [ids for ids, _ in _replay(preloaded)] == [["s0", "s1", "s2", "s3"], ["s4"]]
+    assert len(preloaded) == 2
+
+
+@pytest.mark.parametrize(
+    ("values", "dtype"),
+    [
+        ([0, 14, 3], torch.uint8),
+        ([0, 255], torch.uint8),
+        ([-100, 2], torch.int16),  # ignore_index is negative
+        ([0, 40_000], torch.int32),
+        ([0, 2**40], torch.int64),
+    ],
+)
+def test_preloaded_batches_store_targets_in_the_narrowest_exact_dtype(values: list[int], dtype: torch.dtype) -> None:
+    preloaded = PreloadedBatches(_source(values), batch_size=2, storage_device=torch.device("cpu"))
+
+    assert preloaded.targets.dtype == dtype
+    assert preloaded.targets[:, 0, 0].tolist() == values
+
+
+def test_preloaded_batches_keep_float_targets_unchanged() -> None:
+    batch = TrainingBatch(
+        samples=[PreparedSample(sample_id="a", image=None, target=None)], targets=torch.full((1, 2, 2), 0.5)
+    )
+    preloaded = PreloadedBatches([batch], batch_size=1, storage_device=torch.device("cpu"))
+
+    assert preloaded.targets.dtype == torch.float32
+
+
+def test_preloaded_batches_expose_their_samples_in_source_order() -> None:
+    preloaded = PreloadedBatches(_source([3, 1, 2]), batch_size=2, storage_device=torch.device("cpu"))
+
+    assert [sample.sample_id for sample in preloaded.samples] == ["s3", "s1", "s2"]
+
+
+def test_preloaded_batches_without_shuffle_repeat_the_same_order_every_epoch() -> None:
+    preloaded = PreloadedBatches(_source(list(range(7))), batch_size=3, storage_device=torch.device("cpu"))
+
+    first = [ids for ids, _ in _replay(preloaded)]
+    second = [ids for ids, _ in _replay(preloaded)]
+
+    assert first == second
+
+
+def test_preloaded_batches_shuffle_changes_order_between_epochs_but_keeps_pairs_aligned() -> None:
+    preloaded = PreloadedBatches(
+        _source(list(range(20))), batch_size=4, storage_device=torch.device("cpu"), shuffle=True, seed=3
+    )
+
+    first = _replay(preloaded)
+    second = _replay(preloaded)
+
+    first_ids = [sample_id for ids, _ in first for sample_id in ids]
+    second_ids = [sample_id for ids, _ in second for sample_id in ids]
+    assert sorted(first_ids) == sorted(second_ids) == sorted(f"s{value}" for value in range(20))
+    assert first_ids != second_ids
+    for ids, targets in first + second:
+        assert [int(target[0, 0]) for target in targets] == [int(sample_id[1:]) for sample_id in ids]
+
+
+def test_preloaded_batches_shuffle_order_is_a_function_of_seed_and_epoch() -> None:
+    def epoch_order(*, seed: int, epoch: int) -> list[str]:
+        preloaded = PreloadedBatches(
+            _source(list(range(12))), batch_size=5, storage_device=torch.device("cpu"), shuffle=True, seed=seed
+        )
+        preloaded.set_epoch(epoch)
+        return [sample_id for ids, _ in _replay(preloaded) for sample_id in ids]
+
+    assert epoch_order(seed=1, epoch=4) == epoch_order(seed=1, epoch=4)
+    assert epoch_order(seed=1, epoch=4) != epoch_order(seed=2, epoch=4)
+    assert epoch_order(seed=1, epoch=4) != epoch_order(seed=1, epoch=5)
+
+
+def test_preloaded_batches_set_epoch_reproduces_a_later_epoch_after_resume() -> None:
+    running = PreloadedBatches(
+        _source(list(range(9))), batch_size=2, storage_device=torch.device("cpu"), shuffle=True, seed=0
+    )
+    _replay(running)  # epoch 0
+    epoch_one = [ids for ids, _ in _replay(running)]
+
+    resumed = PreloadedBatches(
+        _source(list(range(9))), batch_size=2, storage_device=torch.device("cpu"), shuffle=True, seed=0
+    )
+    resumed.set_epoch(1)
+
+    assert [ids for ids, _ in _replay(resumed)] == epoch_one
+
+
+def test_preloaded_batches_reject_a_negative_epoch() -> None:
+    preloaded = PreloadedBatches(_source([0]), batch_size=1, storage_device=torch.device("cpu"))
+
+    with pytest.raises(ValueError, match="epoch must be non-negative"):
+        preloaded.set_epoch(-1)
+
+
+def test_preloaded_batches_reject_a_non_positive_batch_size() -> None:
+    with pytest.raises(ValueError, match="batch_size must be positive"):
+        PreloadedBatches(_source([0]), batch_size=0, storage_device=torch.device("cpu"))
+
+
+def test_preloaded_batches_reject_an_empty_source() -> None:
+    with pytest.raises(ValueError, match="source yielded no samples"):
+        PreloadedBatches([], batch_size=2, storage_device=torch.device("cpu"))
+
+
+def test_preloaded_batches_from_real_training_batches_match_every_epoch(tmp_path: Path) -> None:
+    manifest_path = build_manifest(tmp_path, image_size=(6, 4))
+    source = build_training_batches(ManifestDataset(str(manifest_path)), batch_size=3, load_images=False)
+    expected = [(list(batch.samples), batch.targets) for batch in source]
+
+    preloaded = PreloadedBatches(source, batch_size=3, storage_device=torch.device("cpu"), show_progress=True)
+
+    for _ in range(2):
+        for batch, (samples, targets) in zip(preloaded, expected, strict=True):
+            assert [sample.sample_id for sample in batch.samples] == [sample.sample_id for sample in samples]
+            assert torch.equal(batch.targets.long(), targets)
+
+
+_needs_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA-enabled machine")
+
+
+@_needs_cuda
+def test_preloaded_batches_pin_host_targets_for_async_copies() -> None:
+    preloaded = PreloadedBatches(_source([0, 1, 2]), batch_size=2, storage_device=torch.device("cpu"), pin_memory=True)
+
+    batch = next(iter(preloaded))
+
+    assert batch.targets.is_pinned()
+    assert batch.targets.tolist() == [[[0] * 3] * 2, [[1] * 3] * 2]
+
+
+@_needs_cuda
+def test_preloaded_batches_on_a_cuda_device_yield_device_targets() -> None:
+    preloaded = PreloadedBatches(
+        _source([0, 1, 2]), batch_size=2, storage_device=torch.device("cuda"), shuffle=True, seed=0
+    )
+
+    batches = list(preloaded)
+
+    assert all(batch.targets.device.type == "cuda" for batch in batches)
+    for batch in batches:
+        assert [int(target[0, 0]) for target in batch.targets] == [int(s.sample_id[1:]) for s in batch.samples]

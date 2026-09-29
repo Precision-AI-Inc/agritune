@@ -22,6 +22,8 @@ import torch
 from torch import nn
 from torch.nn import functional
 
+from precisionai.agritune.tasks.segmentation.upsample import bilinear_resize
+
 LossName = Literal["ce", "bce", "dice", "ce_dice", "bce_dice"]
 
 
@@ -57,6 +59,24 @@ class DiceLoss(nn.Module):
         cardinality = probs.sum(dims) + one_hot.sum(dims)
         dice_per_class = (2 * intersection + self.smooth) / (cardinality + self.smooth)
         return 1.0 - dice_per_class.mean()
+
+
+def as_class_indices(targets: torch.Tensor) -> torch.Tensor:
+    """Return integer class-index ``targets`` as ``int64``, leaving any other tensor unchanged.
+
+    Parameters
+    ----------
+    targets : torch.Tensor
+        Class-index map of any integer dtype, or an already-``int64``/floating-point tensor.
+
+    Returns
+    -------
+    torch.Tensor
+        ``targets.long()`` for a non-``int64`` integer tensor; ``targets`` itself otherwise.
+    """
+    if targets.is_floating_point() or targets.dtype in (torch.int64, torch.bool):
+        return targets
+    return targets.long()
 
 
 def _validate_targets(targets: torch.Tensor, *, num_classes: int, valid: torch.Tensor) -> None:
@@ -155,9 +175,15 @@ class SegmentationLoss(nn.Module):
         self.register_buffer("_class_weights", config.class_weights, persistent=False)
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        """Compute the configured loss for one batch."""
+        """Compute the configured loss for one batch.
+
+        ``targets`` may use any integer dtype (e.g. the ``uint8`` masks a preloaded batch cache
+        keeps to cut host-to-device traffic); it is widened to ``int64`` here, which every
+        PyTorch loss below requires.
+        """
+        targets = as_class_indices(targets)
         if logits.shape[-2:] != targets.shape[-2:]:
-            logits = functional.interpolate(logits, size=targets.shape[-2:], mode="bilinear", align_corners=False)
+            logits = bilinear_resize(logits, targets.shape[-2:])
         config = self._config
         # nn.Module's __getattr__ is typed as returning `Tensor | Module` for any registered
         # buffer/submodule name, since it can't know which this one is; this buffer is always a

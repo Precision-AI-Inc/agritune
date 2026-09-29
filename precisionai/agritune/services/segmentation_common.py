@@ -11,7 +11,7 @@ what ``agritune features build`` wrote.
 
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, Generic, TypeVar
 
 import numpy as np
 import torch
@@ -59,7 +59,7 @@ def mask_to_target_tensor(mask: Any) -> torch.Tensor:
 _T = TypeVar("_T")
 
 
-class _IndexDataset(Dataset[_T]):
+class _IndexDataset(Dataset[_T], Generic[_T]):
     """Adapts an ``index -> item`` callable to :class:`torch.utils.data.Dataset`.
 
     Each batches class below already knows how to load and (optionally) augment one sample given
@@ -520,6 +520,143 @@ class OnlineAugmentedBatches:
         yield from loader
 
 
+def _compact_targets(targets: torch.Tensor) -> torch.Tensor:
+    """Return integer ``targets`` in the narrowest dtype that holds every value exactly."""
+    if targets.is_floating_point() or targets.numel() == 0:
+        return targets
+    low, high = int(targets.min()), int(targets.max())
+    for dtype in (torch.uint8, torch.int16, torch.int32):
+        info = torch.iinfo(dtype)
+        if info.min <= low and high <= info.max:
+            return targets.to(dtype)
+    return targets
+
+
+class PreloadedBatches:
+    """Materialize a deterministic batches iterable once, then replay it from memory every epoch.
+
+    ``build_training_batches``/``build_static_augmented_batches`` re-read and re-decode every
+    mask from disk on every epoch. Under ``feature_provider: cached`` with ``augmentation.mode``
+    ``none`` or ``offline`` those masks (and the samples' augmentation records, which the cache
+    keys depend on) are identical every epoch, so this walks ``source`` exactly once, keeps every
+    :class:`~precisionai.agritune.schemas.samples.PreparedSample` and one stacked target tensor in
+    the narrowest integer dtype that holds its labels (``uint8`` for ordinary class masks), and
+    serves every later epoch from that.
+
+    Never wrap an iterable whose batches differ between passes (``OnlineAugmentedBatches``):
+    this would silently freeze its first epoch's augmentation.
+
+    Parameters
+    ----------
+    source : Iterable[TrainingBatch]
+        Iterated exactly once, during construction. Every batch's targets must share one spatial
+        size (which ``torch.stack`` inside the source already requires within a batch).
+    batch_size : int
+        Size of the batches yielded on replay (the last may be smaller).
+    storage_device : torch.device
+        Where the target tensor lives. ``cpu`` keeps it in host RAM (pinned per batch when
+        ``pin_memory``); a CUDA device keeps it there and yields device tensors directly.
+    pin_memory : bool, optional
+        Gather each replayed CPU batch's targets into pinned memory, so the trainer's copy to a
+        CUDA device can run asynchronously. Ignored when ``storage_device`` is not the CPU.
+    shuffle : bool, optional
+        Yield samples in a fresh random order every epoch instead of source order. The order is
+        a pure function of ``seed`` and the epoch index, so a resumed run replays the same order.
+    seed : int, optional
+        Seed for ``shuffle``.
+    show_progress : bool, optional
+        Render a progress bar over the one-time pass through ``source``.
+
+    Raises
+    ------
+    ValueError
+        If ``batch_size`` is not positive or ``source`` yields no samples.
+    """
+
+    def __init__(
+        self,
+        source: Iterable[TrainingBatch],
+        *,
+        batch_size: int,
+        storage_device: torch.device,
+        pin_memory: bool = False,
+        shuffle: bool = False,
+        seed: int = 0,
+        show_progress: bool = False,
+    ) -> None:
+        if batch_size < 1:
+            raise ValueError(f"batch_size must be positive; got {batch_size}")
+        samples: list[PreparedSample] = []
+        chunks: list[torch.Tensor] = []
+        for batch in progress_iter(source, desc="preloading targets", unit="batch", disable=not show_progress):
+            samples.extend(batch.samples)
+            chunks.append(_compact_targets(batch.targets.cpu()))
+        if not samples:
+            raise ValueError("source yielded no samples to preload")
+        self._samples = samples
+        self._targets = _compact_targets(torch.cat(chunks)).to(storage_device)
+        self._batch_size = batch_size
+        self._pin = pin_memory and storage_device.type == "cpu" and torch.cuda.is_available()
+        self._shuffle = shuffle
+        self._seed = seed
+        self._epoch = 0
+        logger.info(
+            "preloaded %d target(s) of shape %s as %s on %s: %.2f GB",
+            len(samples),
+            tuple(self._targets.shape[1:]),
+            self._targets.dtype,
+            storage_device,
+            self._targets.numel() * self._targets.element_size() / 1e9,
+        )
+
+    @property
+    def samples(self) -> list[PreparedSample]:
+        """Return every preloaded sample, in source order."""
+        return list(self._samples)
+
+    @property
+    def targets(self) -> torch.Tensor:
+        """Return the stacked, compact-dtype target tensor, in source order."""
+        return self._targets
+
+    def __len__(self) -> int:
+        """Return the number of batches one epoch yields."""
+        return (len(self._samples) + self._batch_size - 1) // self._batch_size
+
+    def set_epoch(self, epoch: int) -> None:
+        """Set the next epoch index, so ``shuffle`` reproduces the right order after a resume."""
+        if epoch < 0:
+            raise ValueError(f"epoch must be non-negative; got {epoch}")
+        self._epoch = epoch
+
+    def _order(self, epoch: int) -> torch.Tensor:
+        count = len(self._samples)
+        if not self._shuffle:
+            return torch.arange(count)
+        generator = torch.Generator().manual_seed(self._seed * 1_000_003 + epoch)
+        return torch.randperm(count, generator=generator)
+
+    def __iter__(self) -> Iterator[TrainingBatch]:
+        """Yield one epoch of batches from memory, advancing the epoch counter."""
+        epoch = self._epoch
+        self._epoch += 1
+        order = self._order(epoch)
+        for start in range(0, len(self._samples), self._batch_size):
+            index = order[start : start + self._batch_size]
+            yield TrainingBatch(
+                samples=[self._samples[position] for position in index.tolist()],
+                targets=self._gather(index),
+            )
+
+    def _gather(self, index: torch.Tensor) -> torch.Tensor:
+        if self._targets.device.type != "cpu":
+            return self._targets.index_select(0, index.to(self._targets.device))
+        if not self._pin:
+            return self._targets.index_select(0, index)
+        out = torch.empty((index.shape[0], *self._targets.shape[1:]), dtype=self._targets.dtype, pin_memory=True)
+        return torch.index_select(self._targets, 0, index, out=out)
+
+
 def build_prediction_batches(
     dataset: ManifestDataset,
     *,
@@ -697,6 +834,9 @@ def build_image_hash_fn(manifest_path: str) -> Callable[[PreparedSample], str]:
     :class:`~precisionai.agritune.features.provider.CachedFeatureProvider` and
     :class:`~precisionai.agritune.features.provider.HybridFeatureProvider` never duplicate it.
 
+    Each sample's image is read and hashed at most once per returned function; later calls for
+    the same ``sample_id`` return the memoized hash.
+
     Parameters
     ----------
     manifest_path : str
@@ -709,10 +849,21 @@ def build_image_hash_fn(manifest_path: str) -> Callable[[PreparedSample], str]:
     rows = load_manifest(manifest_path)
     base_dir = Path(manifest_path).parent
     rows_by_sample_id = {row.sample_id: row for row in rows}
+    # A cached provider rebuilds every sample's key on every batch of every epoch. Without this
+    # memo that meant re-reading and re-hashing every image file once per epoch, even under
+    # feature_provider: cached, which otherwise never opens an image. An image cannot change
+    # mid-run without also invalidating the run's dataset fingerprint, so one hash per sample
+    # for the lifetime of this function is safe.
+    hashes: dict[str, str] = {}
 
     def image_hash_fn(sample: PreparedSample) -> str:
+        cached = hashes.get(sample.sample_id)
+        if cached is not None:
+            return cached
         row = rows_by_sample_id[sample.sample_id]
-        return hash_image_bytes((base_dir / row.image_path).read_bytes())
+        digest = hash_image_bytes((base_dir / row.image_path).read_bytes())
+        hashes[sample.sample_id] = digest
+        return digest
 
     return image_hash_fn
 
