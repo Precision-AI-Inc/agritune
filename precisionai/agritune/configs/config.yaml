@@ -36,6 +36,11 @@ prefetch_factor: null  # batches each worker buffers ahead; null defers to DataL
 feature_read_workers: 32  # thread-pool size for concurrent feature-store reads under
                            # feature_provider: cached — raise to match available CPU cores when
                            # disk/store read latency, not CPU, is the bottleneck
+feature_preload: none  # none | host | device — read the train/val features and masks once, before
+                        # training, into RAM (host) or GPU memory (device, CUDA only); cached only
+feature_preload_dtype: null  # null (keep the store's dtype) | float16 | bfloat16 | float32 — dtype
+                              # preloaded tokens are held in; float16 halves memory and copy traffic
+shuffle: false  # reshuffle training samples every epoch (reproducible); requires feature_preload
 val_fraction: 0.2
 seed: 0
 checkpoint_top_k: 3

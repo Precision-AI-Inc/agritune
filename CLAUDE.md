@@ -227,6 +227,7 @@ repos:
 # optional dep pattern
 try:
     import wandb  # type: ignore[import]
+
     _WANDB_AVAILABLE = True
 except ImportError:
     _WANDB_AVAILABLE = False

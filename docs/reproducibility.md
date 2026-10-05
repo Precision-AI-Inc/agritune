@@ -37,6 +37,16 @@ or is killed mid-training still leaves a reconstructable record — including fo
 `CheckpointMismatchError` on resume, which otherwise has no record of what config an existing
 checkpoint was fingerprinted against.
 
+## Seeds and sample order
+
+The global RNG is seeded from `trainer.seed` immediately before the decoder is built, so a run's
+initial weights depend only on that seed, not on anything that happened to draw random numbers
+earlier in the process. Training batches follow manifest order unless `shuffle: true`, in which
+case each epoch's order is a function of `seed` and the epoch index; a resumed run replays the
+same order. `shuffle` and `feature_preload_dtype` change what the decoder sees, so both are part
+of the config fingerprint whenever they are set; `feature_preload` itself is not, since where
+features are held in memory does not change their values.
+
 ## Checkpoints carry more than weights
 
 A checkpoint saves decoder state, optimizer state, scheduler state, gradient scaler, epoch, batch

@@ -13,9 +13,12 @@ per entry to support ``agritune features inspect``/``verify`` without loading fu
 import hashlib
 import json
 import threading
+from collections import deque
+from collections.abc import Callable, Generator, Iterable, Iterator, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import torch
 from safetensors.torch import load_file, save_file
@@ -79,6 +82,41 @@ def _summary_of(key: str, features: EncoderFeatures, *, checksum: str) -> Featur
     )
 
 
+_T = TypeVar("_T")
+_R = TypeVar("_R")
+
+
+def _bounded_map(fn: Callable[[_T], _R], items: Iterable[_T], *, max_workers: int) -> Generator[_R, None, None]:
+    """Yield ``fn(item)`` for every item, in order, with at most ``max_workers`` calls in flight.
+
+    Unlike ``ThreadPoolExecutor.map``, which submits every item up front and keeps every finished
+    result alive until it is consumed, this only ever holds ``max_workers`` results at once — which
+    matters when each result is a whole multi-gigabyte shard's worth of tensors.
+    """
+    if max_workers < 1:
+        raise ValueError(f"max_workers must be positive; got {max_workers}")
+    executor = ThreadPoolExecutor(max_workers=max_workers)
+    in_flight: deque[Future[_R]] = deque()
+    try:
+        for item in items:
+            in_flight.append(executor.submit(fn, item))
+            if len(in_flight) >= max_workers:
+                yield in_flight.popleft().result()
+        while in_flight:
+            yield in_flight.popleft().result()
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
+
+
+def _group_shard_tensors(tensors: dict[str, torch.Tensor]) -> dict[str, dict[str, torch.Tensor]]:
+    """Split a shard's flat ``"<key>::<field>"`` tensor names into ``{key: {field: tensor}}``."""
+    grouped: dict[str, dict[str, torch.Tensor]] = {}
+    for name, tensor in tensors.items():
+        key, _, field_name = name.rpartition("::")
+        grouped.setdefault(key, {})[field_name] = tensor
+    return grouped
+
+
 def _features_from_tensors(
     tensors: dict[str, torch.Tensor],
     *,
@@ -132,6 +170,31 @@ class DirectoryFeatureStore:
             encoder_revision=meta["encoder_revision"],
             metadata=meta["metadata"],
         )
+
+    def read_many(self, keys: Sequence[str], *, max_workers: int = 16) -> Iterator[tuple[str, EncoderFeatures]]:
+        """Yield ``(key, features)`` for every key in ``keys``, in order, reading files concurrently.
+
+        Parameters
+        ----------
+        keys : Sequence[str]
+            Keys to read. Every one must already exist; this is checked before any tensor file
+            is read, so a missing key fails fast instead of partway through a long preload.
+        max_workers : int, optional
+            Files read concurrently.
+
+        Yields
+        ------
+        tuple[str, EncoderFeatures]
+
+        Raises
+        ------
+        KeyError
+            If any key in ``keys`` has no entry.
+        """
+        for key in keys:
+            if not self.has(key):
+                raise KeyError(key)
+        yield from _bounded_map(lambda key: (key, self.read(key)), keys, max_workers=max_workers)
 
     def read_summary(self, key: str) -> FeatureSummary:
         """Read only the lightweight, tensor-free :class:`FeatureSummary` for ``key``."""
@@ -225,7 +288,7 @@ class ShardedFeatureStore:
             json.loads(self._index_path.read_text()) if self._index_path.is_file() else {}
         )
         self._pending: dict[str, EncoderFeatures] = {}
-        self._shard_cache: tuple[str, dict[str, torch.Tensor]] | None = None
+        self._shard_cache: tuple[str, dict[str, dict[str, torch.Tensor]]] | None = None
         self._shard_cache_lock = threading.Lock()
 
     def has(self, key: str) -> bool:
@@ -239,10 +302,68 @@ class ShardedFeatureStore:
         if key not in self._index:
             raise KeyError(key)
         entry = self._index[key]
-        tensors = self._load_shard(entry["shard"])
-        prefixed = {name[len(key) + 2 :]: tensor for name, tensor in tensors.items() if name.startswith(f"{key}::")}
+        tensors = self._load_shard(entry["shard"]).get(key)
+        if tensors is None:
+            raise KeyError(key)
+        return self._entry_features(key, tensors)
+
+    def read_many(self, keys: Sequence[str], *, max_workers: int = 4) -> Iterator[tuple[str, EncoderFeatures]]:
+        """Yield ``(key, features)`` for every key in ``keys``, loading each shard file only once.
+
+        :meth:`read` loads a whole shard to return one entry and keeps only the most recent
+        shard in memory, so reading keys that are not grouped by shard reloads a shard for
+        almost every key. This groups ``keys`` by shard first, loads each shard once (up to
+        ``max_workers`` shards concurrently), and yields every requested entry it holds —
+        independent of the order ``keys`` arrive in.
+
+        Parameters
+        ----------
+        keys : Sequence[str]
+            Keys to read. Every one must already exist (flushed or buffered); this is checked
+            before any shard is read, so a missing key fails fast.
+        max_workers : int, optional
+            Shards loaded concurrently. Peak memory is roughly ``max_workers`` whole shards.
+
+        Yields
+        ------
+        tuple[str, EncoderFeatures]
+            Grouped by shard, in the order each shard is first referenced by ``keys``; within a
+            shard, in ``keys`` order. Entries still buffered in this process come first.
+
+        Raises
+        ------
+        KeyError
+            If any key in ``keys`` has no entry.
+        """
+        by_shard: dict[str, list[str]] = {}
+        buffered: list[str] = []
+        for key in keys:
+            if key in self._pending:
+                buffered.append(key)
+            elif key in self._index:
+                by_shard.setdefault(self._index[key]["shard"], []).append(key)
+            else:
+                raise KeyError(key)
+        for key in buffered:
+            yield key, self._pending[key]
+
+        def load(group: tuple[str, list[str]]) -> list[tuple[str, EncoderFeatures]]:
+            shard_name, shard_keys = group
+            grouped = _group_shard_tensors(load_file(str(self._root / shard_name)))
+            entries = []
+            for key in shard_keys:
+                if key not in grouped:
+                    raise KeyError(key)
+                entries.append((key, self._entry_features(key, grouped[key])))
+            return entries
+
+        for entries in _bounded_map(load, by_shard.items(), max_workers=max_workers):
+            yield from entries
+
+    def _entry_features(self, key: str, tensors: dict[str, torch.Tensor]) -> EncoderFeatures:
+        entry = self._index[key]
         return _features_from_tensors(
-            prefixed,
+            tensors,
             image_sizes=entry["image_sizes"],
             encoder_model=entry["encoder_model"],
             encoder_revision=entry["encoder_revision"],
@@ -331,8 +452,11 @@ class ShardedFeatureStore:
     def _known_shards(self) -> set[str]:
         return {entry["shard"] for entry in self._index.values()}
 
-    def _load_shard(self, shard_name: str) -> dict[str, torch.Tensor]:
-        """Load ``shard_name``'s tensors, reusing the most-recently loaded shard when possible.
+    def _load_shard(self, shard_name: str) -> dict[str, dict[str, torch.Tensor]]:
+        """Load ``shard_name``'s tensors grouped by key, reusing the most-recently loaded shard.
+
+        Grouped once per load (``{key: {field: tensor}}``) so each :meth:`read` is a dictionary
+        lookup rather than a scan over every tensor name in the shard.
 
         Reads within one batch typically land on runs of keys from the same shard (samples are
         packed into shards in stable order), so caching only the single most-recently loaded shard
@@ -347,9 +471,9 @@ class ShardedFeatureStore:
         with self._shard_cache_lock:
             if self._shard_cache is not None and self._shard_cache[0] == shard_name:
                 return self._shard_cache[1]
-            tensors = load_file(str(self._root / shard_name))
-            self._shard_cache = (shard_name, tensors)
-            return tensors
+            grouped = _group_shard_tensors(load_file(str(self._root / shard_name)))
+            self._shard_cache = (shard_name, grouped)
+            return grouped
 
     def __enter__(self) -> "ShardedFeatureStore":
         """Return ``self`` for use as a context manager."""

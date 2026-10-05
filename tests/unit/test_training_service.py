@@ -12,6 +12,7 @@ only exercises the default (cached, no augmentation, jsonl) path.
 import asyncio
 from enum import Enum
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -20,7 +21,12 @@ import yaml
 from PIL import Image
 
 from precisionai.agritune.augmentations.feature.pipeline import FeatureAugmentationConfig, FeatureAugmentationPipeline
-from precisionai.agritune.augmentations.image.pipeline import AugmentationMode, GeometricConfig
+from precisionai.agritune.augmentations.image.pipeline import (
+    AugmentationMode,
+    AugmentationPipelineConfig,
+    GeometricConfig,
+    ImageAugmentationPipeline,
+)
 from precisionai.agritune.data.dataset import ManifestDataset
 from precisionai.agritune.data.manifest import load_manifest
 from precisionai.agritune.data.split import random_split
@@ -77,7 +83,7 @@ def test_jsonable_serializes_tensors_paths_and_enums() -> None:
     assert _jsonable(_Kind.OFFLINE) == "offline"
 
 
-def _precompute(manifest_path: Path, store: DirectoryFeatureStore) -> None:
+def _precompute(manifest_path: Path, store: DirectoryFeatureStore | ShardedFeatureStore) -> None:
     asyncio.run(
         build_features(str(manifest_path), store=store, encoder=FakeEncoderBackend(), encoder_fingerprint=_FINGERPRINT)
     )
@@ -769,3 +775,226 @@ def test_run_training_mode_none_applies_configured_resize(tmp_path: Path) -> Non
     result = run_training(config, store=store)
 
     assert result.final_train_state["epoch"] == 1
+
+
+# --- feature_preload / feature_preload_dtype / shuffle ------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"feature_preload": "gpu"}, "unsupported feature_preload: 'gpu'"),
+        ({"feature_preload": "host", "feature_preload_dtype": "int8"}, "unsupported feature_preload_dtype: 'int8'"),
+        ({"feature_preload_dtype": "float16"}, "has no effect with feature_preload='none'"),
+        ({"shuffle": True}, "shuffle=true requires feature_preload"),
+        ({"feature_preload": "host", "feature_provider": "online"}, "requires feature_provider 'cached'"),
+        ({"feature_preload": "host", "feature_provider": "hybrid"}, "requires feature_provider 'cached'"),
+        ({"feature_preload": "device", "device": "cpu"}, "feature_preload='device' requires a CUDA device"),
+    ],
+)
+def test_run_training_rejects_invalid_preload_config(
+    tmp_path: Path, overrides: dict[str, object], message: str
+) -> None:
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    config = _base_config(tmp_path, manifest_path, run_id="invalid-preload-run", **overrides)
+
+    with pytest.raises(ValueError, match=message):
+        run_training(config, store=DirectoryFeatureStore(tmp_path / "features"))
+
+
+def _decoder_state(result: training_service.TrainingRunResult) -> dict[str, torch.Tensor]:
+    payload = torch.load(result.run_directory.checkpoints_dir / "last.ckpt", map_location="cpu", weights_only=False)
+    return payload["decoder_state"]
+
+
+def _assert_same_training(
+    first: training_service.TrainingRunResult, second: training_service.TrainingRunResult
+) -> None:
+    assert first.final_train_state == second.final_train_state
+    assert first.val_metrics == pytest.approx(second.val_metrics)
+    assert first.train_metrics == pytest.approx(second.train_metrics)
+    first_state, second_state = _decoder_state(first), _decoder_state(second)
+    assert first_state.keys() == second_state.keys()
+    for name in first_state:
+        torch.testing.assert_close(first_state[name], second_state[name])
+
+
+@pytest.mark.parametrize("store_type", ["directory", "sharded"])
+def test_host_preload_trains_identically_to_reading_the_store_every_epoch(tmp_path: Path, store_type: str) -> None:
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    store = (
+        DirectoryFeatureStore(tmp_path / "features")
+        if store_type == "directory"
+        else ShardedFeatureStore(tmp_path / "features", entries_per_shard=2)
+    )
+    _precompute(manifest_path, store)
+    store.flush()
+    common = {"store_type": store_type, "entries_per_shard": 2, "trainer": TrainerConfig(max_epochs=3)}
+
+    streamed = run_training(_base_config(tmp_path, manifest_path, run_id="streamed", **common), store=store)
+    preloaded = run_training(
+        _base_config(tmp_path, manifest_path, run_id="preloaded", feature_preload="host", **common),
+        store=store,
+        show_progress=True,
+    )
+
+    _assert_same_training(streamed, preloaded)
+
+
+def test_host_preload_with_offline_augmentation_reads_the_augmented_cache(tmp_path: Path) -> None:
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    store = DirectoryFeatureStore(tmp_path / "features")
+    geometric = GeometricConfig(horizontal_flip_probability=0.5)
+    augmentation = AugmentationSelection(mode=AugmentationMode.OFFLINE, geometric=geometric)
+    asyncio.run(
+        build_features(
+            str(manifest_path),
+            store=store,
+            encoder=FakeEncoderBackend(),
+            encoder_fingerprint=_FINGERPRINT,
+            augmentation_mode=AugmentationMode.OFFLINE,
+            augmentation_pipeline=ImageAugmentationPipeline(AugmentationPipelineConfig(geometric=geometric)),
+        )
+    )
+    common = {"augmentation": augmentation, "trainer": TrainerConfig(max_epochs=2)}
+
+    streamed = run_training(_base_config(tmp_path, manifest_path, run_id="offline-streamed", **common), store=store)
+    preloaded = run_training(
+        _base_config(tmp_path, manifest_path, run_id="offline-preloaded", feature_preload="host", **common),
+        store=store,
+    )
+
+    _assert_same_training(streamed, preloaded)
+
+
+def test_float16_preload_trains_and_is_recorded_in_the_config_fingerprint(tmp_path: Path) -> None:
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    store = DirectoryFeatureStore(tmp_path / "features")
+    _precompute(manifest_path, store)
+
+    result = run_training(
+        _base_config(
+            tmp_path, manifest_path, run_id="fp16-preload", feature_preload="host", feature_preload_dtype="float16"
+        ),
+        store=store,
+    )
+
+    assert result.final_train_state["epoch"] == 1
+    assert "mean_iou" in result.val_metrics
+    fp16_fingerprint = training_service._critical_config(
+        _base_config(tmp_path, manifest_path, run_id="x", feature_preload="host", feature_preload_dtype="float16")
+    )
+    assert fp16_fingerprint["feature_preload_dtype"] == "float16"
+
+
+def test_preload_defaults_leave_the_critical_config_unchanged(tmp_path: Path) -> None:
+    """Runs that predate feature_preload/shuffle must keep their config fingerprint, or strict resume breaks."""
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    default = training_service._critical_config(_base_config(tmp_path, manifest_path, run_id="x"))
+    host_preload = training_service._critical_config(
+        _base_config(tmp_path, manifest_path, run_id="x", feature_preload="host")
+    )
+
+    assert "feature_preload_dtype" not in default
+    assert "shuffle" not in default
+    assert "feature_preload" not in default
+    # Where features live is a performance choice; it must not change the fingerprint either.
+    assert host_preload == default
+
+
+def test_shuffle_is_recorded_in_the_config_fingerprint(tmp_path: Path) -> None:
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+
+    critical = training_service._critical_config(
+        _base_config(tmp_path, manifest_path, run_id="x", feature_preload="host", shuffle=True)
+    )
+
+    assert critical["shuffle"] is True
+
+
+def test_shuffled_run_resumed_mid_training_matches_an_uninterrupted_run(tmp_path: Path) -> None:
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    store = DirectoryFeatureStore(tmp_path / "features")
+    _precompute(manifest_path, store)
+    common = {"feature_preload": "host", "shuffle": True, "batch_size": 1}
+
+    uninterrupted = run_training(
+        _base_config(tmp_path, manifest_path, run_id="shuffle-straight", trainer=TrainerConfig(max_epochs=3), **common),
+        store=store,
+    )
+    run_training(
+        _base_config(tmp_path, manifest_path, run_id="shuffle-resumed", trainer=TrainerConfig(max_epochs=1), **common),
+        store=store,
+    )
+    resumed = run_training(
+        _base_config(tmp_path, manifest_path, run_id="shuffle-resumed", trainer=TrainerConfig(max_epochs=3), **common),
+        store=store,
+    )
+
+    _assert_same_training(uninterrupted, resumed)
+
+
+def test_shuffle_changes_the_training_trajectory(tmp_path: Path) -> None:
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    store = DirectoryFeatureStore(tmp_path / "features")
+    _precompute(manifest_path, store)
+    common = {"feature_preload": "host", "batch_size": 1, "trainer": TrainerConfig(max_epochs=2)}
+
+    ordered = run_training(_base_config(tmp_path, manifest_path, run_id="ordered", **common), store=store)
+    shuffled = run_training(
+        _base_config(tmp_path, manifest_path, run_id="shuffled", shuffle=True, **common), store=store
+    )
+
+    ordered_state, shuffled_state = _decoder_state(ordered), _decoder_state(shuffled)
+    assert any(not torch.equal(ordered_state[name], shuffled_state[name]) for name in ordered_state)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA-enabled machine")
+@pytest.mark.parametrize("preload", ["host", "device"])
+def test_cuda_preload_matches_cpu_streamed_training(tmp_path: Path, preload: str) -> None:
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    store = DirectoryFeatureStore(tmp_path / "features")
+    _precompute(manifest_path, store)
+    common = {"trainer": TrainerConfig(max_epochs=2)}
+
+    on_cpu = run_training(_base_config(tmp_path, manifest_path, run_id="cpu-streamed", **common), store=store)
+    on_gpu = run_training(
+        _base_config(
+            tmp_path, manifest_path, run_id=f"gpu-{preload}", device="cuda", feature_preload=preload, **common
+        ),
+        store=store,
+    )
+
+    assert on_gpu.final_train_state == on_cpu.final_train_state
+    assert on_gpu.val_metrics["mean_iou"] == pytest.approx(on_cpu.val_metrics["mean_iou"], abs=1e-4)
+    cpu_state, gpu_state = _decoder_state(on_cpu), _decoder_state(on_gpu)
+    for name in cpu_state:
+        torch.testing.assert_close(gpu_state[name], cpu_state[name], rtol=1e-4, atol=1e-5)
+
+
+def test_mode_none_with_resize_builds_the_decoder_at_the_resized_target_size(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: under mode none the decoder was built at the native mask size (so it upsampled
+    to it, and the loss/metric resized every batch back down to the resized targets)."""
+    manifest_path = _build_manifest_with_varying_native_sizes(tmp_path)
+    store = DirectoryFeatureStore(tmp_path / "features")
+    _precompute(manifest_path, store)
+    built_sizes: list[tuple[int, int]] = []
+    original_build = training_service.build_decoder
+
+    def recording_build(name: str, **kwargs: Any) -> torch.nn.Module:
+        built_sizes.append(kwargs["output_size"])
+        return original_build(name, **kwargs)
+
+    monkeypatch.setattr(training_service, "build_decoder", recording_build)
+    config = _base_config(
+        tmp_path,
+        manifest_path,
+        run_id="mode-none-output-size-run",
+        augmentation=AugmentationSelection(mode=AugmentationMode.NONE, geometric=GeometricConfig(resize=(10, 6))),
+    )
+
+    run_training(config, store=store)
+
+    assert built_sizes == [(6, 10)]  # (height, width) of a (width=10, height=6) resize

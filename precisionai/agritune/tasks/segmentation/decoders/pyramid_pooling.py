@@ -14,9 +14,9 @@ from collections.abc import Sequence
 
 import torch
 from torch import nn
-from torch.nn import functional
 
 from precisionai.agritune.schemas.features import EncoderFeatures
+from precisionai.agritune.tasks.segmentation.upsample import bilinear_resize
 
 
 class PyramidPoolingDecoder(nn.Module):
@@ -93,9 +93,9 @@ class PyramidPoolingDecoder(nn.Module):
         pooled_features = [grid]
         for pool in self.pools:
             pooled = pool(grid)
-            pooled = functional.interpolate(pooled, size=(height, width), mode="bilinear", align_corners=False)
+            pooled = bilinear_resize(pooled, (height, width))
             pooled_features.append(pooled)
 
         fused = self.fuse(torch.cat(pooled_features, dim=1))
         logits = self.classifier(fused)
-        return functional.interpolate(logits, size=self.output_size, mode="bilinear", align_corners=False)
+        return bilinear_resize(logits, self.output_size)

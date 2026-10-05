@@ -12,9 +12,9 @@ per-class mask logits directly — no convolutional decoder head is needed. See 
 
 import torch
 from torch import nn
-from torch.nn import functional
 
 from precisionai.agritune.schemas.features import EncoderFeatures
+from precisionai.agritune.tasks.segmentation.upsample import bilinear_resize
 
 
 class SegmenterMaskTransformerDecoder(nn.Module):
@@ -97,4 +97,4 @@ class SegmenterMaskTransformerDecoder(nn.Module):
 
         masks = torch.einsum("bnd,bcd->bnc", patches_out, classes_out) * self.scale
         logits = masks.reshape(batch_size, height, width, self.num_classes).permute(0, 3, 1, 2)
-        return functional.interpolate(logits, size=self.output_size, mode="bilinear", align_corners=False)
+        return bilinear_resize(logits, self.output_size)

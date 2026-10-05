@@ -195,3 +195,18 @@ def test_update_stays_on_cuda_across_multiple_batches() -> None:
 
     assert metric.confusion_matrix().device.type == "cuda"
     assert metric.confusion_matrix().sum().item() == 8  # 2 batches x 4 pixels
+
+
+def test_update_with_uint8_targets_matches_int64_targets() -> None:
+    generator = torch.Generator().manual_seed(0)
+    # Labels near 255 would overflow uint8 arithmetic (targets * num_classes + predictions) if the
+    # metric did not widen compact targets first.
+    num_classes = 200
+    logits = torch.randn(2, num_classes, 3, 3, generator=generator)
+    targets = torch.randint(150, num_classes, (2, 3, 3), generator=generator)
+    compact, wide = SegmentationMetric(num_classes=num_classes), SegmentationMetric(num_classes=num_classes)
+
+    compact.update(logits, targets.to(torch.uint8))
+    wide.update(logits, targets)
+
+    assert torch.equal(compact.confusion_matrix(), wide.confusion_matrix())

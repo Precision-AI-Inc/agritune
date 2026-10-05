@@ -139,3 +139,62 @@ def test_context_manager_shuts_down_executor_when_the_body_raises() -> None:
         raise RuntimeError("boom")
 
     assert loader._executor._shutdown
+
+
+def test_cpu_device_uses_no_cuda_stream() -> None:
+    provider = FakeFeatureProvider(patch_dim=4, cls_dim=None, patch_grid=(2, 2))
+
+    loader = PrefetchingFeatureLoader([_batch("a")], provider, device=torch.device("cpu"), non_blocking=False)
+
+    assert loader._copy_stream is None
+    assert len(list(loader)) == 1
+
+
+_needs_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA-enabled machine")
+
+
+@_needs_cuda
+def test_cuda_prefetch_copies_on_a_side_stream_and_hands_over_ready_tensors() -> None:
+    device = torch.device("cuda")
+    provider = FakeFeatureProvider(patch_dim=4, cls_dim=3, patch_grid=(2, 2))
+    batches = [
+        TrainingBatch(samples=[_sample(f"s{index}")], targets=torch.full((1, 4), index).pin_memory())
+        for index in range(4)
+    ]
+
+    loader = PrefetchingFeatureLoader(batches, provider, device=device, non_blocking=True)
+    assert loader._copy_stream is not None
+    assert loader._copy_stream != torch.cuda.current_stream(device)
+    results = list(loader)
+
+    assert [batch.samples[0].sample_id for batch, _, _ in results] == ["s0", "s1", "s2", "s3"]
+    for index, (batch, features, targets) in enumerate(results):
+        assert features.patch_tokens.device.type == "cuda"
+        assert features.cls_tokens is not None
+        assert features.cls_tokens.device.type == "cuda"
+        assert targets.device.type == "cuda"
+        # Read on the consumer's stream without an explicit synchronize: correct only if the
+        # hand-over made the consumer stream wait for the copy.
+        assert targets.cpu().tolist() == [[index] * 4]
+        expected = provider.get_features(batch.samples)
+        assert torch.equal(features.patch_tokens.cpu(), expected.patch_tokens)
+
+
+@_needs_cuda
+def test_cuda_prefetch_runs_provider_work_on_the_copy_stream() -> None:
+    device = torch.device("cuda")
+    seen_streams: list[torch.cuda.Stream] = []
+    inner = FakeFeatureProvider(patch_dim=4, cls_dim=None, patch_grid=(2, 2))
+
+    class _StreamRecordingProvider:
+        def get_features(self, samples: Sequence[PreparedSample]) -> EncoderFeatures:
+            seen_streams.append(torch.cuda.current_stream(device))
+            return inner.get_features(samples)
+
+    loader = PrefetchingFeatureLoader(
+        [_batch("a"), _batch("b")], _StreamRecordingProvider(), device=device, non_blocking=True
+    )
+    list(loader)
+
+    assert seen_streams
+    assert all(stream == loader._copy_stream for stream in seen_streams)

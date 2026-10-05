@@ -49,6 +49,12 @@ agritune evaluate --manifest examples/datasets/cwfid/manifest.csv --store exampl
     --num-classes 3 --decoder mlp_probe --encoder-model pai-embedding --encoder-revision ""
 ```
 
+The quick start evaluates on its own training manifest only to show the commands end to end.
+`agritune train` splits `manifest_path` into training and validation itself (`val_fraction`), so
+real test scores need a separate test manifest that the training manifest does not list — see
+[docs/datasets.md](docs/datasets.md#train-validation-and-test-manifests). For faster training once
+features are built, see `feature_preload` in [docs/configuration.md](docs/configuration.md#performance-tuning).
+
 No encoder access yet? Swap the `features build` command for `--model fake-encoder` (and drop
 `--base-url`) to dry-run the same pipeline against synthetic features — every unit test and CI run
 does exactly that via `FakeEncoderBackend`, no network or API key required.

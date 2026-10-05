@@ -157,3 +157,30 @@ def test_store_type_and_entries_per_shard_are_configurable(tmp_path: Path) -> No
     config = load_training_run_config(str(path))
     assert config.store_type == "sharded"
     assert config.entries_per_shard == 500
+
+
+def test_preload_fields_default_to_streaming_from_the_store(tmp_path: Path) -> None:
+    config = load_training_run_config(str(_write_config(tmp_path, {})))
+
+    assert config.feature_preload == "none"
+    assert config.feature_preload_dtype is None
+    assert config.shuffle is False
+
+
+def test_preload_fields_are_configurable(tmp_path: Path) -> None:
+    path = _write_config(tmp_path, {"feature_preload": "device", "feature_preload_dtype": "float16", "shuffle": True})
+
+    config = load_training_run_config(str(path))
+
+    assert config.feature_preload == "device"
+    assert config.feature_preload_dtype == "float16"
+    assert config.shuffle is True
+
+
+def test_preload_fields_accept_dotlist_overrides(tmp_path: Path) -> None:
+    path = _write_config(tmp_path, {})
+
+    config = load_training_run_config(str(path), ["feature_preload=host", "shuffle=true"])
+
+    assert config.feature_preload == "host"
+    assert config.shuffle is True

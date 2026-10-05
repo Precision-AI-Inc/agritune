@@ -20,6 +20,7 @@ Augmentation
 FeatureProvider
   │
   ├── CachedFeatureProvider
+  ├── InMemoryFeatureProvider   (feature_preload: host | device)
   ├── OnlineFeatureProvider
   └── HybridFeatureProvider
        │

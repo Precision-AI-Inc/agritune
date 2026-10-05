@@ -84,12 +84,21 @@ marked `REQUIRED` as placeholders for you to fill in. It's the same shape as
 `examples/segmentation/cwfid.yaml`, just without the CWFID-specific values. Pass `--force` to
 overwrite an existing file at `--output`.
 
+## Validation split
+
+`agritune train` splits `manifest_path` into training and validation itself: `val_fraction` of the
+samples (default `0.2`), chosen per sample by a seeded hash of the sample ID, are held out for
+validation. The manifest's own `split` column is not used. Keep test samples in a separate
+manifest and evaluate on it with `agritune evaluate` — see
+[datasets.md](datasets.md#train-validation-and-test-manifests).
+
 ## Performance tuning
 
 These are plain `TrainingRunConfig` fields, not a Hydra group — set them directly (flat config
-file, or `key=value` overrides) alongside `batch_size`. None of them affect training math or
-reproducibility, so they're excluded from the config fingerprint checkpoints are validated
-against — changing any of them mid-run-series never invalidates a resume.
+file, or `key=value` overrides) alongside `batch_size`. Apart from `feature_preload_dtype` and
+`shuffle` (marked below), none of them affect training math or reproducibility, so they're
+excluded from the config fingerprint checkpoints are validated against — changing any of them
+mid-run-series never invalidates a resume.
 
 | Field | Default | Effect |
 |---|---|---|
@@ -100,6 +109,23 @@ against — changing any of them mid-run-series never invalidates a resume.
 | `feature_read_workers` | `32` | Thread-pool size `CachedFeatureProvider` uses for concurrent store reads per batch — independent of `num_workers`, since these are I/O-bound threads (file open + safetensors deserialization) reading already-computed features, not raw images. Raise this toward the machine's core count when disk/store read latency, not CPU, is the batch-loading bottleneck (the common case for a large `store_type: sharded` store). |
 | `store_type` | `"directory"` | `"directory"` (development scale, one file per sample) or `"sharded"` (production scale, many samples packed per shard file — see [feature-caching.md](feature-caching.md)). Must match whatever `feature_store_dir` was actually built as. |
 | `entries_per_shard` | `1000` | Samples packed per shard file; only consulted when `store_type: sharded`. |
+| `feature_preload` | `"none"` | `"none"` reads every batch from the store each epoch. `"host"` reads the train and validation features once, before training, into one RAM buffer and decodes every mask once; each batch is then a single gather into pinned memory plus an asynchronous copy to `device`. `"device"` keeps both buffers on `device` (CUDA only), so batches never cross PCIe. Requires `feature_provider: cached`. See [feature-caching.md](feature-caching.md#preloading-features-into-memory) for sizing. |
+| `feature_preload_dtype` | `null` | `float16`, `bfloat16`, or `float32`: the dtype preloaded tokens are stored in (`null` keeps the store's dtype). `float16` halves memory and copy traffic; tokens are cast back to `float32` on `device`. **Part of the config fingerprint** (it rounds the decoder's inputs). Requires `feature_preload`. |
+| `shuffle` | `false` | Reshuffle training samples every epoch, in an order derived from `seed` and the epoch index (so resuming reproduces it). **Part of the config fingerprint.** Requires `feature_preload`: shuffled reads straight from a sharded store reload a whole shard for nearly every sample. |
+
+Measured on one A100 with 113,584 training and 37,707 validation samples and a linear decoder,
+epoch times including validation were:
+
+| Setup | Epoch |
+|---|---|
+| Streaming from a sharded store (`feature_preload: none`) | about 1,110 s |
+| 57x38 grids preloaded to host RAM in `float16` (`feature_preload: host`) | about 42 s |
+| 16x16 grids preloaded to the GPU in `float16` (`feature_preload: device`) | about 7.5 s |
+
+Preloading costs a one-time setup before the first epoch: about 14 minutes for 252 GB of
+`float16` features, or 9 minutes for 30 GB, including dataset fingerprinting. The first epoch is
+also slower than the rest, because each sample's cache key is computed once and then reused. With a linear decoder, a batch size large enough to keep the GPU busy
+(256 or more) with `trainer.accumulation_steps: 1` also avoids launching many tiny steps.
 
 Every batch's feature fetch (a `FeatureProvider.get_features` call) also overlaps with the previous
 batch's model compute automatically, via `PrefetchingFeatureLoader` — see
