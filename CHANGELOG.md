@@ -65,6 +65,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- The README logo is linked by absolute `raw.githubusercontent.com` URL (as in AgriEval) instead of
+  the relative `assets/logo.svg`, so it renders on the PyPI project page, which cannot resolve
+  repository-relative paths.
 - `docs/datasets.md` explains that `agritune train` splits its own manifest into training and
   validation (`val_fraction`, per sample, ignoring any `split` column), so test samples belong in a
   separate manifest for `agritune evaluate`, with a worked example that holds out whole fields via

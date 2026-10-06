@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.svg" alt="Precision AI Agritune Logo" width="120"/>
+  <img src="https://raw.githubusercontent.com/Precision-AI-Inc/agritune/main/assets/logo.svg" alt="Precision AI Logo" width="160"/>
 </p>
 
 # Precision AI AgriTune
