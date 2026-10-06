@@ -3,7 +3,7 @@
 
 """Unit tests for precisionai.agritune.tracking.tensorboard.TensorBoardTracker.
 
-``tensorboard`` is an optional extra (``pai-agritune[tracking]``) — these tests are skipped
+``tensorboard`` is an optional extra (``precisionai-agritune[tracking]``) — these tests are skipped
 entirely when it isn't installed, rather than asserting real writer behavior against a stub.
 """
 

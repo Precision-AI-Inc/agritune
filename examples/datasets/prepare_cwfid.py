@@ -40,7 +40,7 @@ from tqdm import tqdm
 
 _SOURCE_ROOT = "https://raw.githubusercontent.com/cwfid/dataset/master"
 _N_SOURCE_IMAGES = 60
-_USER_AGENT = "pai-agritune-examples/0.0 (CWFID prep; research use)"
+_USER_AGENT = "precisionai-agritune-examples/0.0 (CWFID prep; research use)"
 _BACKGROUND = (0, 0, 0)
 _CROP = (0, 255, 0)
 _WEED = (255, 0, 0)

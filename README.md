@@ -17,14 +17,14 @@ Dataset → Augmentation → FeatureProvider → EncoderFeatures → Segmentatio
 Coding standards, naming conventions, and tooling configuration are governed by [CLAUDE.md](CLAUDE.md).
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE.md)
-[![PyPI](https://img.shields.io/pypi/v/pai-agritune.svg?include_prereleases)](https://pypi.org/project/pai-agritune/)
-[![Python](https://img.shields.io/pypi/pyversions/pai-agritune.svg?include_prereleases)](https://pypi.org/project/pai-agritune/)
+[![PyPI](https://img.shields.io/pypi/v/precisionai-agritune.svg?include_prereleases)](https://pypi.org/project/precisionai-agritune/)
+[![Python](https://img.shields.io/pypi/pyversions/precisionai-agritune.svg?include_prereleases)](https://pypi.org/project/precisionai-agritune/)
 
 ---
 
 ## Quick Start
 
-`pip install pai-agritune` gets you the library and the `agritune` CLI. The fastest way to see the
+`pip install precisionai-agritune` gets you the library and the `agritune` CLI. The fastest way to see the
 whole pipeline run end-to-end is the packaged [CWFID](https://github.com/cwfid/dataset) example —
 a small (24-image), real public crop/weed segmentation dataset with a ready-made manifest prep
 script and training config, so it needs the repository itself, not just the PyPI package:
@@ -103,14 +103,14 @@ See [CLAUDE.md](CLAUDE.md) for the full coding standard covering imports, docstr
 Requires Python 3.10+.
 
 ```bash
-pip install pai-agritune
+pip install precisionai-agritune
 ```
 
 That's all most users need. **On Linux**, this pulls in PyPI's default `torch` wheel, which bundles the full CUDA runtime (`nvidia-*`/`triton` packages, several GB) even on a machine with no GPU. If you don't need CUDA, install the CPU-only build first (Windows and macOS already get a CPU-only wheel by default, so this only matters on Linux):
 
 ```bash
 pip install torch --index-url https://download.pytorch.org/whl/cpu
-pip install pai-agritune
+pip install precisionai-agritune
 ```
 
 For local development (tests, linting, type checking, pre-commit):
@@ -135,7 +135,7 @@ pip install -e ".[tracking]"
 The CLI, the FastAPI layer, and direct Python usage all call the same `precisionai.agritune.services.*` functions — no logic is duplicated between entry points. To install and run the server:
 
 ```bash
-pip install "pai-agritune[api]"
+pip install "precisionai-agritune[api]"
 uvicorn precisionai.agritune.api.app:create_app --factory --reload --port 8000
 ```
 

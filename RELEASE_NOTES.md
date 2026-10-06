@@ -142,7 +142,7 @@ $ agritune features build --manifest examples/datasets/cwfid/manifest.csv --stor
 $ agritune train --config examples/segmentation/cwfid.yaml
 ```
 
-Running the FastAPI server now gets its own install step (`pip install "pai-agritune[api]"`, which
+Running the FastAPI server now gets its own install step (`pip install "precisionai-agritune[api]"`, which
 actually includes `uvicorn` now), and the stale internal "Status" section is gone. Two of the
 example docs (`SANITY_CHECK.md`, `FEATURE_TEST_COMMANDS.md`) also pointed evaluate/predict at a
 checkpoint path the packaged training config never actually produces — fixed to the real one.

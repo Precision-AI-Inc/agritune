@@ -74,6 +74,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Two `tests/unit/test_features.py` tests failed on Python 3.13 (and only there) with `Boolean value
+  of Tensor with more than one value is ambiguous`: they compared `EncoderFeatures` instances with
+  `==`, which the generated dataclass `__eq__` can only answer when both sides hold the same tensor
+  objects, and 3.13 now compares field by field. They compare the fields explicitly. No library
+  behavior changed.
 - Training under `augmentation.mode: none` with `geometric.resize` built the decoder at the
   dataset's *native* mask size, because the output-size probe skipped the resize that every
   training batch still receives. The decoder then upsampled to the native size (8.5x more pixels
@@ -138,7 +143,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sugar-beet dataset (1,407 train / 772 val real UAV field images, vs. CWFID's 60) and writes an
   AgriTune manifest, collapsing its 5-way partial-visibility labels into AgriTune's 3-class
   background/crop/weed convention.
-- Optional `.env` support (`pip install pai-agritune[dotenv]`): a `.env` file is loaded into the
+- Optional `.env` support (`pip install precisionai-agritune[dotenv]`): a `.env` file is loaded into the
   environment before Hydra composition, so `${oc.env:AGRITUNE_ENCODER_API_KEY,null}` in
   `encoder/remote.yaml` resolves from it. Exported shell variables still take precedence, and
   `AGRITUNE_ENV_FILE` selects a file outside the working directory.
@@ -235,6 +240,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The PyPI distribution is now named `precisionai-agritune` (it was `pai-agritune`, which was never
+  published), matching `precisionai-agrieval`. Install with `pip install precisionai-agritune`; the
+  import package (`precisionai.agritune`) and the `agritune` command are unchanged. `release.yml`,
+  the README (including its PyPI and Python-version badges), `SECURITY.md`, the bug-report
+  template, install hints in error messages and tracking configs, and the tests that assert them
+  now use the new name.
 - README: primary header is now "Precision AI AgriTune"; badges moved below the description; the
   stale "Status" section (internal build-phase notes) was removed; `Installation` no longer opens
   the document — a runnable `Quick Start` does, followed by `Project layout`, with a new
@@ -242,7 +253,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Quick Start` walks the packaged CWFID example end-to-end (dataset prep, validate, feature
   build, train, evaluate) instead of a synthetic placeholder manifest, with a `fake-encoder`
   fallback for anyone without hosted-encoder access yet.
-- `pyproject.toml`'s `api` extra now also installs `uvicorn`, so `pip install "pai-agritune[api]"`
+- `pyproject.toml`'s `api` extra now also installs `uvicorn`, so `pip install "precisionai-agritune[api]"`
   is sufficient to run the FastAPI server (previously required a separate manual `pip install
   uvicorn`).
 - The image augmentation pipeline (`augmentations.image`) now composes
@@ -286,7 +297,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   imported; since `tracking_selection.py` imports every tracker module up front, selecting any
   *other* backend (e.g. `mlflow`) silently created an uninvited offline Comet experiment whenever
   `comet_ml` happened to be installed alongside it — which it always is, since both ship in the
-  `pai-agritune[tracking]` extra.
+  `precisionai-agritune[tracking]` extra.
 - Derive a training run's decoder `output_size` from the actually-augmented probe sample instead
   of the raw pre-augmentation one, so `augmentation.geometric.resize`/`random_crop` (which change
   spatial size) no longer builds a decoder upsampling to the wrong resolution.
