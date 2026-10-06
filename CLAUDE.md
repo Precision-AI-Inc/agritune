@@ -234,7 +234,7 @@ except ImportError:
 
 # inside the class/function that needs it
 if not _WANDB_AVAILABLE:
-    raise ImportError("wandb is required: pip install pai-agritune[tracking]") from None
+    raise ImportError("wandb is required: pip install precisionai-agritune[tracking]") from None
 ```
 
 ### Docstrings

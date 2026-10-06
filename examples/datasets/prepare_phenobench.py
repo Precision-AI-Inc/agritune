@@ -60,7 +60,7 @@ _ZIP_MD5 = "5168bba762053725890478432cdbdb1d"
 _ZIP_SIZE_BYTES = 7_630_658_167
 _ARCHIVE_ROOT = "PhenoBench"
 _N_SOURCE_IMAGES = {"train": 1407, "val": 772}
-_USER_AGENT = "pai-agritune-examples/0.0 (PhenoBench prep; research use)"
+_USER_AGENT = "precisionai-agritune-examples/0.0 (PhenoBench prep; research use)"
 _LABEL_LUT = np.array([0, 1, 2, 1, 2], dtype=np.uint8)  # source id -> background/crop/weed
 
 

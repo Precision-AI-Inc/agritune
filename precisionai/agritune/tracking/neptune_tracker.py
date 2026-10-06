@@ -3,7 +3,7 @@
 
 """``NeptuneTracker`` — an optional neptune.ai tracking backend.
 
-Requires the ``neptune`` package (``pip install pai-agritune[tracking]``); never required to run
+Requires the ``neptune`` package (``pip install precisionai-agritune[tracking]``); never required to run
 AgriTune otherwise.
 """
 
@@ -39,7 +39,9 @@ class NeptuneTracker:
 
     def __init__(self, *, project: str, api_token: str | None = None, run_name: str | None = None) -> None:
         if not _NEPTUNE_AVAILABLE:
-            raise ImportError("neptune is required for NeptuneTracker: pip install pai-agritune[tracking]") from None
+            raise ImportError(
+                "neptune is required for NeptuneTracker: pip install precisionai-agritune[tracking]"
+            ) from None
         self._run = neptune.init_run(project=project, api_token=api_token, name=run_name)
 
     def log_metrics(self, metrics: dict[str, float], *, step: int) -> None:

@@ -524,13 +524,30 @@ def _trusted_kwargs(**overrides: Any) -> dict[str, Any]:
     return kwargs
 
 
+def _assert_same_features(actual: EncoderFeatures, expected: EncoderFeatures) -> None:
+    # The dataclass-generated __eq__ cannot compare tensor fields: before Python 3.13 it only passed
+    # when both sides held the very same tensor objects (tuple comparison short-circuits on identity),
+    # and 3.13 compares field by field and raises on the first multi-element tensor.
+    assert torch.equal(actual.patch_tokens, expected.patch_tokens)
+    assert actual.cls_tokens is not None
+    assert expected.cls_tokens is not None
+    assert torch.equal(actual.cls_tokens, expected.cls_tokens)
+    assert torch.equal(actual.patch_grid, expected.patch_grid)
+    assert actual.valid_patch_mask is None
+    assert expected.valid_patch_mask is None
+    assert actual.image_sizes == expected.image_sizes
+    assert actual.encoder_model == expected.encoder_model
+    assert actual.encoder_revision == expected.encoder_revision
+    assert actual.metadata == expected.metadata
+
+
 def test_trusted_builds_an_equivalent_instance_to_the_validating_constructor() -> None:
     kwargs = _trusted_kwargs()
 
     trusted = EncoderFeatures.trusted(**kwargs)
     checked = EncoderFeatures(**kwargs)
 
-    assert trusted == checked
+    _assert_same_features(trusted, checked)
     assert trusted.metadata == {}
 
 
@@ -556,7 +573,7 @@ def test_to_does_not_rerun_validation(monkeypatch: pytest.MonkeyPatch) -> None:
     moved = features.to("cpu")
 
     assert calls == []
-    assert moved == features
+    _assert_same_features(moved, features)
     assert moved.metadata == {"k": "v"}
 
 
