@@ -65,6 +65,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- The README logo and every repository-relative link (`CLAUDE.md`, `SECURITY.md`, `docs/...`,
+  `examples/...`, and so on) now use absolute GitHub URLs, as in AgriEval. The PyPI project page
+  cannot resolve repository-relative paths: the logo showed as a broken image and the links
+  opened `pypi.org/project/precisionai-agritune/<file>` instead of the repository.
 - `docs/datasets.md` explains that `agritune train` splits its own manifest into training and
   validation (`val_fraction`, per sample, ignoring any `split` column), so test samples belong in a
   separate manifest for `agritune evaluate`, with a worked example that holds out whole fields via

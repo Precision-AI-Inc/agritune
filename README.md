@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.svg" alt="Precision AI Agritune Logo" width="120"/>
+  <img src="https://raw.githubusercontent.com/Precision-AI-Inc/agritune/main/assets/logo.svg" alt="Precision AI Logo" width="160"/>
 </p>
 
 # Precision AI AgriTune
@@ -14,9 +14,9 @@ AgriTune never trains or fine-tunes the encoder itself — it consumes features 
 Dataset → Augmentation → FeatureProvider → EncoderFeatures → SegmentationTask → Decoder → Loss/Metrics → Trainer
 ```
 
-Coding standards, naming conventions, and tooling configuration are governed by [CLAUDE.md](CLAUDE.md).
+Coding standards, naming conventions, and tooling configuration are governed by [CLAUDE.md](https://github.com/Precision-AI-Inc/agritune/blob/main/CLAUDE.md).
 
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE.md)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/Precision-AI-Inc/agritune/blob/main/LICENSE.md)
 [![PyPI](https://img.shields.io/pypi/v/precisionai-agritune.svg?include_prereleases)](https://pypi.org/project/precisionai-agritune/)
 [![Python](https://img.shields.io/pypi/pyversions/precisionai-agritune.svg?include_prereleases)](https://pypi.org/project/precisionai-agritune/)
 
@@ -52,20 +52,20 @@ agritune evaluate --manifest examples/datasets/cwfid/manifest.csv --store exampl
 The quick start evaluates on its own training manifest only to show the commands end to end.
 `agritune train` splits `manifest_path` into training and validation itself (`val_fraction`), so
 real test scores need a separate test manifest that the training manifest does not list — see
-[docs/datasets.md](docs/datasets.md#train-validation-and-test-manifests). For faster training once
-features are built, see `feature_preload` in [docs/configuration.md](docs/configuration.md#performance-tuning).
+[docs/datasets.md](https://github.com/Precision-AI-Inc/agritune/blob/main/docs/datasets.md#train-validation-and-test-manifests). For faster training once
+features are built, see `feature_preload` in [docs/configuration.md](https://github.com/Precision-AI-Inc/agritune/blob/main/docs/configuration.md#performance-tuning).
 
 No encoder access yet? Swap the `features build` command for `--model fake-encoder` (and drop
 `--base-url`) to dry-run the same pipeline against synthetic features — every unit test and CI run
 does exactly that via `FakeEncoderBackend`, no network or API key required.
 
-See [examples/README.md](examples/README.md) for task-oriented tutorials (training with
+See [examples/README.md](https://github.com/Precision-AI-Inc/agritune/blob/main/examples/README.md) for task-oriented tutorials (training with
 `none`/`offline`/`online` augmentation, evaluation, prediction, and resize-only normalization vs.
-the full augmentation pipeline), [examples/SANITY_CHECK.md](examples/SANITY_CHECK.md) for the full
+the full augmentation pipeline), [examples/SANITY_CHECK.md](https://github.com/Precision-AI-Inc/agritune/blob/main/examples/SANITY_CHECK.md) for the full
 walkthrough (encoder benchmarking, decoder swaps, resuming, predicting with overlays, and what a
-run directory contains), [examples/FEATURE_TEST_COMMANDS.md](examples/FEATURE_TEST_COMMANDS.md) to
+run directory contains), [examples/FEATURE_TEST_COMMANDS.md](https://github.com/Precision-AI-Inc/agritune/blob/main/examples/FEATURE_TEST_COMMANDS.md) to
 exercise every decoder/provider/augmentation combination, [CLI](#cli) below for the full command
-list, and [docs/](docs/) for architecture, configuration, and dataset format guides.
+list, and [docs/](https://github.com/Precision-AI-Inc/agritune/tree/main/docs) for architecture, configuration, and dataset format guides.
 
 ---
 
@@ -94,7 +94,7 @@ tests/            # unit/, integration/, distributed/, fixtures/
 examples/         # runnable config examples (segmentation/*.yaml) and dataset samples
 ```
 
-See [CLAUDE.md](CLAUDE.md) for the full coding standard covering imports, docstrings, type hints, testing, and what to avoid.
+See [CLAUDE.md](https://github.com/Precision-AI-Inc/agritune/blob/main/CLAUDE.md) for the full coding standard covering imports, docstrings, type hints, testing, and what to avoid.
 
 ---
 
@@ -139,7 +139,7 @@ pip install "precisionai-agritune[api]"
 uvicorn precisionai.agritune.api.app:create_app --factory --reload --port 8000
 ```
 
-Then open `http://127.0.0.1:8000/docs` for interactive API docs. Every request-supplied path (`manifest_path`, `store`, `checkpoint_path`, `output_dir`, `config_path`, ...) is resolved and restricted to `AGRITUNE_API_ROOT` (defaults to the current working directory) — see [docs/architecture.md](docs/architecture.md).
+Then open `http://127.0.0.1:8000/docs` for interactive API docs. Every request-supplied path (`manifest_path`, `store`, `checkpoint_path`, `output_dir`, `config_path`, ...) is resolved and restricted to `AGRITUNE_API_ROOT` (defaults to the current working directory) — see [docs/architecture.md](https://github.com/Precision-AI-Inc/agritune/blob/main/docs/architecture.md).
 
 ---
 
@@ -174,7 +174,7 @@ The CLI, the FastAPI layer (`precisionai.agritune.api.create_app()`, one route p
 
 ## Encoder
 
-AgriTune's remote encoder backend integrates with an OpenAI-SDK-compatible embeddings API (see `precisionai.agritune.encoder`): the CLS token is returned as the embedding vector, and patch tokens are returned via the `patch_embeddings` (channels-first `[D, H, W]`, base64 float32) and `patch_shape` fields of the response — enabled per-request with `extra_body={"return_patch_tokens": True}`. The API does not expose a queryable encoder revision, so AgriTune fingerprints the encoder from the configured model alias plus the dimensions actually observed at runtime — see [docs/encoder.md](docs/encoder.md).
+AgriTune's remote encoder backend integrates with an OpenAI-SDK-compatible embeddings API (see `precisionai.agritune.encoder`): the CLS token is returned as the embedding vector, and patch tokens are returned via the `patch_embeddings` (channels-first `[D, H, W]`, base64 float32) and `patch_shape` fields of the response — enabled per-request with `extra_body={"return_patch_tokens": True}`. The API does not expose a queryable encoder revision, so AgriTune fingerprints the encoder from the configured model alias plus the dimensions actually observed at runtime — see [docs/encoder.md](https://github.com/Precision-AI-Inc/agritune/blob/main/docs/encoder.md).
 
 Nothing in the training path depends on this specific API being reachable: CI, and any offline development, run entirely against `FakeEncoderBackend`.
 
@@ -231,16 +231,16 @@ Push a tag matching `v*.*.*` (e.g. `v0.1.0`) to trigger `.github/workflows/relea
 
 ## Security
 
-To report a security vulnerability, see [SECURITY.md](SECURITY.md). Do not open a public issue, and never include encoder API keys in a report, log, or attached reproduction.
+To report a security vulnerability, see [SECURITY.md](https://github.com/Precision-AI-Inc/agritune/blob/main/SECURITY.md). Do not open a public issue, and never include encoder API keys in a report, log, or attached reproduction.
 
 ---
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, branching, and PR guidelines, and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for community expectations. [CLAUDE.md](CLAUDE.md) documents the code style and conventions enforced in this repo.
+See [CONTRIBUTING.md](https://github.com/Precision-AI-Inc/agritune/blob/main/CONTRIBUTING.md) for setup, branching, and PR guidelines, and [CODE_OF_CONDUCT.md](https://github.com/Precision-AI-Inc/agritune/blob/main/CODE_OF_CONDUCT.md) for community expectations. [CLAUDE.md](https://github.com/Precision-AI-Inc/agritune/blob/main/CLAUDE.md) documents the code style and conventions enforced in this repo.
 
 ---
 
 ## License
 
-[Apache 2.0](LICENSE.md) © Precision AI
+[Apache 2.0](https://github.com/Precision-AI-Inc/agritune/blob/main/LICENSE.md) © Precision AI
