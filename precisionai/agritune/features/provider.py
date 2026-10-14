@@ -14,8 +14,10 @@ feature access goes through a ``FeatureProvider`` like these.
 """
 
 import asyncio
-from collections.abc import Callable, Sequence
+import threading
+from collections.abc import Callable, Coroutine, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from typing import Any
 
 from precisionai.agritune.encoder.gateway import EncoderGateway
 from precisionai.agritune.features.errors import FeatureNotCachedError
@@ -122,14 +124,32 @@ class CachedFeatureProvider:
         )
 
 
+class _GatewayLoop:
+    """Runs a gateway's coroutines on one long-lived event loop, from synchronous code.
+
+    The gateway's HTTP client and rate limiter bind to the loop they are first used on. Calling
+    ``asyncio.run`` per batch would give every batch a new loop and leave the client attached to a
+    closed one, so the second batch fails with "Event loop is closed". The loop runs on a daemon
+    thread for the lifetime of the provider, and is safe to call from several threads.
+    """
+
+    def __init__(self) -> None:
+        self._loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(target=self._loop.run_forever, name="agritune-gateway-loop", daemon=True)
+        self._thread.start()
+
+    def run(self, coroutine: Coroutine[Any, Any, Any]) -> Any:
+        """Run ``coroutine`` on the loop and return its result, re-raising its exception."""
+        return asyncio.run_coroutine_threadsafe(coroutine, self._loop).result()
+
+
 class OnlineFeatureProvider:
     """Encodes every batch fresh through an :class:`EncoderGateway` — no disk cache at all.
 
     Used when ``augmentation.mode: online`` and ``features.provider: online``: samples are
     augmented differently every epoch, so a disk cache would never hit anyway. Bridges the
     gateway's ``async`` ``encode()`` to the synchronous ``FeatureProvider`` interface the trainer
-    expects via ``asyncio.run``, the same pattern used to drive gateway calls from the CLI's
-    synchronous command handlers (``agritune features build``, ``agritune encoder benchmark``).
+    expects through a persistent event loop shared by every call.
 
     Parameters
     ----------
@@ -139,6 +159,7 @@ class OnlineFeatureProvider:
 
     def __init__(self, gateway: EncoderGateway) -> None:
         self._gateway = gateway
+        self._loop = _GatewayLoop()
 
     def get_features(self, samples: Sequence[PreparedSample]) -> EncoderFeatures:
         """Encode every sample in ``samples`` through the gateway, in order.
@@ -160,7 +181,7 @@ class OnlineFeatureProvider:
         """
         if not samples:
             raise ValueError("samples must be non-empty")
-        return asyncio.run(self._gateway.encode([sample.image for sample in samples]))
+        return self._loop.run(self._gateway.encode([sample.image for sample in samples]))
 
 
 class HybridFeatureProvider:
@@ -194,6 +215,7 @@ class HybridFeatureProvider:
     ) -> None:
         self._store = store
         self._gateway = gateway
+        self._loop = _GatewayLoop()
         self._cached = CachedFeatureProvider(
             store, encoder_fingerprint=encoder_fingerprint, image_hash_fn=image_hash_fn
         )
@@ -233,7 +255,7 @@ class HybridFeatureProvider:
 
         if misses:
             miss_samples = [sample for _, sample in misses]
-            encoded = asyncio.run(self._gateway.encode([sample.image for sample in miss_samples]))
+            encoded = self._loop.run(self._gateway.encode([sample.image for sample in miss_samples]))
             for position, (index, sample) in enumerate(misses):
                 one = select_one(encoded, position)
                 self._store.write(self._cached.key_for(sample), one)

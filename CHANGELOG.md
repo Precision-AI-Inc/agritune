@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `OnlineFeatureProvider` and `HybridFeatureProvider` drive the encoder gateway on one persistent event
+  loop instead of a new `asyncio.run` per batch. With a hosted encoder the second batch failed with
+  "Event loop is closed" because the HTTP client stayed bound to the first, closed loop.
+
 ### Performance
 
 - `feature_preload: host | device` (new `TrainingRunConfig` field, default `none`): reads the
