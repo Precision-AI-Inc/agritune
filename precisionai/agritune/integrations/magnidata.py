@@ -5,6 +5,7 @@
 
 import csv
 import tempfile
+import time
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,10 +18,12 @@ from torch.nn import functional
 
 try:
     import mlflow
+    from mlflow.entities import Metric
 
     _MLFLOW_AVAILABLE = True
 except ImportError:
     mlflow: Any = None
+    Metric: Any = None
     _MLFLOW_AVAILABLE = False
 
 from precisionai.agritune.data.dataset import ManifestDataset
@@ -38,6 +41,8 @@ _ARTIFACT_ROOT = "magnidata"
 _CANCEL_TAG = "magnidata.cancel_requested"
 _ERROR_TAG = "magnidata.error"
 _DEFAULT_PALETTE = ((0, 0, 0), (67, 160, 71), (255, 193, 7), (211, 47, 47))
+# Keys the trainer reports on every optimizer step; they are averaged into one value per epoch.
+_PER_STEP_KEYS = ("train_loss", "lr")
 ScoreRow = dict[str, str | float]
 
 
@@ -68,11 +73,19 @@ class MagniDataOptions:
 
 
 class MagniDataTracker:
-    """Log AgriTune metrics into an existing MagniData MLflow run."""
+    """Log AgriTune metrics into an existing MagniData MLflow run, one point per epoch.
+
+    The trainer reports the loss and learning rate on every optimizer step and the epoch metrics keyed by the global
+    step. Writing those straight to MLflow would store thousands of points per run and put them on a different axis
+    from the epoch-based losses MagniData expects, so values are held in memory and :meth:`flush_epoch` writes a
+    single batched request per epoch, with the epoch number as the step.
+    """
 
     def __init__(self, client: Any, run_id: str) -> None:
         self.client = client
         self.run_id = run_id
+        self._step_values: dict[str, list[float]] = {}
+        self._epoch_values: dict[str, float] = {}
 
     @staticmethod
     def _key(key: str) -> str:
@@ -94,9 +107,28 @@ class MagniDataTracker:
         return key
 
     def log_metrics(self, metrics: dict[str, float], *, step: int) -> None:
-        """Log translated scalar metrics at ``step``."""
+        """Hold ``metrics`` until :meth:`flush_epoch`; ``step`` (the global optimizer step) is deliberately not used."""
+        del step
         for key, value in metrics.items():
-            self.client.log_metric(self.run_id, self._key(key), float(value), step=step)
+            if key in _PER_STEP_KEYS:
+                self._step_values.setdefault(key, []).append(float(value))
+            else:
+                self._epoch_values[key] = float(value)
+
+    def flush_epoch(self, epoch: int) -> None:
+        """Log the held metrics as one point per key at ``epoch``: the mean per-step loss and the last learning rate."""
+        values = dict(self._epoch_values)
+        for key, series in self._step_values.items():
+            values[key] = series[-1] if key == "lr" else sum(series) / len(series)
+        self._step_values.clear()
+        self._epoch_values.clear()
+        if not values:
+            return
+        timestamp = int(time.time() * 1000)
+        self.client.log_batch(
+            self.run_id,
+            metrics=[Metric(self._key(key), value, timestamp, epoch) for key, value in values.items()],
+        )
 
     def log_params(self, params: dict[str, Any]) -> None:
         """Log parameters which are not already present on the queued run."""
@@ -142,8 +174,11 @@ def _confidence(logits: torch.Tensor, targets: torch.Tensor, ignore_index: int) 
 
 
 class _EpochPublisher:
-    def __init__(self, client: Any, run_id: str, runtime: TrainingRuntime, options: MagniDataOptions) -> None:
+    def __init__(
+        self, client: Any, tracker: MagniDataTracker, run_id: str, runtime: TrainingRuntime, options: MagniDataOptions
+    ) -> None:
         self.client = client
+        self.tracker = tracker
         self.run_id = run_id
         self.runtime = runtime
         self.options = options
@@ -168,6 +203,7 @@ class _EpochPublisher:
     def __call__(self, epoch: int, train_metrics: dict[str, float], val_metrics: dict[str, float]) -> bool:
         """Publish one completed epoch and return whether cancellation was requested."""
         del train_metrics, val_metrics
+        self.tracker.flush_epoch(epoch)
         self._tag("magnidata.progress_stage", f"AgriTune epoch {epoch}/{self.runtime.config.trainer.max_epochs}")
         self._tag("magnidata.progress_current", epoch)
         self._tag("magnidata.progress_total", self.runtime.config.trainer.max_epochs)
@@ -243,15 +279,18 @@ class _EpochPublisher:
             )
 
     def _log_loss_metrics(self, epoch: int, rows: list[ScoreRow]) -> None:
-        terms = [key.removeprefix("loss_") for key in rows[0] if key.startswith("loss_")] if rows else []
+        # The weighted totals are logged by the tracker (training mean and validation loss); only the components are added here.
+        terms = (
+            [key.removeprefix("loss_") for key in rows[0] if key.startswith("loss_") and key != "loss_total"]
+            if rows
+            else []
+        )
         for split in ("train", "val"):
             selected = [row for row in rows if row["split"] == split]
             for term in terms:
                 if selected:
                     value = sum(float(row[f"loss_{term}"]) for row in selected) / len(selected)
-                    self.client.log_metric(
-                        self.run_id, f"{split}_loss/{'loss' if term == 'total' else term}", value, step=epoch
-                    )
+                    self.client.log_metric(self.run_id, f"{split}_loss/{term}", value, step=epoch)
 
     def _upload_checkpoint(self) -> None:
         last = self.runtime.run_directory.checkpoints_dir / "last.ckpt"
@@ -285,11 +324,12 @@ def run_magnidata_training(
     client.update_run(run_id, status="RUNNING")
     client.set_tag(run_id, "magnidata.engine", "agritune")
     client.set_tag(run_id, "magnidata.device", "cpu (AgriTune decoder)")
+    tracker = MagniDataTracker(client, run_id)
     publisher: _EpochPublisher | None = None
 
     def factory(runtime: TrainingRuntime) -> _EpochPublisher:
         nonlocal publisher
-        publisher = _EpochPublisher(client, run_id, runtime, options or MagniDataOptions())
+        publisher = _EpochPublisher(client, tracker, run_id, runtime, options or MagniDataOptions())
         return publisher
 
     try:
@@ -297,7 +337,7 @@ def run_magnidata_training(
             config,
             store=store,
             show_progress=show_progress,
-            tracker_override=MagniDataTracker(client, run_id),
+            tracker_override=tracker,
             epoch_callback_factory=factory,
         )
         cancelled = client.get_run(run_id).data.tags.get(_CANCEL_TAG) == "true"
