@@ -13,6 +13,7 @@ evaluate.
 
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from enum import Enum
 from pathlib import Path
@@ -38,7 +39,7 @@ from precisionai.agritune.features.store import DirectoryFeatureStore, ShardedFe
 from precisionai.agritune.logging import RunDirectory, get_logger
 from precisionai.agritune.optimization.optimizers import OptimizerConfig, build_optimizer
 from precisionai.agritune.optimization.schedulers import SchedulerConfig, build_scheduler
-from precisionai.agritune.schemas.protocols import FeatureProvider
+from precisionai.agritune.schemas.protocols import FeatureProvider, Tracker
 from precisionai.agritune.schemas.samples import PreparedSample
 from precisionai.agritune.services.encoder_selection import build_encoder
 from precisionai.agritune.services.segmentation_common import (
@@ -293,6 +294,30 @@ class TrainingRunResult:
     val_metrics: dict[str, float]
 
 
+@dataclass
+class TrainingRuntime:
+    """Expose a completed training setup to an optional product integration.
+
+    Attributes
+    ----------
+    config : TrainingRunConfig
+    task : SegmentationTask
+    feature_provider : FeatureProvider
+    split : SplitAssignment
+    run_directory : RunDirectory
+    """
+
+    config: TrainingRunConfig
+    task: SegmentationTask
+    feature_provider: FeatureProvider
+    split: SplitAssignment
+    run_directory: RunDirectory
+
+
+EpochCallback = Callable[[int, dict[str, float], dict[str, float]], bool]
+EpochCallbackFactory = Callable[[TrainingRuntime], EpochCallback]
+
+
 def _validate_config(config: TrainingRunConfig) -> None:
     if config.num_classes < 1:
         raise ValueError(f"num_classes must be positive; got {config.num_classes}")
@@ -374,7 +399,12 @@ def _build_train_batches(config: TrainingRunConfig, train_dataset: ManifestDatas
 
 
 def run_training(
-    config: TrainingRunConfig, *, store: DirectoryFeatureStore | ShardedFeatureStore, show_progress: bool = False
+    config: TrainingRunConfig,
+    *,
+    store: DirectoryFeatureStore | ShardedFeatureStore,
+    show_progress: bool = False,
+    tracker_override: Tracker | None = None,
+    epoch_callback_factory: EpochCallbackFactory | None = None,
 ) -> TrainingRunResult:
     """Run one full training job: split -> features -> (optional augmentation) -> task -> trainer.
 
@@ -388,6 +418,11 @@ def run_training(
     show_progress : bool, optional
         Render ``tqdm`` bars over training/validation batches — see :class:`Trainer`. Defaults to
         ``False`` so headless callers (e.g. the API) see no terminal output.
+    tracker_override : Tracker | None, optional
+        Product-supplied tracker. When omitted, build the backends selected by ``config.tracking``.
+    epoch_callback_factory : EpochCallbackFactory | None, optional
+        Build a callback after the task, provider and split exist. This keeps product adapters out
+        of the core trainer while allowing per-epoch scoring and cancellation.
 
     Returns
     -------
@@ -471,7 +506,20 @@ def run_training(
 
     run_dir = RunDirectory(config.run_root, config.run_id)
     checkpoint_manager = CheckpointManager(run_dir.checkpoints_dir, top_k=config.checkpoint_top_k)
-    tracker = build_trackers(config.tracking, run_dir=run_dir, run_id=config.run_id)
+    tracker = tracker_override or build_trackers(config.tracking, run_dir=run_dir, run_id=config.run_id)
+    epoch_callback = (
+        epoch_callback_factory(
+            TrainingRuntime(
+                config=config,
+                task=task,
+                feature_provider=provider,
+                split=split,
+                run_directory=run_dir,
+            )
+        )
+        if epoch_callback_factory is not None
+        else None
+    )
 
     trainer_config = replace(
         config.trainer,
@@ -488,13 +536,14 @@ def run_training(
         tracker=tracker,
         feature_augmentation=FeatureAugmentationPipeline(config.feature_augmentation),
         show_progress=show_progress,
+        epoch_callback=epoch_callback,
     )
 
     if isinstance(train_batches, OnlineAugmentedBatches):
         train_batches.set_epoch(trainer.state.epoch)
 
-    train_metric = SegmentationMetric(num_classes=config.num_classes)
-    val_metric = SegmentationMetric(num_classes=config.num_classes)
+    train_metric = SegmentationMetric(num_classes=config.num_classes, ignore_index=config.loss.ignore_index)
+    val_metric = SegmentationMetric(num_classes=config.num_classes, ignore_index=config.loss.ignore_index)
     try:
         trainer.fit(
             train_batches,

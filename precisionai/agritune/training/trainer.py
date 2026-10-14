@@ -21,7 +21,7 @@ one-shot generator) — the trainer iterates it once per epoch, calling ``iter()
 each time via a plain ``for`` loop.
 """
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 
 import torch
@@ -129,6 +129,9 @@ class Trainer:
         Render a ``tqdm`` bar over each epoch's training batches (and the validation pass); always
         suppressed on non-main processes. Defaults to ``False`` so headless callers (e.g. the API)
         see no terminal output.
+    epoch_callback : Callable[[int, dict[str, float], dict[str, float]], bool] | None, optional
+        Called after each completed epoch with the one-based epoch and latest train/validation
+        metrics. Return ``True`` to stop before the next epoch.
 
     Attributes
     ----------
@@ -155,6 +158,7 @@ class Trainer:
         distributed: DistributedContext | None = None,
         feature_augmentation: FeatureAugmentation | None = None,
         show_progress: bool = False,
+        epoch_callback: Callable[[int, dict[str, float], dict[str, float]], bool] | None = None,
     ) -> None:
         self.task = task
         self.decoder = decoder
@@ -167,6 +171,7 @@ class Trainer:
         self.distributed = distributed or DistributedContext()
         self.feature_augmentation = feature_augmentation
         self.show_progress = show_progress
+        self.epoch_callback = epoch_callback
         self.precision = PrecisionContext(config.precision, device_type=self._device_type())
         self.state = TrainingState()
         self.last_train_metrics: dict[str, float] | None = None
@@ -235,6 +240,14 @@ class Trainer:
             self.state.epoch = epoch + 1
             self.state.batch_in_epoch = 0
             self._checkpoint(periodic=False, is_best=False, metric_value=None)
+
+            if self.epoch_callback is not None and self.epoch_callback(
+                self.state.epoch,
+                self.last_train_metrics or {},
+                self.last_val_metrics or {},
+            ):
+                logger.info("training stopped by epoch callback after epoch %d", self.state.epoch)
+                break
 
             if self._should_stop_early():
                 logger.info("early stopping after epoch %d", epoch)

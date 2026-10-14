@@ -22,6 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A native MagniData integration which attaches AgriTune to a queued MLflow run, translates
+  training metrics, publishes split and per-image component-loss artifacts, saves hard-sample
+  predictions and checkpoints, reports progress, and honours cancellation between epochs.
+- Optional tracker injection and epoch callbacks in the training service, plus reusable
+  per-sample segmentation loss computation for product integrations.
 - Info/debug/warning logging across previously-silent modules (services, encoder, evaluator),
   plus `tqdm` progress bars over every long-running loop (training/validation batches,
   evaluation, prediction, feature precompute, encoder benchmarking, and the CWFID/PhenoBench prep

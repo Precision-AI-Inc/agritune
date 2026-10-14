@@ -1,0 +1,320 @@
+# Copyright 2026 Precision AI
+# SPDX-License-Identifier: Apache-2.0
+
+"""Run AgriTune inside MagniData's MLflow queue and artifact contract."""
+
+import csv
+import tempfile
+import traceback
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import torch
+from PIL import Image
+from torch.nn import functional
+
+try:
+    import mlflow
+
+    _MLFLOW_AVAILABLE = True
+except ImportError:
+    mlflow: Any = None
+    _MLFLOW_AVAILABLE = False
+
+from precisionai.agritune.data.dataset import ManifestDataset
+from precisionai.agritune.features.store import DirectoryFeatureStore, ShardedFeatureStore
+from precisionai.agritune.services.segmentation_common import build_training_batches
+from precisionai.agritune.services.training_service import (
+    TrainingRunConfig,
+    TrainingRunResult,
+    TrainingRuntime,
+    run_training,
+)
+from precisionai.agritune.tasks.segmentation.losses import segmentation_losses_per_sample
+
+_ARTIFACT_ROOT = "magnidata"
+_CANCEL_TAG = "magnidata.cancel_requested"
+_ERROR_TAG = "magnidata.error"
+_DEFAULT_PALETTE = ((0, 0, 0), (67, 160, 71), (255, 193, 7), (211, 47, 47))
+ScoreRow = dict[str, str | float]
+
+
+@dataclass(frozen=True)
+class MagniDataOptions:
+    """Configure per-epoch output produced for MagniData.
+
+    Attributes
+    ----------
+    score_every : int
+        Score all samples every N epochs; epoch one and the last epoch are always scored.
+    top_k_predictions : int
+        Persist this many highest-loss prediction masks per scored epoch.
+    palette : tuple[tuple[int, int, int], ...]
+        Class-index to RGB mapping used for prediction PNGs.
+    """
+
+    score_every: int = 1
+    top_k_predictions: int = 50
+    palette: tuple[tuple[int, int, int], ...] = _DEFAULT_PALETTE
+
+    def __post_init__(self) -> None:
+        """Validate scoring intervals and prediction counts."""
+        if self.score_every < 1:
+            raise ValueError("score_every must be positive")
+        if self.top_k_predictions < 0:
+            raise ValueError("top_k_predictions must be non-negative")
+
+
+class MagniDataTracker:
+    """Log AgriTune metrics into an existing MagniData MLflow run."""
+
+    def __init__(self, client: Any, run_id: str) -> None:
+        self.client = client
+        self.run_id = run_id
+
+    @staticmethod
+    def _key(key: str) -> str:
+        mappings = {
+            "train_loss": "train_loss/loss",
+            "lr": "Learning_rate/lr",
+            "train_mean_iou": "train_metric/miou",
+            "val_loss": "val_loss/loss",
+            "val_mean_iou": "val_metric/miou",
+        }
+        if key in mappings:
+            return mappings[key]
+        if key.startswith("val_iou_class_"):
+            return "val_metric/iou_" + key.removeprefix("val_iou_class_")
+        if key.startswith("val_"):
+            return "val_metric/" + key.removeprefix("val_")
+        if key.startswith("train_"):
+            return "train_metric/" + key.removeprefix("train_")
+        return key
+
+    def log_metrics(self, metrics: dict[str, float], *, step: int) -> None:
+        """Log translated scalar metrics at ``step``."""
+        for key, value in metrics.items():
+            self.client.log_metric(self.run_id, self._key(key), float(value), step=step)
+
+    def log_params(self, params: dict[str, Any]) -> None:
+        """Log parameters which are not already present on the queued run."""
+        existing = self.client.get_run(self.run_id).data.params
+        for key, value in params.items():
+            if key not in existing:
+                self.client.log_param(self.run_id, key, value)
+
+    def log_artifact(self, path: str) -> None:
+        """Upload a file at the artifact root."""
+        self.client.log_artifact(self.run_id, path)
+
+    def close(self) -> None:
+        """Leave terminal status ownership to :func:`run_magnidata_training`."""
+
+
+def _split_map(runtime: TrainingRuntime) -> dict[str, str]:
+    return {
+        **dict.fromkeys(runtime.split.train, "train"),
+        **dict.fromkeys(runtime.split.val, "val"),
+        **dict.fromkeys(runtime.split.test, "test"),
+    }
+
+
+def _per_sample_iou(logits: torch.Tensor, targets: torch.Tensor, ignore_index: int) -> torch.Tensor:
+    if logits.shape[-2:] != targets.shape[-2:]:
+        logits = functional.interpolate(logits, size=targets.shape[-2:], mode="bilinear", align_corners=False)
+    predictions = logits.argmax(1)
+    result = []
+    for prediction, target in zip(predictions, targets, strict=True):
+        valid = target != ignore_index
+        intersection = ((prediction == target) & valid).sum()
+        result.append(intersection.float() / valid.sum().clamp(min=1))
+    return torch.stack(result)
+
+
+def _confidence(logits: torch.Tensor, targets: torch.Tensor, ignore_index: int) -> torch.Tensor:
+    if logits.shape[-2:] != targets.shape[-2:]:
+        logits = functional.interpolate(logits, size=targets.shape[-2:], mode="bilinear", align_corners=False)
+    values = logits.softmax(1).amax(1)
+    valid = targets != ignore_index
+    return (values * valid).sum((1, 2)) / valid.sum((1, 2)).clamp(min=1)
+
+
+class _EpochPublisher:
+    def __init__(self, client: Any, run_id: str, runtime: TrainingRuntime, options: MagniDataOptions) -> None:
+        self.client = client
+        self.run_id = run_id
+        self.runtime = runtime
+        self.options = options
+        self.splits = _split_map(runtime)
+        self.scored_epochs: list[int] = []
+        self.scratch = tempfile.TemporaryDirectory(prefix="agritune-magnidata-")
+        self.root = Path(self.scratch.name)
+        self._publish_split()
+
+    def _tag(self, key: str, value: object) -> None:
+        self.client.set_tag(self.run_id, key, str(value))
+
+    def _publish_split(self) -> None:
+        path = self.root / "split.csv"
+        with path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(["image_name", "split"])
+            writer.writerows(self.splits.items())
+        self.client.log_artifact(self.run_id, str(path), artifact_path=_ARTIFACT_ROOT)
+        self._tag("magnidata.has_split", "true")
+
+    def __call__(self, epoch: int, train_metrics: dict[str, float], val_metrics: dict[str, float]) -> bool:
+        """Publish one completed epoch and return whether cancellation was requested."""
+        del train_metrics, val_metrics
+        self._tag("magnidata.progress_stage", f"AgriTune epoch {epoch}/{self.runtime.config.trainer.max_epochs}")
+        self._tag("magnidata.progress_current", epoch)
+        self._tag("magnidata.progress_total", self.runtime.config.trainer.max_epochs)
+        cancelled = self.client.get_run(self.run_id).data.tags.get(_CANCEL_TAG) == "true"
+        final_epoch = epoch == self.runtime.config.trainer.max_epochs
+        if not cancelled and (epoch == 1 or final_epoch or epoch % self.options.score_every == 0):
+            self._score(epoch)
+        self._upload_checkpoint()
+        return cancelled
+
+    def _score(self, epoch: int) -> None:
+        self._tag("magnidata.progress_stage", f"AgriTune epoch {epoch} scoring")
+        dataset = ManifestDataset(self.runtime.config.manifest_path)
+        batches = build_training_batches(dataset, batch_size=self.runtime.config.batch_size)
+        rows: list[ScoreRow] = []
+        predictions: list[tuple[float, str, np.ndarray]] = []
+        self.runtime.task.decoder.eval()
+        with torch.no_grad():
+            for batch in batches:
+                features = self.runtime.feature_provider.get_features(batch.samples)
+                logits = self.runtime.task.forward(features)
+                losses = segmentation_losses_per_sample(
+                    logits,
+                    batch.targets,
+                    self.runtime.config.loss,
+                    num_classes=self.runtime.config.num_classes,
+                )
+                ious = _per_sample_iou(logits, batch.targets, self.runtime.config.loss.ignore_index)
+                confidences = _confidence(logits, batch.targets, self.runtime.config.loss.ignore_index)
+                resized = logits
+                if logits.shape[-2:] != batch.targets.shape[-2:]:
+                    resized = functional.interpolate(
+                        logits, size=batch.targets.shape[-2:], mode="bilinear", align_corners=False
+                    )
+                masks = resized.argmax(1).cpu().numpy()
+                for index, sample in enumerate(batch.samples):
+                    row: ScoreRow = {
+                        "image_name": sample.sample_id,
+                        "split": self.splits.get(sample.sample_id, "test"),
+                        "loss_total": float(losses["total"][index]),
+                        "iou": float(ious[index]),
+                        "confidence": float(confidences[index]),
+                    }
+                    for term, values in losses.items():
+                        if term != "total":
+                            row[f"loss_{term}"] = float(values[index])
+                    rows.append(row)
+                    predictions.append((float(losses["total"][index]), sample.sample_id, masks[index]))
+        self._write_losses(epoch, rows)
+        self._write_predictions(epoch, predictions)
+        self._log_loss_metrics(epoch, rows)
+        self.scored_epochs.append(epoch)
+        self._tag("magnidata.scored_epochs", ",".join(str(item) for item in self.scored_epochs))
+        self._tag("magnidata.per_sample_schema", "magnidata-training/1.0.0")
+
+    def _write_losses(self, epoch: int, rows: list[ScoreRow]) -> None:
+        path = self.root / f"epoch_{epoch:04d}.csv"
+        fieldnames = list(rows[0]) if rows else ["image_name", "split", "loss_total"]
+        with path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+        self.client.log_artifact(self.run_id, str(path), artifact_path=f"{_ARTIFACT_ROOT}/per_sample")
+
+    def _write_predictions(self, epoch: int, predictions: list[tuple[float, str, np.ndarray]]) -> None:
+        palette = np.asarray(self.options.palette, dtype=np.uint8)
+        for _, sample_id, mask in sorted(predictions, reverse=True)[: self.options.top_k_predictions]:
+            rgb = palette[np.clip(mask, 0, len(palette) - 1)]
+            path = self.root / f"{Path(sample_id).stem}.png"
+            Image.fromarray(rgb, mode="RGB").save(path)
+            self.client.log_artifact(
+                self.run_id, str(path), artifact_path=f"{_ARTIFACT_ROOT}/predictions/epoch_{epoch:04d}"
+            )
+
+    def _log_loss_metrics(self, epoch: int, rows: list[ScoreRow]) -> None:
+        terms = [key.removeprefix("loss_") for key in rows[0] if key.startswith("loss_")] if rows else []
+        for split in ("train", "val"):
+            selected = [row for row in rows if row["split"] == split]
+            for term in terms:
+                if selected:
+                    value = sum(float(row[f"loss_{term}"]) for row in selected) / len(selected)
+                    self.client.log_metric(
+                        self.run_id, f"{split}_loss/{'loss' if term == 'total' else term}", value, step=epoch
+                    )
+
+    def _upload_checkpoint(self) -> None:
+        last = self.runtime.run_directory.checkpoints_dir / "last.ckpt"
+        if last.is_file():
+            self.client.log_artifact(self.run_id, str(last), artifact_path="checkpoints")
+
+    def close(self) -> None:
+        """Release temporary scoring files."""
+        self.scratch.cleanup()
+
+
+def run_magnidata_training(
+    config: TrainingRunConfig,
+    *,
+    store: DirectoryFeatureStore | ShardedFeatureStore,
+    run_id: str,
+    tracking_uri: str,
+    options: MagniDataOptions | None = None,
+    show_progress: bool = True,
+) -> TrainingRunResult | None:
+    """Train AgriTune into an existing queued MagniData run.
+
+    The function owns the MLflow status transition and converts uncaught failures into a FAILED
+    run with a short error tag. Cancellation is observed after each epoch and produces KILLED.
+    """
+    if not _MLFLOW_AVAILABLE:
+        raise ImportError(
+            "mlflow is required for MagniData integration: pip install 'pai-agritune[tracking]'"
+        ) from None
+    client = mlflow.MlflowClient(tracking_uri=tracking_uri)
+    client.update_run(run_id, status="RUNNING")
+    client.set_tag(run_id, "magnidata.engine", "agritune")
+    client.set_tag(run_id, "magnidata.device", "cpu (AgriTune decoder)")
+    publisher: _EpochPublisher | None = None
+
+    def factory(runtime: TrainingRuntime) -> _EpochPublisher:
+        nonlocal publisher
+        publisher = _EpochPublisher(client, run_id, runtime, options or MagniDataOptions())
+        return publisher
+
+    try:
+        result = run_training(
+            config,
+            store=store,
+            show_progress=show_progress,
+            tracker_override=MagniDataTracker(client, run_id),
+            epoch_callback_factory=factory,
+        )
+        cancelled = client.get_run(run_id).data.tags.get(_CANCEL_TAG) == "true"
+        status = "KILLED" if cancelled else "FINISHED"
+        if not cancelled:
+            for path in result.run_directory.path.glob("*.json"):
+                client.log_artifact(run_id, str(path), artifact_path="agritune/provenance")
+            for path in result.run_directory.path.glob("*.yaml"):
+                client.log_artifact(run_id, str(path), artifact_path="agritune/provenance")
+            client.set_tag(run_id, "magnidata.progress_stage", "Complete")
+        client.set_terminated(run_id, status)
+        return result
+    except Exception as error:
+        traceback.print_exc()
+        client.set_tag(run_id, _ERROR_TAG, (str(error).splitlines() or [type(error).__name__])[0][:250])
+        client.set_terminated(run_id, "FAILED")
+        return None
+    finally:
+        if publisher is not None:
+            publisher.close()

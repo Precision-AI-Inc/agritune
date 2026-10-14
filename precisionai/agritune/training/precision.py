@@ -44,7 +44,7 @@ class PrecisionContext:
         self._config = config
         self._device_type = device_type
         scaler_enabled = config.mode == "fp16" and device_type == "cuda"
-        self.scaler = torch.amp.GradScaler(device_type, enabled=scaler_enabled)
+        self.scaler = torch.GradScaler(device_type, enabled=scaler_enabled)
 
     def autocast(self) -> contextlib.AbstractContextManager[Any]:
         """Return the autocast context manager for the forward pass (a no-op under fp32).

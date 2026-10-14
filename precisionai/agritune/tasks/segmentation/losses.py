@@ -108,6 +108,63 @@ def bce_with_logits_loss(
     return per_element.sum() / (valid_mask.sum() * num_classes).clamp(min=1)
 
 
+def _mean_per_sample(values: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
+    flattened = values.reshape(values.shape[0], -1)
+    weights = valid.reshape(valid.shape[0], -1).to(values.dtype)
+    return (flattened * weights).sum(1) / weights.sum(1).clamp(min=1)
+
+
+def segmentation_losses_per_sample(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    config: "SegmentationLossConfig",
+    *,
+    num_classes: int,
+) -> dict[str, torch.Tensor]:
+    """Compute MagniData-compatible component and total losses for every image.
+
+    Returns
+    -------
+    dict[str, torch.Tensor]
+        One-dimensional tensors keyed by ``cce``, ``bce`` and/or ``dice`` plus
+        ``total``. The configured combination weights are applied only to ``total``.
+    """
+    if logits.shape[-2:] != targets.shape[-2:]:
+        logits = functional.interpolate(logits, size=targets.shape[-2:], mode="bilinear", align_corners=False)
+    valid = targets != config.ignore_index
+    _validate_targets(targets, num_classes=num_classes, valid=valid)
+    terms: dict[str, torch.Tensor] = {}
+    if config.name in ("ce", "ce_dice"):
+        pixels = functional.cross_entropy(
+            logits,
+            targets,
+            weight=config.class_weights,
+            ignore_index=config.ignore_index,
+            reduction="none",
+        )
+        terms["cce"] = _mean_per_sample(pixels, valid)
+    if config.name in ("bce", "bce_dice"):
+        one_hot, valid_mask = _one_hot_targets(targets, num_classes=num_classes, ignore_index=config.ignore_index)
+        pos_weight = config.class_weights.view(-1, 1, 1) if config.class_weights is not None else None
+        elements = functional.binary_cross_entropy_with_logits(logits, one_hot, pos_weight=pos_weight, reduction="none")
+        terms["bce"] = elements.mul(valid_mask).sum((1, 2, 3)) / valid_mask.sum((1, 2, 3)).mul(num_classes).clamp(min=1)
+    if config.name in ("dice", "ce_dice", "bce_dice"):
+        probs = functional.softmax(logits, dim=1)
+        one_hot, valid_mask = _one_hot_targets(targets, num_classes=num_classes, ignore_index=config.ignore_index)
+        probs = probs * valid_mask
+        one_hot = one_hot * valid_mask
+        intersection = (probs * one_hot).sum((2, 3))
+        cardinality = probs.sum((2, 3)) + one_hot.sum((2, 3))
+        terms["dice"] = 1.0 - ((2 * intersection + 1.0) / (cardinality + 1.0)).mean(1)
+
+    if config.name in ("ce", "bce", "dice"):
+        terms["total"] = next(iter(terms.values()))
+    else:
+        base = terms["cce"] if "cce" in terms else terms["bce"]
+        terms["total"] = config.ce_weight * base + config.dice_weight * terms["dice"]
+    return terms
+
+
 @dataclass
 class SegmentationLossConfig:
     """Configuration for :class:`SegmentationLoss`.

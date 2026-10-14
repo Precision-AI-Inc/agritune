@@ -8,7 +8,7 @@ accumulation equivalence, scheduler stepping (per optimizer step, not per micro-
 checkpoint resume.
 """
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -112,6 +112,7 @@ def _build_trainer(
     feature_augmentation: FeatureAugmentation | None = None,
     show_progress: bool = False,
     distributed: DistributedContext | None = None,
+    epoch_callback: Callable[[int, dict[str, float], dict[str, float]], bool] | None = None,
 ) -> tuple[Trainer, MLPProbeDecoder]:
     set_deterministic_seed(seed)  # ensures identical decoder initialization across builds
     decoder = MLPProbeDecoder(patch_dim=4, num_classes=2, output_size=(2, 2))
@@ -141,6 +142,7 @@ def _build_trainer(
         feature_augmentation=feature_augmentation,
         show_progress=show_progress,
         distributed=distributed,
+        epoch_callback=epoch_callback,
     )
     return trainer, decoder
 
@@ -151,6 +153,28 @@ def test_fit_runs_without_error_and_advances_state() -> None:
     trainer.fit([batch])
     assert trainer.state.epoch == 2
     assert trainer.state.global_optimizer_step == 2  # one optimizer step per epoch here
+
+
+def test_epoch_callback_receives_metrics_and_can_stop_training() -> None:
+    calls: list[tuple[int, dict[str, float], dict[str, float]]] = []
+
+    def stop(epoch: int, train: dict[str, float], val: dict[str, float]) -> bool:
+        calls.append((epoch, train, val))
+        return True
+
+    trainer, _ = _build_trainer(max_epochs=3, epoch_callback=stop)
+    batch = TrainingBatch(samples=[_sample("a"), _sample("b")], targets=torch.randint(0, 2, (2, 2, 2)))
+    trainer.fit(
+        [batch],
+        [batch],
+        train_metric=SegmentationMetric(num_classes=2),
+        val_metric=SegmentationMetric(num_classes=2),
+    )
+
+    assert trainer.state.epoch == 1
+    assert calls[0][0] == 1
+    assert "mean_iou" in calls[0][1]
+    assert "mean_iou" in calls[0][2]
 
 
 def test_fit_with_show_progress_still_advances_state() -> None:
