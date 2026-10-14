@@ -2,10 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Trainer, evaluator, checkpointing, distributed, precision, and run state."""
 
+from precisionai.agritune.training.batch import TrainingBatch
 from precisionai.agritune.training.checkpointing import Checkpoint, CheckpointManager, CheckpointMismatchError
 from precisionai.agritune.training.distributed import DistributedContext
-from precisionai.agritune.training.evaluator import TrainingBatch, evaluate
+from precisionai.agritune.training.evaluator import evaluate
 from precisionai.agritune.training.precision import PrecisionConfig, PrecisionContext, PrecisionMode
+from precisionai.agritune.training.prefetch import PrefetchingFeatureLoader
 from precisionai.agritune.training.state import (
     TrainingState,
     capture_rng_state,
@@ -22,6 +24,7 @@ __all__ = [
     "PrecisionConfig",
     "PrecisionContext",
     "PrecisionMode",
+    "PrefetchingFeatureLoader",
     "Trainer",
     "TrainerConfig",
     "TrainingBatch",

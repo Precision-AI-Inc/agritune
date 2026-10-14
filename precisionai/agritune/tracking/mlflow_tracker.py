@@ -3,7 +3,7 @@
 
 """``MLflowTracker`` — an optional MLflow tracking backend.
 
-Requires the ``mlflow`` package (``pip install pai-agritune[tracking]``); never required to run
+Requires the ``mlflow`` package (``pip install precisionai-agritune[tracking]``); never required to run
 AgriTune otherwise.
 """
 
@@ -45,7 +45,9 @@ class MLflowTracker:
         run_name: str | None = None,
     ) -> None:
         if not _MLFLOW_AVAILABLE:
-            raise ImportError("mlflow is required for MLflowTracker: pip install pai-agritune[tracking]") from None
+            raise ImportError(
+                "mlflow is required for MLflowTracker: pip install precisionai-agritune[tracking]"
+            ) from None
         if tracking_uri is not None:
             mlflow.set_tracking_uri(tracking_uri)
         if experiment_name is not None:

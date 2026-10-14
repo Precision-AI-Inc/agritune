@@ -1,3 +1,3 @@
-# Requires the wandb extra: pip install pai-agritune[tracking]
+# Requires the wandb extra: pip install precisionai-agritune[tracking]
 backends: [wandb]
 wandb_project: agritune

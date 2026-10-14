@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from PIL import Image
 
 from precisionai.agritune.cli.main import main
 from precisionai.agritune.features.store import DirectoryFeatureStore
@@ -320,6 +321,74 @@ def _build_features_and_train_via_cli(tmp_path: Path, capsys: pytest.CaptureFixt
     return manifest_path, store_path, checkpoint_path
 
 
+def _build_features_and_train_via_cli_with_resize(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], *, resize: tuple[int, int]
+) -> tuple[Path, Path, Path]:
+    """Like ``_build_features_and_train_via_cli``, but trained under ``augmentation.mode: none``
+    with ``geometric.resize`` set — so the checkpoint's decoder is sized for ``resize``, not the
+    dataset's native 8x8 image/mask size."""
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    store_path = tmp_path / "features"
+    main(["features", "build", "--manifest", str(manifest_path), "--store", str(store_path)])
+    capsys.readouterr()
+
+    config = {
+        "manifest_path": str(manifest_path),
+        "feature_store_dir": str(store_path),
+        "run_root": str(tmp_path / "runs"),
+        "run_id": "cli-resize-fixture-run",
+        "num_classes": 2,
+        "encoder_fingerprint": {"model": "fake-encoder", "revision": "fake-v1", "preprocessing": ""},
+        "batch_size": 2,
+        "val_fraction": 0.34,
+        "optimizer": {"name": "adamw", "lr": 0.05},
+        "trainer": {"max_epochs": 1},
+        "augmentation": {"mode": "none", "geometric": {"resize": list(resize)}},
+    }
+    config_path = tmp_path / "train.yaml"
+    config_path.write_text(yaml.safe_dump(config))
+    main(["train", "--config", str(config_path)])
+    capsys.readouterr()
+
+    checkpoint_path = tmp_path / "runs" / "cli-resize-fixture-run" / "checkpoints" / "last.ckpt"
+    return manifest_path, store_path, checkpoint_path
+
+
+def test_predict_resize_matches_the_checkpoints_trained_resolution(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Regression test: `agritune predict` had no --resize flag at all, so it had no way to match
+    a checkpoint trained with `augmentation.geometric.resize` — see
+    services/test_prediction_service.py for the identical concern at the service layer."""
+    manifest_path, store_path, checkpoint_path = _build_features_and_train_via_cli_with_resize(
+        tmp_path, capsys, resize=(4, 4)
+    )
+    output_dir = tmp_path / "predictions"
+
+    exit_code = main(
+        [
+            "predict",
+            "--manifest",
+            str(manifest_path),
+            "--store",
+            str(store_path),
+            "--checkpoint",
+            str(checkpoint_path),
+            "--num-classes",
+            "2",
+            "--output",
+            str(output_dir),
+            "--resize",
+            "4",
+            "4",
+        ]
+    )
+
+    assert exit_code == 0
+    written = sorted(output_dir.glob("*.png"))
+    assert Image.open(written[0]).size == (4, 4)
+
+
 def test_features_verify_reports_ok_for_clean_store(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     manifest_path = build_manifest(tmp_path)
     store_path = tmp_path / "features"
@@ -375,6 +444,86 @@ def test_features_clean_reports_no_removals_for_a_clean_store(
 
     assert exit_code == 0
     assert "removed 0 file(s)" in capsys.readouterr().out
+
+
+def test_features_build_with_sharded_store_type_builds_a_sharded_store(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    manifest_path = build_manifest(tmp_path)
+    store_path = tmp_path / "features"
+
+    exit_code = main(
+        [
+            "features",
+            "build",
+            "--manifest",
+            str(manifest_path),
+            "--store",
+            str(store_path),
+            "--store-type",
+            "sharded",
+            "--entries-per-shard",
+            "2",
+        ]
+    )
+
+    assert exit_code == 0
+    assert "computed=4" in capsys.readouterr().out
+    assert (store_path / "shard_index.json").is_file()  # ShardedFeatureStore, not one file per sample
+
+
+def test_features_migrate_copies_a_directory_store_into_a_sharded_store(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    manifest_path = build_manifest(tmp_path)
+    source_path = tmp_path / "features"
+    main(["features", "build", "--manifest", str(manifest_path), "--store", str(source_path)])
+    capsys.readouterr()
+    dest_path = tmp_path / "features-sharded"
+
+    exit_code = main(
+        [
+            "features",
+            "migrate",
+            "--source",
+            str(source_path),
+            "--source-type",
+            "directory",
+            "--dest",
+            str(dest_path),
+            "--dest-type",
+            "sharded",
+        ]
+    )
+
+    assert exit_code == 0
+    assert "migrated=4 skipped=0 total=4" in capsys.readouterr().out
+    assert (dest_path / "shard_index.json").is_file()
+
+
+def test_features_migrate_is_resumable(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    manifest_path = build_manifest(tmp_path)
+    source_path = tmp_path / "features"
+    main(["features", "build", "--manifest", str(manifest_path), "--store", str(source_path)])
+    capsys.readouterr()
+    dest_path = tmp_path / "features-sharded"
+    migrate_args = [
+        "features",
+        "migrate",
+        "--source",
+        str(source_path),
+        "--dest",
+        str(dest_path),
+        "--dest-type",
+        "sharded",
+    ]
+    main(migrate_args)
+    capsys.readouterr()
+
+    exit_code = main(migrate_args)
+
+    assert exit_code == 0
+    assert "migrated=0 skipped=4 total=4" in capsys.readouterr().out
 
 
 def test_evaluate_reports_metrics(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

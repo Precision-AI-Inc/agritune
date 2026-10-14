@@ -31,6 +31,18 @@ def test_output_shape_with_no_cls_fusion() -> None:
     assert logits.shape == (2, 4, 64, 64)
 
 
+def test_output_shape_with_more_refinement_layers() -> None:
+    decoder = TokenFPNDecoder(patch_dim=8, num_classes=4, output_size=(64, 64), num_layers=4)
+    assert len(decoder.refine) == 4 * 2  # each layer is a (Conv2d, ReLU) pair
+    logits = decoder(_features(batch_size=2, grid=(4, 4), patch_dim=8))
+    assert logits.shape == (2, 4, 64, 64)
+
+
+def test_num_layers_must_be_positive() -> None:
+    with pytest.raises(ValueError, match="num_layers must be positive"):
+        TokenFPNDecoder(patch_dim=8, num_classes=4, output_size=(32, 32), num_layers=0)
+
+
 def test_cls_fusion_requires_cls_dim() -> None:
     with pytest.raises(ValueError, match="cls_fusion='concat' requires cls_dim"):
         TokenFPNDecoder(patch_dim=8, num_classes=4, output_size=(32, 32), cls_fusion=CLSFusion.CONCAT)

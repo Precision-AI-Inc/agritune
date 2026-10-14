@@ -38,3 +38,21 @@ def test_manifest_dataset_satisfies_segmentation_dataset_protocol(tmp_path: Path
     manifest_path = build_manifest(tmp_path)
     dataset = ManifestDataset(manifest_path)
     assert isinstance(dataset, SegmentationDataset)
+
+
+def test_load_target_never_sets_image(tmp_path: Path) -> None:
+    manifest_path = build_manifest(tmp_path)
+    dataset = ManifestDataset(manifest_path)
+    sample = dataset.load_target(0)
+    assert sample.image is None
+    assert sample.sample_id == "sample-0"
+    assert isinstance(sample.target, Image.Image)
+    assert sample.metadata == {"field_id": "field-a"}
+
+
+def test_load_target_matches_full_getitem_mask(tmp_path: Path) -> None:
+    manifest_path = build_manifest(tmp_path)
+    dataset = ManifestDataset(manifest_path)
+    full = dataset[0]
+    target_only = dataset.load_target(0)
+    assert list(full.target.getdata()) == list(target_only.target.getdata())

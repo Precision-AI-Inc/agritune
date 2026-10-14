@@ -30,8 +30,22 @@ encoder model, encoder revision (see docs/encoder.md — opaque unless pinned), 
 feature cache fingerprint
 ```
 
-This is a core v1 requirement, not an optional enhancement — see `agritune_implementation_plan.md`
-§16.
+This is a core v1 requirement, not an optional enhancement. Provenance is written twice: once
+immediately after fingerprints are computed, *before* training starts, and again when the run
+finishes with the final epoch/step/best-metric filled in. The early write means a run that crashes
+or is killed mid-training still leaves a reconstructable record — including for diagnosing a
+`CheckpointMismatchError` on resume, which otherwise has no record of what config an existing
+checkpoint was fingerprinted against.
+
+## Seeds and sample order
+
+The global RNG is seeded from `trainer.seed` immediately before the decoder is built, so a run's
+initial weights depend only on that seed, not on anything that happened to draw random numbers
+earlier in the process. Training batches follow manifest order unless `shuffle: true`, in which
+case each epoch's order is a function of `seed` and the epoch index; a resumed run replays the
+same order. `shuffle` and `feature_preload_dtype` change what the decoder sees, so both are part
+of the config fingerprint whenever they are set; `feature_preload` itself is not, since where
+features are held in memory does not change their values.
 
 ## Checkpoints carry more than weights
 
@@ -40,9 +54,16 @@ position within the epoch, micro step, global optimizer step, best metric, and f
 (Python, NumPy, PyTorch CPU, CUDA) —
 so training resumes bit-for-bit, not just "close enough." Resume warns or fails when critical
 configuration differs (encoder revision changed, class count changed, decoder architecture
-changed) — see `agritune_implementation_plan.md` §14. `last.ckpt`/`best.ckpt` are always written;
+changed). `last.ckpt`/`best.ckpt` are always written;
 periodic checkpoints ranked by the validation metric are also kept, up to a configurable
 `checkpoint_top_k` (`0` keeps every one).
+
+Set `trainer.strict_resume: false` to log a warning instead of raising `CheckpointMismatchError` on
+a fingerprint mismatch, and resume anyway — only after confirming the mismatch is benign. This only
+bypasses the fingerprint *check*: decoder/optimizer state still loads as-is, so a genuine
+architecture or dataset change resumed this way fails later with a `state_dict` shape-mismatch
+error instead, or worse, loads silently incorrect state. `strict_resume` itself is excluded from
+the config fingerprint, so toggling it never causes a mismatch on its own.
 
 ## Feature cache fingerprint
 

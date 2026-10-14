@@ -2,7 +2,7 @@
 
 The v1 layer boundary (`EncoderBackend → EncoderGateway → FeatureStore/FeatureProvider → Task →
 Trainer`, see [architecture.md](architecture.md)) is designed so a new downstream task
-(classification, regression, depth, detection — `agritune_implementation_plan.md` §26 `v0.4`) only
+(classification, regression, depth, detection) only
 needs a new `Task`/`Decoder` implementation against the existing `EncoderFeatures` contract, and a
 new tracking backend only needs to implement the `Tracker` protocol
 (`precisionai.agritune.tracking`) — see `JSONLTracker`, `TensorBoardTracker`, `MLflowTracker`,

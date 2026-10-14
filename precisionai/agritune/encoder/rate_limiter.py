@@ -3,8 +3,8 @@
 
 """Independently configurable rate limiting: bounded concurrency, requests/minute, images/minute.
 
-Values are never hardcoded — see ``agritune_implementation_plan.md`` §8. ``agritune encoder
-benchmark`` (Phase 15) is what makes reasonable values empirical rather than guesses.
+Values are never hardcoded — ``agritune encoder benchmark`` is what makes reasonable values
+empirical rather than guesses.
 """
 
 import asyncio

@@ -3,7 +3,7 @@
 
 """``WandBTracker`` — an optional Weights & Biases tracking backend.
 
-Requires the ``wandb`` package (``pip install pai-agritune[tracking]``); never required to run
+Requires the ``wandb`` package (``pip install precisionai-agritune[tracking]``); never required to run
 AgriTune otherwise.
 """
 
@@ -36,7 +36,9 @@ class WandBTracker:
 
     def __init__(self, *, project: str, run_name: str | None = None) -> None:
         if not _WANDB_AVAILABLE:
-            raise ImportError("wandb is required for WandBTracker: pip install pai-agritune[tracking]") from None
+            raise ImportError(
+                "wandb is required for WandBTracker: pip install precisionai-agritune[tracking]"
+            ) from None
         self._run = wandb.init(project=project, name=run_name)
 
     def log_metrics(self, metrics: dict[str, float], *, step: int) -> None:

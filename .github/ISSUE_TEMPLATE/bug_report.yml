@@ -40,7 +40,7 @@ body:
       label: Environment
       description: |
         - Python version
-        - `pip show pai-agritune` output
+        - `pip show precisionai-agritune` output
         - OS, GPU (if relevant)
         - Encoder backend used (fake / remote) — do not paste API keys
     validations:

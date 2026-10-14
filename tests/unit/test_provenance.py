@@ -71,7 +71,7 @@ def test_capture_environment_info_reports_python_and_torch_versions() -> None:
     assert isinstance(info, EnvironmentInfo)
     assert info.python_version
     assert info.torch_version
-    assert "torch" in info.installed_packages or "pai-agritune" in info.installed_packages
+    assert "torch" in info.installed_packages or "precisionai-agritune" in info.installed_packages
 
 
 def test_run_directory_creates_expected_subdirectories(tmp_path: Path) -> None:

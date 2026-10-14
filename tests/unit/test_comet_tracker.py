@@ -57,7 +57,7 @@ def test_importing_module_does_not_import_comet_ml() -> None:
 def test_raises_import_error_with_install_hint_when_comet_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(comet_tracker, "_comet_import_attempted", True)
     monkeypatch.setattr(comet_tracker, "_COMET_AVAILABLE", False)
-    with pytest.raises(ImportError, match=r"pip install pai-agritune\[tracking\]"):
+    with pytest.raises(ImportError, match=r"pip install precisionai-agritune\[tracking\]"):
         CometTracker(project_name="agritune-test")
 
 

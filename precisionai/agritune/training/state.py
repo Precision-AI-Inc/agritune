@@ -4,8 +4,7 @@
 """Training progress state and RNG capture/restore, for exact checkpoint resume.
 
 Tracks ``epoch``, ``micro_step``, and ``global_optimizer_step`` separately — schedulers step on
-the optimizer step, not the micro-batch, under gradient accumulation (see
-``agritune_implementation_plan.md`` §12).
+the optimizer step, not the micro-batch, under gradient accumulation.
 """
 
 import random

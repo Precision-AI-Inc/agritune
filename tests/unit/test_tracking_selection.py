@@ -71,9 +71,12 @@ def test_neptune_without_a_project_raises(tmp_path: Path) -> None:
 def test_mlflow_backend_selection_reaches_mlflow_trackers_constructor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Force the "not installed" branch regardless of whether mlflow happens to be importable in
+    # the ambient environment — this must never depend on that, and must never let a real
+    # mlflow.start_run() (a live side effect) run during a unit test.
     monkeypatch.setattr(mlflow_tracker, "_MLFLOW_AVAILABLE", False)
     run_dir = RunDirectory(tmp_path, "run-1")
-    with pytest.raises(ImportError, match=r"pip install pai-agritune\[tracking\]"):
+    with pytest.raises(ImportError, match=r"pip install precisionai-agritune\[tracking\]"):
         build_trackers(TrackingSelection(backends=["mlflow"]), run_dir=run_dir, run_id="run-1")
 
 
@@ -82,17 +85,21 @@ def test_wandb_backend_selection_reaches_wandb_trackers_constructor(
 ) -> None:
     monkeypatch.setattr(wandb_tracker, "_WANDB_AVAILABLE", False)
     run_dir = RunDirectory(tmp_path, "run-1")
-    with pytest.raises(ImportError, match=r"pip install pai-agritune\[tracking\]"):
+    with pytest.raises(ImportError, match=r"pip install precisionai-agritune\[tracking\]"):
         build_trackers(TrackingSelection(backends=["wandb"]), run_dir=run_dir, run_id="run-1")
 
 
 def test_comet_backend_selection_reaches_comet_trackers_constructor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(comet_tracker, "_COMET_AVAILABLE", False)
+    # comet_tracker defers its import to first use and caches the outcome in module globals (see
+    # its module docstring); pin all three so _ensure_comet_imported() can't re-attempt a real
+    # import — that would create a live Comet experiment (network + account side effect).
     monkeypatch.setattr(comet_tracker, "_comet_import_attempted", True)
+    monkeypatch.setattr(comet_tracker, "_COMET_AVAILABLE", False)
+    monkeypatch.setattr(comet_tracker, "comet_ml", None)
     run_dir = RunDirectory(tmp_path, "run-1")
-    with pytest.raises(ImportError, match=r"pip install pai-agritune\[tracking\]"):
+    with pytest.raises(ImportError, match=r"pip install precisionai-agritune\[tracking\]"):
         build_trackers(TrackingSelection(backends=["comet"]), run_dir=run_dir, run_id="run-1")
 
 
@@ -101,7 +108,7 @@ def test_neptune_backend_selection_reaches_neptune_trackers_constructor(
 ) -> None:
     monkeypatch.setattr(neptune_tracker, "_NEPTUNE_AVAILABLE", False)
     run_dir = RunDirectory(tmp_path, "run-1")
-    with pytest.raises(ImportError, match=r"pip install pai-agritune\[tracking\]"):
+    with pytest.raises(ImportError, match=r"pip install precisionai-agritune\[tracking\]"):
         build_trackers(
             TrackingSelection(backends=["neptune"], neptune_project="workspace/project"),
             run_dir=run_dir,

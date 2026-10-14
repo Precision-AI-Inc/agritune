@@ -5,8 +5,7 @@
 
 Mirrors :class:`~precisionai.agritune.augmentations.image.pipeline.ImageAugmentationPipeline`'s
 config-driven, "``0``/``None`` disables it" shape, but for
-:class:`~precisionai.agritune.schemas.features.EncoderFeatures` instead of images — see
-``agritune_implementation_plan.md`` §21.
+:class:`~precisionai.agritune.schemas.features.EncoderFeatures` instead of images.
 """
 
 from dataclasses import dataclass

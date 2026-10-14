@@ -11,6 +11,7 @@ from precisionai.agritune.tasks.segmentation.losses import (
     LossName,
     SegmentationLoss,
     SegmentationLossConfig,
+    as_class_indices,
     bce_with_logits_loss,
     cross_entropy_loss,
     segmentation_losses_per_sample,
@@ -209,3 +210,24 @@ def test_per_sample_combined_total_applies_component_weights() -> None:
     values = segmentation_losses_per_sample(logits, targets, config, num_classes=_NUM_CLASSES)
 
     assert torch.allclose(values["total"], 0.25 * values["cce"] + 2.0 * values["dice"])
+
+
+@pytest.mark.parametrize("dtype", [torch.uint8, torch.int16, torch.int32])
+def test_segmentation_loss_accepts_compact_integer_targets(dtype: torch.dtype) -> None:
+    generator = torch.Generator().manual_seed(0)
+    logits = torch.randn(2, _NUM_CLASSES, 4, 4, generator=generator)
+    targets = torch.randint(0, _NUM_CLASSES, (2, 4, 4), generator=generator)
+    loss = SegmentationLoss(SegmentationLossConfig(name="ce_dice"), num_classes=_NUM_CLASSES)
+
+    torch.testing.assert_close(loss(logits, targets.to(dtype)), loss(logits, targets))
+
+
+def test_as_class_indices_widens_only_non_int64_integer_tensors() -> None:
+    long_targets = torch.zeros(2, 2, dtype=torch.long)
+    float_targets = torch.zeros(2, 2)
+    bool_targets = torch.zeros(2, 2, dtype=torch.bool)
+
+    assert as_class_indices(torch.zeros(2, 2, dtype=torch.uint8)).dtype == torch.int64
+    assert as_class_indices(long_targets) is long_targets
+    assert as_class_indices(float_targets) is float_targets
+    assert as_class_indices(bool_targets) is bool_targets

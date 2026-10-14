@@ -97,6 +97,36 @@ def test_top_k_zero_disables_pruning(tmp_path: Path) -> None:
     assert len(list(tmp_path.glob("step_*.ckpt"))) == 5
 
 
+def test_periodic_checkpoints_without_metric_are_pruned_by_recency(tmp_path: Path) -> None:
+    """Regression test: a mid-epoch checkpoint_every_n_steps save has no validation metric yet
+    (metric_value=None) — previously that meant it was never pruned at all, growing without bound.
+    It must instead be pruned by recency, independent of the metric-ranked pool."""
+    manager = CheckpointManager(tmp_path, top_k=2)
+    for step in range(1, 5):
+        manager.save(_checkpoint(step=step), periodic=True, metric_value=None)
+
+    remaining = sorted(p.name for p in tmp_path.glob("step_*.ckpt"))
+    assert remaining == ["step_00000003.ckpt", "step_00000004.ckpt"]
+
+
+def test_metric_ranked_and_recency_pools_are_pruned_independently(tmp_path: Path) -> None:
+    """A validation-triggered periodic checkpoint (with a metric) and a mid-epoch one (without)
+    must not compete for the same top-k slots — each pool is capped at top_k on its own."""
+    manager = CheckpointManager(tmp_path, top_k=1)
+    manager.save(_checkpoint(step=1), periodic=True, metric_value=None)
+    manager.save(_checkpoint(step=2), periodic=True, metric_value=0.5)
+
+    remaining = sorted(p.name for p in tmp_path.glob("step_*.ckpt"))
+    assert remaining == ["step_00000001.ckpt", "step_00000002.ckpt"]
+
+
+def test_top_k_zero_disables_recency_pruning_too(tmp_path: Path) -> None:
+    manager = CheckpointManager(tmp_path, top_k=0)
+    for step in range(5):
+        manager.save(_checkpoint(step=step), periodic=True, metric_value=None)
+    assert len(list(tmp_path.glob("step_*.ckpt"))) == 5
+
+
 def test_load_ignores_unknown_training_state_fields_and_defaults_missing_ones(tmp_path: Path) -> None:
     manager = CheckpointManager(tmp_path)
     manager.save(_checkpoint())

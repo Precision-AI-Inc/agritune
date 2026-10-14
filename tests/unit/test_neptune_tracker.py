@@ -48,7 +48,7 @@ class _FakeNeptune:
 
 def test_raises_import_error_with_install_hint_when_neptune_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(neptune_tracker, "_NEPTUNE_AVAILABLE", False)
-    with pytest.raises(ImportError, match=r"pip install pai-agritune\[tracking\]"):
+    with pytest.raises(ImportError, match=r"pip install precisionai-agritune\[tracking\]"):
         NeptuneTracker(project="workspace/agritune-test")
 
 

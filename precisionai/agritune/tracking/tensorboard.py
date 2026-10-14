@@ -3,7 +3,7 @@
 
 """``TensorBoardTracker`` — an optional local tracking backend.
 
-Requires the ``tensorboard`` package (``pip install pai-agritune[tracking]``); never required to
+Requires the ``tensorboard`` package (``pip install precisionai-agritune[tracking]``); never required to
 run AgriTune otherwise.
 """
 
@@ -36,7 +36,7 @@ class TensorBoardTracker:
     def __init__(self, log_dir: str | Path) -> None:
         if not _TENSORBOARD_AVAILABLE:
             raise ImportError(
-                "tensorboard is required for TensorBoardTracker: pip install pai-agritune[tracking]"
+                "tensorboard is required for TensorBoardTracker: pip install precisionai-agritune[tracking]"
             ) from None
         self._writer = SummaryWriter(log_dir=str(log_dir))
 

@@ -45,7 +45,7 @@ class _FakeWandB:
 
 def test_raises_import_error_with_install_hint_when_wandb_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(wandb_tracker, "_WANDB_AVAILABLE", False)
-    with pytest.raises(ImportError, match=r"pip install pai-agritune\[tracking\]"):
+    with pytest.raises(ImportError, match=r"pip install precisionai-agritune\[tracking\]"):
         WandBTracker(project="agritune-test")
 
 

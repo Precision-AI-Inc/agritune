@@ -13,6 +13,7 @@ evaluate.
 
 import hashlib
 import json
+import sys
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from enum import Enum
@@ -34,9 +35,10 @@ from precisionai.agritune.data.dataset import ManifestDataset
 from precisionai.agritune.data.manifest import ManifestRow, load_manifest
 from precisionai.agritune.data.split import SplitAssignment, random_split
 from precisionai.agritune.features.keys import EncoderFingerprint
-from precisionai.agritune.features.provider import HybridFeatureProvider, OnlineFeatureProvider
-from precisionai.agritune.features.store import DirectoryFeatureStore, ShardedFeatureStore
-from precisionai.agritune.logging import RunDirectory, get_logger
+from precisionai.agritune.features.memory import InMemoryFeatureProvider
+from precisionai.agritune.features.provider import CachedFeatureProvider, HybridFeatureProvider, OnlineFeatureProvider
+from precisionai.agritune.features.store import FEATURE_STORE_TYPES, DirectoryFeatureStore, ShardedFeatureStore
+from precisionai.agritune.logging import RunDirectory, get_logger, progress_iter
 from precisionai.agritune.optimization.optimizers import OptimizerConfig, build_optimizer
 from precisionai.agritune.optimization.schedulers import SchedulerConfig, build_scheduler
 from precisionai.agritune.schemas.protocols import FeatureProvider, Tracker
@@ -44,6 +46,7 @@ from precisionai.agritune.schemas.samples import PreparedSample
 from precisionai.agritune.services.encoder_selection import build_encoder
 from precisionai.agritune.services.segmentation_common import (
     OnlineAugmentedBatches,
+    PreloadedBatches,
     build_cached_feature_provider,
     build_decoder,
     build_image_hash_fn,
@@ -51,15 +54,26 @@ from precisionai.agritune.services.segmentation_common import (
     build_training_batches,
     mask_output_size,
     probe_feature_dims,
+    validate_device,
 )
 from precisionai.agritune.services.tracking_selection import TrackingSelection, build_trackers
 from precisionai.agritune.tasks.segmentation.losses import SegmentationLoss, SegmentationLossConfig
 from precisionai.agritune.tasks.segmentation.metrics import SegmentationMetric
 from precisionai.agritune.tasks.segmentation.task import SegmentationTask
 from precisionai.agritune.training.checkpointing import CheckpointManager
+from precisionai.agritune.training.state import set_deterministic_seed
 from precisionai.agritune.training.trainer import Trainer, TrainerConfig
 
 _FEATURE_PROVIDERS = ("cached", "online", "hybrid")
+FEATURE_PRELOAD_MODES = ("none", "host", "device")
+FEATURE_PRELOAD_DTYPES: dict[str, torch.dtype] = {
+    "float32": torch.float32,
+    "float16": torch.float16,
+    "bfloat16": torch.bfloat16,
+}
+# Shards loaded concurrently while preloading. Each in-flight shard is held whole in memory, so this
+# stays small regardless of feature_read_workers (which sizes per-batch reads, often in the hundreds).
+_PRELOAD_SHARD_WORKERS = 8
 logger = get_logger(__name__)
 
 
@@ -100,10 +114,18 @@ def _stable_fingerprint(value: Any) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _dataset_fingerprint(manifest_path: str, rows: list[ManifestRow]) -> str:
+def _dataset_fingerprint(manifest_path: str, rows: list[ManifestRow], *, show_progress: bool = False) -> str:
+    """Hash the manifest plus every row's image/mask bytes, in ``sample_id`` order.
+
+    Reads every file in ``rows`` off disk synchronously — for a large manifest this can take
+    a while, so progress is logged up front and (optionally) rendered as a bar rather than
+    running silently.
+    """
     manifest = Path(manifest_path)
+    sorted_rows = sorted(rows, key=lambda item: item.sample_id)
+    logger.info("computing dataset fingerprint over %d sample(s); this reads every file once", len(sorted_rows))
     digest = hashlib.sha256(manifest.read_bytes())
-    for row in sorted(rows, key=lambda item: item.sample_id):
+    for row in progress_iter(sorted_rows, desc="fingerprinting dataset", unit="sample", disable=not show_progress):
         digest.update(row.sample_id.encode("utf-8"))
         digest.update((manifest.parent / row.image_path).read_bytes())
         digest.update((manifest.parent / row.mask_path).read_bytes())
@@ -114,7 +136,16 @@ def _critical_config(config: "TrainingRunConfig") -> dict[str, Any]:
     trainer = _jsonable(config.trainer)
     trainer.pop("max_epochs", None)
     trainer.pop("fingerprints", None)
+    trainer.pop("strict_resume", None)
+    # Only recorded when set, so every run that predates these fields keeps its fingerprint and
+    # can still resume under strict_resume.
+    optional: dict[str, Any] = {}
+    if config.feature_preload_dtype is not None:
+        optional["feature_preload_dtype"] = config.feature_preload_dtype
+    if config.shuffle:
+        optional["shuffle"] = True
     return {
+        **optional,
         "num_classes": config.num_classes,
         "feature_provider": config.feature_provider,
         "encoder_base_url": config.encoder_base_url,
@@ -157,6 +188,53 @@ def _original_config(config: "TrainingRunConfig") -> dict[str, Any]:
     return original
 
 
+def _provenance_kwargs(
+    config: "TrainingRunConfig",
+    *,
+    split: SplitAssignment,
+    dataset_fingerprint: str,
+    split_fingerprint: str,
+    encoder_fingerprint: str,
+    critical_fingerprints: dict[str, str],
+    feature_cache_fingerprint: str,
+    epoch: int,
+    global_optimizer_step: int,
+    best_metric: float | None,
+) -> dict[str, Any]:
+    """Build the kwargs for :meth:`RunDirectory.write_provenance`.
+
+    Shared by the pre-``fit()`` and post-``fit()`` provenance writes in :func:`run_training` — the
+    same fingerprints and dataset/encoder metadata, only ``run_info``'s progress fields differ.
+    """
+    return {
+        "config_original": _original_config(config),
+        "config_resolved": _resolved_config(config),
+        "run_info": {
+            "seed": config.seed,
+            "epoch": epoch,
+            "global_optimizer_step": global_optimizer_step,
+            "best_metric": best_metric,
+            "config_fingerprint": critical_fingerprints["config"],
+            "dataset_fingerprint": dataset_fingerprint,
+            "split_fingerprint": split_fingerprint,
+            "encoder_fingerprint": encoder_fingerprint,
+            "feature_cache_fingerprint": feature_cache_fingerprint,
+        },
+        "dataset_info": {
+            "manifest_path": config.manifest_path,
+            "fingerprint": dataset_fingerprint,
+            "split_fingerprint": split_fingerprint,
+            "split": asdict(split),
+        },
+        "encoder_info": {
+            "model": config.encoder_fingerprint.model,
+            "revision": config.encoder_fingerprint.revision,
+            "preprocessing": config.encoder_fingerprint.preprocessing,
+            "fingerprint": encoder_fingerprint,
+        },
+    }
+
+
 @dataclass
 class AugmentationSelection:
     """Which image-augmentation mode to apply to training samples, and its transform config.
@@ -164,8 +242,11 @@ class AugmentationSelection:
     Attributes
     ----------
     mode : AugmentationMode
-        ``NONE`` (default — matches every pre-v0.2 behavior exactly, no augmentation applied),
-        ``OFFLINE``, ``ONLINE``, or ``HYBRID``.
+        ``NONE`` (default — no real augmentation: no flips/crops/photometric transforms), ``OFFLINE``,
+        ``ONLINE``, or ``HYBRID``. ``geometric.resize`` is the one exception: applied to every
+        training *and* validation batch regardless of ``mode`` — deterministic dimensional
+        normalization, not augmentation, required whenever the dataset's own images/masks do not
+        already share one native size (``torch.stack`` cannot batch unequal-size targets together).
     variant : int
         Offline variant index; ignored outside ``OFFLINE``/``HYBRID``.
     hybrid_online_probability : float
@@ -190,10 +271,16 @@ class TrainingRunConfig:
     manifest_path : str
         Dataset manifest CSV.
     feature_store_dir : str
-        Directory a :class:`~precisionai.agritune.features.store.DirectoryFeatureStore` was
-        already built into (via ``agritune features build`` / :mod:`feature_service`) — read from
-        under ``feature_provider: cached``/``hybrid``, written to (write-through) under ``hybrid``,
-        unused under ``online``.
+        Directory a feature store was already built into (via ``agritune features build`` /
+        :mod:`feature_service`) — read from under ``feature_provider: cached``/``hybrid``, written
+        to (write-through) under ``hybrid``, unused under ``online``.
+    store_type : str
+        ``"directory"`` (:class:`~precisionai.agritune.features.store.DirectoryFeatureStore`,
+        development scale) or ``"sharded"``
+        (:class:`~precisionai.agritune.features.store.ShardedFeatureStore`, production scale) —
+        must match whatever ``feature_store_dir`` was actually built as.
+    entries_per_shard : int
+        Samples packed per shard file; only consulted when ``store_type == "sharded"``.
     run_root : str
         Directory ``runs/<run_id>/`` is created under.
     run_id : str
@@ -224,6 +311,59 @@ class TrainingRunConfig:
         Extra keyword arguments forwarded to the decoder's constructor (e.g. ``hidden_dims`` for
         ``"mlp_probe"``, ``atrous_rates`` for ``"aspp"``).
     batch_size : int
+    device : str
+        Where the decoder and every batch's features/targets are moved before ``forward``/
+        ``compute_loss`` — ``"cpu"`` (the default, always safe on CPU-only machines), ``"cuda"``,
+        or a specific GPU like ``"cuda:3"``. Rejected up front if it names a CUDA device that
+        either isn't available at all or is out of range for this machine's GPU count — this never
+        silently falls back to CPU.
+    num_workers : int
+        Forwarded to the ``DataLoader`` backing every train/validation batches iterable — worker
+        subprocesses to decode/augment samples in parallel. ``0`` runs everything in the main
+        process; purely a performance knob, so it is excluded from ``_critical_config`` and never
+        affects a run's reproducibility.
+    pin_memory : bool
+        Forwarded to the same ``DataLoader``. Speeds up the host-to-device copy of batch targets
+        when training on a CUDA device; has no effect on CPU-only runs.
+    prefetch_factor : int | None
+        Forwarded to the same ``DataLoader`` — batches each worker buffers ahead of time; ``None``
+        defers to ``DataLoader``'s own default (``2``) and requires ``num_workers > 0``. Peak
+        memory scales with ``num_workers * prefetch_factor * batch_size``, so a large ``batch_size``
+        combined with many workers at the default of ``2`` can buffer enough whole batches at once
+        to exhaust memory — cap this explicitly (e.g. ``1``) in that case.
+    feature_read_workers : int
+        Forwarded to :class:`~precisionai.agritune.features.provider.CachedFeatureProvider` — the
+        thread-pool size for concurrent per-batch store reads (only consulted under
+        ``feature_provider: cached``). Independent of ``num_workers``: that pool decodes/augments
+        raw images (or is unused entirely when ``feature_provider: cached`` skips image loading —
+        see ``build_training_batches``'s ``load_images``); this one reads already-computed features
+        off disk, the dominant remaining per-batch cost once images are skipped.
+    feature_preload : str
+        ``"none"`` (the default) reads every batch's features from the store each epoch.
+        ``"host"`` reads the training and validation splits' features once, before training,
+        into one host-RAM buffer (via
+        :class:`~precisionai.agritune.features.memory.InMemoryFeatureProvider`), and decodes
+        every mask once into a compact in-memory cache (via
+        :class:`~precisionai.agritune.services.segmentation_common.PreloadedBatches`); each batch
+        is then a single gather plus one pinned, non-blocking copy to ``device``. ``"device"``
+        keeps both buffers on ``device`` itself (which must be a CUDA device), so batches never
+        cross PCIe. Requires ``feature_provider: cached``. Size the memory needed as
+        ``samples x patches x patch_dim x bytes-per-value`` for features plus ``samples x H x W``
+        bytes for masks. A performance knob only (it does not change what the decoder sees),
+        so it is excluded from ``_critical_config``.
+    feature_preload_dtype : str | None
+        ``"float16"``, ``"bfloat16"``, or ``"float32"``: the dtype preloaded feature tokens are
+        stored in; ``None`` (the default) keeps the store's own dtype. ``float16`` halves memory
+        and copy traffic; tokens are cast back to ``float32`` on ``device`` before the decoder.
+        Changes the decoder's input values (by rounding), so it is part of
+        ``_critical_config``. Only valid with ``feature_preload`` other than ``"none"``; a value
+        that overflows the chosen dtype is rejected while preloading.
+    shuffle : bool
+        Present training samples in a fresh random order every epoch (a pure function of
+        ``seed`` and the epoch index, so resuming reproduces it). ``False`` (the default) keeps
+        manifest order. Only valid with ``feature_preload`` other than ``"none"``: shuffled reads
+        from a sharded store reload a whole shard for almost every sample. Part of
+        ``_critical_config``, since it changes the optimization trajectory.
     val_fraction : float
         Fraction of samples held out for validation (via a random split). Validation always uses
         unaugmented samples, regardless of ``augmentation.mode``.
@@ -252,6 +392,8 @@ class TrainingRunConfig:
     num_classes: int
     encoder_fingerprint: EncoderFingerprint
     feature_provider: str = "cached"
+    store_type: str = "directory"
+    entries_per_shard: int = 1000
     encoder_base_url: str | None = None
     encoder_api_key: str | None = None
     augmentation: AugmentationSelection = field(default_factory=AugmentationSelection)
@@ -259,6 +401,14 @@ class TrainingRunConfig:
     decoder_name: str = "mlp_probe"
     decoder_kwargs: dict[str, Any] = field(default_factory=dict)
     batch_size: int = 4
+    device: str = "cpu"
+    num_workers: int = 0
+    pin_memory: bool = False
+    prefetch_factor: int | None = None
+    feature_read_workers: int = 32
+    feature_preload: str = "none"
+    feature_preload_dtype: str | None = None
+    shuffle: bool = False
     val_fraction: float = 0.2
     seed: int = 0
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
@@ -318,11 +468,68 @@ EpochCallback = Callable[[int, dict[str, float], dict[str, float]], bool]
 EpochCallbackFactory = Callable[[TrainingRuntime], EpochCallback]
 
 
+def _validate_dataloader_config(config: TrainingRunConfig) -> None:
+    if config.num_workers < 0:
+        raise ValueError(f"num_workers must be non-negative; got {config.num_workers}")
+    if config.prefetch_factor is not None and config.num_workers == 0:
+        raise ValueError(f"prefetch_factor={config.prefetch_factor} requires num_workers > 0; got num_workers=0")
+    if config.prefetch_factor is not None and config.prefetch_factor < 1:
+        raise ValueError(f"prefetch_factor must be positive; got {config.prefetch_factor}")
+
+
+def _validate_feature_store_config(config: TrainingRunConfig) -> None:
+    if config.store_type not in FEATURE_STORE_TYPES:
+        raise ValueError(f"unsupported store_type: {config.store_type!r}; expected one of {FEATURE_STORE_TYPES}")
+    if config.entries_per_shard < 1:
+        raise ValueError(f"entries_per_shard must be positive; got {config.entries_per_shard}")
+    if config.feature_read_workers < 1:
+        raise ValueError(f"feature_read_workers must be positive; got {config.feature_read_workers}")
+
+
+def _validate_device_config(config: TrainingRunConfig) -> None:
+    validate_device(config.device)
+
+
+def _validate_preload_config(config: TrainingRunConfig) -> None:
+    if config.feature_preload not in FEATURE_PRELOAD_MODES:
+        raise ValueError(
+            f"unsupported feature_preload: {config.feature_preload!r}; expected one of {FEATURE_PRELOAD_MODES}"
+        )
+    if config.feature_preload_dtype is not None and config.feature_preload_dtype not in FEATURE_PRELOAD_DTYPES:
+        raise ValueError(
+            f"unsupported feature_preload_dtype: {config.feature_preload_dtype!r}; expected one of "
+            f"{tuple(FEATURE_PRELOAD_DTYPES)} or null"
+        )
+    if config.feature_preload == "none":
+        if config.feature_preload_dtype is not None:
+            raise ValueError(
+                f"feature_preload_dtype={config.feature_preload_dtype!r} has no effect with feature_preload='none' "
+                "— set feature_preload to 'host' or 'device', or remove feature_preload_dtype"
+            )
+        if config.shuffle:
+            raise ValueError(
+                "shuffle=true requires feature_preload 'host' or 'device' — shuffled reads straight from a "
+                "sharded feature store reload a whole shard for almost every sample"
+            )
+        return
+    if config.feature_provider != "cached":
+        raise ValueError(
+            f"feature_preload={config.feature_preload!r} requires feature_provider 'cached'; got "
+            f"{config.feature_provider!r} — online/hybrid providers encode samples that are not in the store yet"
+        )
+    if config.feature_preload == "device" and torch.device(config.device).type != "cuda":
+        raise ValueError(
+            f"feature_preload='device' requires a CUDA device; got device={config.device!r} — use "
+            "feature_preload 'host' to preload into RAM on a CPU-only machine"
+        )
+
+
 def _validate_config(config: TrainingRunConfig) -> None:
     if config.num_classes < 1:
         raise ValueError(f"num_classes must be positive; got {config.num_classes}")
     if config.batch_size < 1:
         raise ValueError(f"batch_size must be positive; got {config.batch_size}")
+    _validate_dataloader_config(config)
     if config.trainer.max_epochs < 1:
         raise ValueError(f"trainer.max_epochs must be positive; got {config.trainer.max_epochs}")
     if config.checkpoint_top_k < 0:
@@ -331,6 +538,9 @@ def _validate_config(config: TrainingRunConfig) -> None:
         raise ValueError(
             f"unsupported feature_provider: {config.feature_provider!r}; expected one of {_FEATURE_PROVIDERS}"
         )
+    _validate_feature_store_config(config)
+    _validate_device_config(config)
+    _validate_preload_config(config)
     online_augmentation = config.augmentation.mode in (AugmentationMode.ONLINE, AugmentationMode.HYBRID)
     if online_augmentation and config.feature_provider == "cached":
         raise ValueError(
@@ -345,7 +555,10 @@ def _build_feature_provider(
 ) -> tuple[FeatureProvider, list]:
     if config.feature_provider == "cached":
         return build_cached_feature_provider(
-            config.manifest_path, store=store, encoder_fingerprint=config.encoder_fingerprint
+            config.manifest_path,
+            store=store,
+            encoder_fingerprint=config.encoder_fingerprint,
+            max_read_workers=config.feature_read_workers,
         )
 
     rows = load_manifest(config.manifest_path)
@@ -367,15 +580,112 @@ def _build_feature_provider(
     return provider, rows
 
 
+def _preload(
+    config: TrainingRunConfig,
+    *,
+    provider: FeatureProvider,
+    store: DirectoryFeatureStore | ShardedFeatureStore,
+    train_batches: Any,
+    val_batches: Any,
+    show_progress: bool,
+) -> tuple[FeatureProvider, Any, Any]:
+    """Swap in memory-resident batches and features when ``feature_preload`` asks for them.
+
+    Returns ``(provider, train_batches, val_batches)`` unchanged under ``feature_preload: none``.
+    """
+    if config.feature_preload == "none":
+        return provider, train_batches, val_batches
+    if not isinstance(provider, CachedFeatureProvider):  # pragma: no cover — excluded by _validate_preload_config
+        raise TypeError("feature_preload requires a CachedFeatureProvider")
+
+    compute_device = torch.device(config.device)
+    storage_device = compute_device if config.feature_preload == "device" else torch.device("cpu")
+    pin_memory = compute_device.type == "cuda"
+    logger.info("preloading targets and features into %s before training", storage_device)
+    preloaded_train = PreloadedBatches(
+        train_batches,
+        batch_size=config.batch_size,
+        storage_device=storage_device,
+        pin_memory=pin_memory,
+        shuffle=config.shuffle,
+        seed=config.seed,
+        show_progress=show_progress,
+    )
+    preloaded_val = PreloadedBatches(
+        val_batches,
+        batch_size=config.batch_size,
+        storage_device=storage_device,
+        pin_memory=pin_memory,
+        show_progress=show_progress,
+    )
+    read_workers = (
+        min(config.feature_read_workers, _PRELOAD_SHARD_WORKERS)
+        if isinstance(store, ShardedFeatureStore)
+        else config.feature_read_workers
+    )
+    memory_provider = InMemoryFeatureProvider(
+        store,
+        key_fn=provider.key_for,
+        samples=preloaded_train.samples + preloaded_val.samples,
+        storage_device=storage_device,
+        output_device=compute_device,
+        storage_dtype=FEATURE_PRELOAD_DTYPES[config.feature_preload_dtype] if config.feature_preload_dtype else None,
+        output_dtype=torch.float32,
+        read_workers=read_workers,
+        show_progress=show_progress,
+    )
+    return memory_provider, preloaded_train, preloaded_val
+
+
+def _decoder_output_size(config: TrainingRunConfig, probe_target: Any) -> tuple[int, int]:
+    """Return the ``(height, width)`` every training batch's targets actually have.
+
+    Taken from the *augmented* probe target, not the raw sample: geometric augmentation
+    (resize/random_crop) changes the size of every batch's targets. ``augmentation.mode: none``
+    is the exception, since ``prepare_sample`` applies no transform at all there, while
+    ``build_training_batches`` still applies ``geometric.resize`` to every target — so the probe
+    must apply that resize itself, or the decoder upsamples to the native mask size and the loss
+    and metric resize every batch's logits back down.
+    """
+    resize = config.augmentation.geometric.resize
+    if config.augmentation.mode is AugmentationMode.NONE and resize is not None:
+        resize_pipeline = ImageAugmentationPipeline(
+            AugmentationPipelineConfig(geometric=GeometricConfig(resize=resize))
+        )
+        return mask_output_size(resize_pipeline.apply_to_mask(probe_target, seed=0)[0])
+    return mask_output_size(probe_target)
+
+
 def _build_augmentation_pipeline(config: TrainingRunConfig) -> ImageAugmentationPipeline:
     return ImageAugmentationPipeline(
         AugmentationPipelineConfig(geometric=config.augmentation.geometric, photometric=config.augmentation.photometric)
     )
 
 
-def _build_train_batches(config: TrainingRunConfig, train_dataset: ManifestDataset) -> Any:
+def _build_train_batches(
+    config: TrainingRunConfig, train_dataset: ManifestDataset, *, show_progress: bool = False
+) -> Any:
+    # A cached provider never consults PreparedSample.image (its features are already computed);
+    # only hybrid/online do, to encode fresh on a miss or every epoch respectively — so only cached
+    # is safe to skip decoding the image for entirely.
+    load_images = config.feature_provider != "cached"
     if config.augmentation.mode is AugmentationMode.NONE:
-        return build_training_batches(train_dataset, batch_size=config.batch_size)
+        # geometric.resize is dimensional normalization, not augmentation — apply it here exactly
+        # like val_batches always does below, regardless of mode. Otherwise a dataset whose
+        # images/masks are not already one uniform native size fails deep in a DataLoader worker
+        # with a confusing torch.stack size-mismatch, even though resize was configured — this
+        # never creates an AugmentationRecord (see _ResizedBatches._item), so it does not change
+        # the "none" augmentation fingerprint cached features/lookups key off.
+        return build_training_batches(
+            train_dataset,
+            batch_size=config.batch_size,
+            resize=config.augmentation.geometric.resize,
+            show_progress=show_progress,
+            num_workers=config.num_workers,
+            pin_memory=config.pin_memory,
+            prefetch_factor=config.prefetch_factor,
+            load_images=load_images,
+        )
 
     pipeline = _build_augmentation_pipeline(config)
     if config.augmentation.mode is AugmentationMode.OFFLINE:
@@ -386,6 +696,11 @@ def _build_train_batches(config: TrainingRunConfig, train_dataset: ManifestDatas
             global_seed=config.seed,
             batch_size=config.batch_size,
             variant=config.augmentation.variant,
+            show_progress=show_progress,
+            num_workers=config.num_workers,
+            pin_memory=config.pin_memory,
+            prefetch_factor=config.prefetch_factor,
+            load_images=load_images,
         )
 
     return OnlineAugmentedBatches(
@@ -395,7 +710,32 @@ def _build_train_batches(config: TrainingRunConfig, train_dataset: ManifestDatas
         global_seed=config.seed,
         batch_size=config.batch_size,
         hybrid_online_probability=config.augmentation.hybrid_online_probability,
+        num_workers=config.num_workers,
+        pin_memory=config.pin_memory,
+        prefetch_factor=config.prefetch_factor,
     )
+
+
+def _close_tracker_and_flush_store(tracker: Tracker, store: DirectoryFeatureStore | ShardedFeatureStore) -> None:
+    """Close ``tracker`` and flush ``store``, run unconditionally from ``run_training``'s ``finally``.
+
+    ``tracker.close()`` failing never masks whatever exception is already propagating from
+    ``trainer.fit()`` — it is always just logged. ``store.flush()`` gets the same treatment only
+    when ``fit()`` already failed; otherwise its own failure is a real error and must propagate
+    normally, since nothing else went wrong to explain suppressing it.
+    """
+    try:
+        tracker.close()
+    except Exception:
+        logger.exception("tracking backend failed while closing; training artifacts remain valid")
+
+    fit_already_failing = sys.exc_info()[0] is not None
+    try:
+        store.flush()
+    except Exception:
+        if not fit_already_failing:
+            raise
+        logger.exception("feature store failed to flush while trainer.fit() was already failing")
 
 
 def run_training(
@@ -452,7 +792,7 @@ def run_training(
     )
     if not split.train:
         raise ValueError("training split is empty; adjust val_fraction/seed or add more samples")
-    dataset_fingerprint = _dataset_fingerprint(config.manifest_path, rows)
+    dataset_fingerprint = _dataset_fingerprint(config.manifest_path, rows, show_progress=show_progress)
     split_fingerprint = _stable_fingerprint(asdict(split))
     encoder_fingerprint = _stable_fingerprint(
         {"encoder": asdict(config.encoder_fingerprint), "base_url": config.encoder_base_url}
@@ -464,11 +804,56 @@ def run_training(
         "encoder": encoder_fingerprint,
     }
 
+    run_dir = RunDirectory(config.run_root, config.run_id)
+    checkpoint_manager = CheckpointManager(run_dir.checkpoints_dir, top_k=config.checkpoint_top_k)
+    tracker = tracker_override or build_trackers(config.tracking, run_dir=run_dir, run_id=config.run_id)
+
+    # Written before trainer.fit() ever runs, not only after it succeeds: a run this crashes or is
+    # killed mid-training must still be reconstructable from runs/<run_id>/ alone (see CLAUDE.md's
+    # reproducibility requirement) — including for diagnosing a CheckpointMismatchError on resume,
+    # which otherwise has no record of what config a still-existing checkpoint was fingerprinted
+    # against. The post-fit() write below overwrites this with final epoch/step/best_metric.
+    run_dir.write_provenance(
+        **_provenance_kwargs(
+            config,
+            split=split,
+            dataset_fingerprint=dataset_fingerprint,
+            split_fingerprint=split_fingerprint,
+            encoder_fingerprint=encoder_fingerprint,
+            critical_fingerprints=critical_fingerprints,
+            feature_cache_fingerprint=_stable_fingerprint(sorted(store.list_keys())),
+            epoch=0,
+            global_optimizer_step=0,
+            best_metric=None,
+        )
+    )
+
     train_dataset = ManifestDataset(config.manifest_path, sample_ids=split.train)
     val_dataset = ManifestDataset(config.manifest_path, sample_ids=split.val or split.train)
 
-    train_batches = _build_train_batches(config, train_dataset)
-    val_batches = build_training_batches(val_dataset, batch_size=config.batch_size)
+    train_batches = _build_train_batches(config, train_dataset, show_progress=show_progress)
+    # Validation is never augmented (see docs/augmentation.md), but it still needs every sample's
+    # image/mask resized to one common size before torch.stack — so it reuses the configured
+    # geometric.resize (deterministic dimensional normalization, not augmentation) regardless of
+    # config.augmentation.mode.
+    val_batches = build_training_batches(
+        val_dataset,
+        batch_size=config.batch_size,
+        resize=config.augmentation.geometric.resize,
+        show_progress=show_progress,
+        num_workers=config.num_workers,
+        pin_memory=config.pin_memory,
+        prefetch_factor=config.prefetch_factor,
+        load_images=config.feature_provider != "cached",
+    )
+    provider, train_batches, val_batches = _preload(
+        config,
+        provider=provider,
+        store=store,
+        train_batches=train_batches,
+        val_batches=val_batches,
+        show_progress=show_progress,
+    )
 
     first_train_sample = train_dataset[0]
     prepared_probe = prepare_sample(
@@ -487,11 +872,12 @@ def run_training(
         augmentation_metadata=prepared_probe.augmentation_metadata,
     )
     patch_dim, cls_dim = probe_feature_dims(provider, probe_sample)
-    # From the *augmented* target, not first_train_sample.target directly: geometric augmentation
-    # (resize/random_crop) changes the spatial size every training batch's target actually has, so
-    # probing the pre-augmentation sample would build a decoder upsampling to the wrong resolution.
-    output_size = mask_output_size(prepared_probe.target)
+    output_size = _decoder_output_size(config, prepared_probe.target)
 
+    # The decoder's initial weights come from the global RNG, which anything earlier in the process
+    # may have advanced (every DataLoader pass draws a seed from it, so preloading alone would shift
+    # it). Seeding here makes the initialization a function of the configured seed only.
+    set_deterministic_seed(config.trainer.seed)
     decoder = build_decoder(
         config.decoder_name,
         patch_dim=patch_dim,
@@ -500,13 +886,11 @@ def run_training(
         output_size=output_size,
         **config.decoder_kwargs,
     )
+    decoder = decoder.to(torch.device(config.device))
     task = SegmentationTask(decoder, SegmentationLoss(config.loss, num_classes=config.num_classes))
     optimizer = build_optimizer(decoder.parameters(), config.optimizer)
     scheduler = build_scheduler(optimizer, config.scheduler) if config.scheduler is not None else None
 
-    run_dir = RunDirectory(config.run_root, config.run_id)
-    checkpoint_manager = CheckpointManager(run_dir.checkpoints_dir, top_k=config.checkpoint_top_k)
-    tracker = tracker_override or build_trackers(config.tracking, run_dir=run_dir, run_id=config.run_id)
     epoch_callback = (
         epoch_callback_factory(
             TrainingRuntime(
@@ -539,7 +923,7 @@ def run_training(
         epoch_callback=epoch_callback,
     )
 
-    if isinstance(train_batches, OnlineAugmentedBatches):
+    if isinstance(train_batches, OnlineAugmentedBatches | PreloadedBatches):
         train_batches.set_epoch(trainer.state.epoch)
 
     train_metric = SegmentationMetric(num_classes=config.num_classes, ignore_index=config.loss.ignore_index)
@@ -558,39 +942,21 @@ def run_training(
         )
         final_val_metrics = trainer.last_val_metrics if trainer.last_val_metrics is not None else val_metric.compute()
     finally:
-        try:
-            tracker.close()
-        except Exception:
-            logger.exception("tracking backend failed while closing; training artifacts remain valid")
-        store.flush()
+        _close_tracker_and_flush_store(tracker, store)
 
-    feature_cache_fingerprint = _stable_fingerprint(sorted(store.list_keys()))
     run_dir.write_provenance(
-        config_original=_original_config(config),
-        config_resolved=_resolved_config(config),
-        run_info={
-            "seed": config.seed,
-            "epoch": trainer.state.epoch,
-            "global_optimizer_step": trainer.state.global_optimizer_step,
-            "best_metric": trainer.state.best_metric,
-            "config_fingerprint": critical_fingerprints["config"],
-            "dataset_fingerprint": dataset_fingerprint,
-            "split_fingerprint": split_fingerprint,
-            "encoder_fingerprint": encoder_fingerprint,
-            "feature_cache_fingerprint": feature_cache_fingerprint,
-        },
-        dataset_info={
-            "manifest_path": config.manifest_path,
-            "fingerprint": dataset_fingerprint,
-            "split_fingerprint": split_fingerprint,
-            "split": asdict(split),
-        },
-        encoder_info={
-            "model": config.encoder_fingerprint.model,
-            "revision": config.encoder_fingerprint.revision,
-            "preprocessing": config.encoder_fingerprint.preprocessing,
-            "fingerprint": encoder_fingerprint,
-        },
+        **_provenance_kwargs(
+            config,
+            split=split,
+            dataset_fingerprint=dataset_fingerprint,
+            split_fingerprint=split_fingerprint,
+            encoder_fingerprint=encoder_fingerprint,
+            critical_fingerprints=critical_fingerprints,
+            feature_cache_fingerprint=_stable_fingerprint(sorted(store.list_keys())),
+            epoch=trainer.state.epoch,
+            global_optimizer_step=trainer.state.global_optimizer_step,
+            best_metric=trainer.state.best_metric,
+        )
     )
 
     logger.info(

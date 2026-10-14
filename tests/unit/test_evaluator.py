@@ -6,6 +6,7 @@
 import pytest
 import torch
 
+from precisionai.agritune.schemas.features import EncoderFeatures
 from precisionai.agritune.schemas.samples import PreparedSample
 from precisionai.agritune.tasks.segmentation.decoders.mlp_probe import MLPProbeDecoder
 from precisionai.agritune.tasks.segmentation.losses import SegmentationLoss, SegmentationLossConfig
@@ -136,3 +137,42 @@ def test_training_batch_holds_samples_and_targets() -> None:
     batch = TrainingBatch(samples=[sample], targets=targets)
     assert batch.samples == [sample]
     assert torch.equal(batch.targets, targets)
+
+
+def test_evaluate_with_no_device_leaves_features_and_targets_where_they_already_are(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen_devices: list[torch.device] = []
+    original_to = EncoderFeatures.to
+
+    def spy_to(self: EncoderFeatures, device: torch.device | str, *, non_blocking: bool = False) -> EncoderFeatures:
+        seen_devices.append(torch.device(device))
+        return original_to(self, device, non_blocking=non_blocking)
+
+    monkeypatch.setattr(EncoderFeatures, "to", spy_to)
+    task = _task()
+    provider = FakeFeatureProvider(patch_dim=8, cls_dim=None, patch_grid=(2, 2))
+    batch = TrainingBatch(samples=[_sample("a")], targets=torch.randint(0, 3, (1, 4, 4)))
+
+    evaluate(task, provider, [batch], SegmentationMetric(num_classes=3))
+
+    assert seen_devices == [torch.device("cpu")]
+
+
+def test_evaluate_moves_features_and_targets_to_the_given_device(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen_devices: list[torch.device] = []
+    original_to = EncoderFeatures.to
+
+    def spy_to(self: EncoderFeatures, device: torch.device | str, *, non_blocking: bool = False) -> EncoderFeatures:
+        seen_devices.append(torch.device(device))
+        return original_to(self, device, non_blocking=non_blocking)
+
+    monkeypatch.setattr(EncoderFeatures, "to", spy_to)
+    task = _task()
+    provider = FakeFeatureProvider(patch_dim=8, cls_dim=None, patch_grid=(2, 2))
+    batch = TrainingBatch(samples=[_sample("a")], targets=torch.randint(0, 3, (1, 4, 4)))
+
+    result = evaluate(task, provider, [batch], SegmentationMetric(num_classes=3), device=torch.device("cpu"))
+
+    assert "mean_iou" in result
+    assert seen_devices == [torch.device("cpu")]

@@ -9,7 +9,9 @@ statistic from it at :meth:`~SegmentationMetric.compute` time — satisfies
 """
 
 import torch
-from torch.nn import functional
+
+from precisionai.agritune.tasks.segmentation.losses import as_class_indices
+from precisionai.agritune.tasks.segmentation.upsample import bilinear_resize
 
 
 def _out_of_range_labels(values: torch.Tensor, *, num_classes: int) -> list[int]:
@@ -51,12 +53,13 @@ class SegmentationMetric:
         targets : torch.Tensor
             Ground-truth class indices, shape ``(B, H, W)``.
         """
+        targets = as_class_indices(targets)
         if outputs.ndim not in (3, 4):
             raise ValueError(f"outputs must have shape (B, H, W) or (B, C, H, W); got {tuple(outputs.shape)}")
         if outputs.ndim == 4 and outputs.shape[1] != self.num_classes:
             raise ValueError(f"logits class dimension must be {self.num_classes}; got {outputs.shape[1]}")
         if outputs.ndim == 4 and outputs.shape[-2:] != targets.shape[-2:]:
-            outputs = functional.interpolate(outputs, size=targets.shape[-2:], mode="bilinear", align_corners=False)
+            outputs = bilinear_resize(outputs, targets.shape[-2:])
         predictions = outputs.argmax(dim=1) if outputs.ndim == 4 else outputs
         if predictions.shape != targets.shape:
             raise ValueError(
@@ -79,6 +82,11 @@ class SegmentationMetric:
             raise ValueError(f"predictions contain labels outside [0, {self.num_classes}): {invalid_predictions}")
         indices = targets * self.num_classes + predictions
         counts = torch.bincount(indices, minlength=self.num_classes**2)
+        # Follows wherever outputs/targets actually are (e.g. a CUDA device once Trainer starts
+        # moving batches there) rather than forcing every update() call to transfer back to
+        # whatever device the metric happened to be constructed on.
+        if self._confusion.device != counts.device:
+            self._confusion = self._confusion.to(counts.device)
         self._confusion += counts.reshape(self.num_classes, self.num_classes).to(self._confusion.dtype)
 
     def compute(self) -> dict[str, float]:

@@ -40,7 +40,7 @@ class _FakeMLflow:
 
 def test_raises_import_error_with_install_hint_when_mlflow_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(mlflow_tracker, "_MLFLOW_AVAILABLE", False)
-    with pytest.raises(ImportError, match=r"pip install pai-agritune\[tracking\]"):
+    with pytest.raises(ImportError, match=r"pip install precisionai-agritune\[tracking\]"):
         MLflowTracker()
 
 

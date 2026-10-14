@@ -2,7 +2,7 @@
 
 Apply these standards when writing, reviewing, or refactoring code in AgriTune. This document extends the Precision AI Python project standards ([agri-template](https://github.com/Precision-AI-Inc/agri-template)) with rules specific to this repository's domain: training agricultural segmentation decoders on frozen features from a remote ViT encoder.
 
-See [agritune_implementation_plan.md](agritune_implementation_plan.md) for the phased build-out this repository follows, and [README.md](README.md) for current status.
+See [README.md](README.md) for current status.
 
 ---
 
@@ -227,13 +227,14 @@ repos:
 # optional dep pattern
 try:
     import wandb  # type: ignore[import]
+
     _WANDB_AVAILABLE = True
 except ImportError:
     _WANDB_AVAILABLE = False
 
 # inside the class/function that needs it
 if not _WANDB_AVAILABLE:
-    raise ImportError("wandb is required: pip install pai-agritune[tracking]") from None
+    raise ImportError("wandb is required: pip install precisionai-agritune[tracking]") from None
 ```
 
 ### Docstrings

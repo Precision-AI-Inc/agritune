@@ -15,6 +15,7 @@ feature access goes through a ``FeatureProvider`` like these.
 
 import asyncio
 from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 
 from precisionai.agritune.encoder.gateway import EncoderGateway
 from precisionai.agritune.features.errors import FeatureNotCachedError
@@ -23,6 +24,8 @@ from precisionai.agritune.features.store import DirectoryFeatureStore, ShardedFe
 from precisionai.agritune.schemas.features import EncoderFeatures, concatenate_encoder_features, select_one
 from precisionai.agritune.schemas.protocols import FeatureStore
 from precisionai.agritune.schemas.samples import PreparedSample
+
+_MAX_READ_WORKERS = 32
 
 
 class CachedFeatureProvider:
@@ -41,6 +44,11 @@ class CachedFeatureProvider:
     image_hash_fn : Callable[[PreparedSample], str]
         Computes the image-content hash component of the cache key for one sample; must match
         what was used during precomputation.
+    max_read_workers : int, optional
+        Upper bound on concurrent store reads per :meth:`get_features` call (actual concurrency is
+        also capped at the batch size). Raise this to match available CPU cores when disk/store
+        read latency — not CPU — is the bottleneck; the default is a conservative, always-safe
+        value.
     """
 
     def __init__(
@@ -49,13 +57,20 @@ class CachedFeatureProvider:
         *,
         encoder_fingerprint: EncoderFingerprint,
         image_hash_fn: Callable[[PreparedSample], str],
+        max_read_workers: int = _MAX_READ_WORKERS,
     ) -> None:
         self._store = store
         self._encoder_fingerprint = encoder_fingerprint
         self._image_hash_fn = image_hash_fn
+        self._max_read_workers = max_read_workers
 
     def get_features(self, samples: Sequence[PreparedSample]) -> EncoderFeatures:
         """Return cached features for every sample in ``samples``, in order.
+
+        Reads are issued from a thread pool rather than sequentially: each is a file open plus a
+        safetensors deserialization, which releases the GIL for the actual I/O, so concurrent reads
+        overlap disk/filesystem latency instead of paying it once per sample in series — the
+        dominant cost at the batch sizes this is called with.
 
         Parameters
         ----------
@@ -78,7 +93,9 @@ class CachedFeatureProvider:
         if not samples:
             raise ValueError("samples must be non-empty")
 
-        per_sample_features = [self._read_one(sample) for sample in samples]
+        workers = min(self._max_read_workers, len(samples))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            per_sample_features = list(executor.map(self._read_one, samples))
         return concatenate_encoder_features(per_sample_features)
 
     def _read_one(self, sample: PreparedSample) -> EncoderFeatures:

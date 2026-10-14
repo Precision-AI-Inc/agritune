@@ -30,7 +30,7 @@ logger = get_logger(__name__)
 ENV_FILE_VARIABLE = "AGRITUNE_ENV_FILE"
 ENCODER_API_KEY_VARIABLE = "AGRITUNE_ENCODER_API_KEY"
 
-_INSTALL_HINT = "python-dotenv is required to read a .env file: pip install pai-agritune[dotenv]"
+_INSTALL_HINT = "python-dotenv is required to read a .env file: pip install precisionai-agritune[dotenv]"
 
 
 def load_env_file(path: str | Path | None = None) -> Path | None:

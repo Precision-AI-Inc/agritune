@@ -7,18 +7,110 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+
+- `feature_preload: host | device` (new `TrainingRunConfig` field, default `none`): reads the
+  training and validation splits' cached features once, before training, into one contiguous
+  buffer in RAM or GPU memory (new `precisionai.agritune.features.memory.InMemoryFeatureProvider`),
+  and decodes every mask once into a compact `uint8` cache (new
+  `segmentation_common.PreloadedBatches`). Each batch then becomes one gather, instead of a
+  per-sample store read, validation, and concatenation plus a PNG decode per mask every epoch.
+  Measured on an A100 with 113,584 training and 37,707 validation samples and a linear probe,
+  with every change in this release, epoch times including validation went from 1,921 s (reading
+  a sharded store) to 51–62 s with 57x38 grids in host RAM and 7.5 s with 16x16 grids on the GPU.
+  A 100-epoch run at 798x532 masks that took about 80 hours now takes 3 h 45 min end to end, and
+  reaches the same test metrics (mean IoU within 0.05 pp). Requires `feature_provider: cached`.
+- Preloading reads each shard once and copies entries into the buffer on a small thread pool
+  (5.4 minutes for 252 GB of `float16` features, 3.2x faster than a single thread), and
+  `InMemoryFeatureProvider` resolves a sample's row by object identity after its first lookup, so
+  cache keys are not rehashed every epoch.
+- `feature_preload_dtype: float16 | bfloat16 | float32` stores preloaded tokens in a smaller
+  dtype (cast back to `float32` on the device before the decoder); a value that would overflow
+  is rejected while preloading.
+- `shuffle: true` (requires `feature_preload`) reshuffles training samples every epoch in an order
+  derived from `seed` and the epoch index, so a resumed run replays the same order.
+- Every decoder (and the loss/metric resize fallbacks) now resizes logits with
+  `tasks.segmentation.upsample.bilinear_resize`, which computes exactly what
+  `F.interpolate(mode="bilinear", align_corners=False)` does as two small matrix products.
+  PyTorch's CUDA backward for bilinear upsampling scatters gradients with atomic adds, which took
+  48 of 61 ms per linear-probe step when upsampling a 16x16 grid to 224x224; the matrix form takes
+  8 ms for the whole step. Values match `F.interpolate` to floating-point rounding.
+- `PrefetchingFeatureLoader` now issues its copies on a dedicated CUDA stream, so the next batch's
+  host-to-device transfer actually overlaps the current step instead of queueing behind it on the
+  default stream.
+- `CachedFeatureProvider` keys no longer re-read and re-hash every image file on every epoch:
+  `build_image_hash_fn` memoizes each sample's image hash for the life of the run.
+- `ShardedFeatureStore.read()` looks entries up in a per-shard index instead of scanning every
+  tensor name in the shard for each read, and both stores gain `read_many()`, which loads each
+  shard file once no matter what order keys are requested in.
+- `EncoderFeatures.to()` no longer re-runs full validation (a non-finite scan plus host reads,
+  which force a GPU sync on every batch); new `EncoderFeatures.trusted()` builds an instance from
+  already-validated tensors.
+
 ### Security
 
+- Every API request field naming a filesystem path (`manifest_path`, `store`, `checkpoint_path`,
+  `output_dir`, `config_path`, `augmentation_config_path`) is now resolved through a new
+  `precisionai.agritune.api.paths.resolve_under_root` helper and rejected with HTTP 400 if it
+  would resolve outside the configured API root (`AGRITUNE_API_ROOT`, defaulting to the server's
+  current working directory) — closing a path-traversal gap where an absolute path or a `..`
+  segment let a request read or write anywhere the server process could access (e.g.
+  `checkpoint_path` into `torch.load`, `output_dir` for prediction PNGs, `config_path` into
+  training). This API still has no built-in authentication by design — see `SECURITY.md`.
 - Pull-request CI now requests `contents: read` only, reusable unit-test/pre-commit jobs declare
   the same, and their checkouts set `persist-credentials: false` so pull-request code cannot run
   with a repository write token.
 - Logging redacts API keys, Authorization values, sensitive Hydra/dotlist overrides, and URL
   userinfo/query credentials before emit, including DEBUG override dumps and encoder base URLs.
 
+### Documentation
+
+- The README logo and every repository-relative link (`CLAUDE.md`, `SECURITY.md`, `docs/...`,
+  `examples/...`, and so on) now use absolute GitHub URLs, as in AgriEval. The PyPI project page
+  cannot resolve repository-relative paths: the logo showed as a broken image and the links
+  opened `pypi.org/project/precisionai-agritune/<file>` instead of the repository.
+- `docs/datasets.md` explains that `agritune train` splits its own manifest into training and
+  validation (`val_fraction`, per sample, ignoring any `split` column), so test samples belong in a
+  separate manifest for `agritune evaluate`, with a worked example that holds out whole fields via
+  `grouped_split`. `docs/configuration.md`, `docs/reproducibility.md`, `docs/segmentation.md`,
+  `docs/feature-caching.md`, and the README cover preloading, shuffling, seeding, and output
+  resolution.
+
 ### Fixed
 
+- Two `tests/unit/test_features.py` tests failed on Python 3.13 (and only there) with `Boolean value
+  of Tensor with more than one value is ambiguous`: they compared `EncoderFeatures` instances with
+  `==`, which the generated dataclass `__eq__` can only answer when both sides hold the same tensor
+  objects, and 3.13 now compares field by field. They compare the fields explicitly. No library
+  behavior changed.
+- Training under `augmentation.mode: none` with `geometric.resize` built the decoder at the
+  dataset's *native* mask size, because the output-size probe skipped the resize that every
+  training batch still receives. The decoder then upsampled to the native size (8.5x more pixels
+  for 798x532 masks resized to 224x224), and the loss and metric resized every batch's logits back
+  down: three full-size resizes per step. The probe now applies `resize` exactly like
+  `build_training_batches` (and like `prediction_service` already did). On an A100 this alone cut
+  a 20,000-sample, two-epoch linear-probe run from 36.1 s to 4.7 s.
+- `EncoderFeatures.uniform_patch_grid` reads the batch's patch grids in one host transfer instead
+  of one per sample (each a GPU synchronization when the grid is on a CUDA device).
+- The decoder's initial weights are now drawn right after seeding the global RNG from
+  `trainer.seed`. Previously they depended on whatever had advanced the RNG earlier in the process
+  (every `DataLoader` pass draws a seed from it), so the same config could start from different
+  weights depending on unrelated code paths. New runs therefore start from different (but now
+  seed-determined) weights than earlier versions did for the same config; resuming an existing
+  checkpoint is unaffected.
+- `SegmentationLoss` and `SegmentationMetric` accept class-index targets in any integer dtype
+  (widened to `int64` internally); a `uint8` target used to overflow the metric's
+  `targets * num_classes + predictions` index.
+- Pyright generic-typing error in `segmentation_common._IndexDataset`.
 - Pyright optional-palette subscript in `colorize_predictions` and live-test API-key narrowing
   after `pytest.skip`.
+- `SegmentationMetric.update` now follows `outputs`/`targets` onto whatever device they're
+  actually on (its confusion-matrix accumulator used to stay fixed on CPU, raising a
+  device-mismatch error the first time `Trainer`/`evaluate()` moved a batch to CUDA).
+- Feature-space augmentation (`augmentations.feature.transforms`) now moves every random
+  mask/noise tensor it draws onto the same device as the features it perturbs, instead of
+  leaving it on the CPU-based checkpointed RNG's device — the same class of device-mismatch bug,
+  triggered whenever `feature_augmentation` is enabled on a CUDA training run.
 
 ### Added
 
@@ -27,6 +119,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   predictions and checkpoints, reports progress, and honours cancellation between epochs.
 - Optional tracker injection and epoch callbacks in the training service, plus reusable
   per-sample segmentation loss computation for product integrations.
+- `TrainingRunConfig.device` (`"cpu"`, `"cuda"`, or `"cuda:N"`): the decoder and every batch's
+  features/targets now actually move to the configured device before `forward`/`compute_loss`
+  (previously nothing in the training pipeline ever called `.to()`, so `trainer.precision: fp16`
+  silently never engaged CUDA's gradient scaler). Rejected up front via a new
+  `_validate_device_config` if it names a CUDA device that is unavailable or out of range for the
+  machine's GPU count — never a silent fallback to CPU. Added `EncoderFeatures.to(device)` and a
+  `device` parameter on `evaluate()` to support this.
+- `TrainingRunConfig.feature_read_workers`: exposes `CachedFeatureProvider`'s internal read
+  thread-pool size (previously a fixed constant) so it can be tuned independently of the
+  `DataLoader`'s `num_workers` — the dominant per-batch cost once `feature_provider: cached` skips
+  image loading entirely.
+- `precisionai.agritune.training.prefetch.PrefetchingFeatureLoader`: overlaps one batch's feature
+  fetch (a `FeatureProvider.get_features` call — a disk/store read for `cached`/`hybrid`) with the
+  previous batch's model compute in a single background thread, wired into both `Trainer`'s
+  training loop and `evaluate()`, so the GPU is no longer idle waiting on a synchronous feature
+  read every batch.
 - Info/debug/warning logging across previously-silent modules (services, encoder, evaluator),
   plus `tqdm` progress bars over every long-running loop (training/validation batches,
   evaluation, prediction, feature precompute, encoder benchmarking, and the CWFID/PhenoBench prep
@@ -44,7 +152,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sugar-beet dataset (1,407 train / 772 val real UAV field images, vs. CWFID's 60) and writes an
   AgriTune manifest, collapsing its 5-way partial-visibility labels into AgriTune's 3-class
   background/crop/weed convention.
-- Optional `.env` support (`pip install pai-agritune[dotenv]`): a `.env` file is loaded into the
+- Optional `.env` support (`pip install precisionai-agritune[dotenv]`): a `.env` file is loaded into the
   environment before Hydra composition, so `${oc.env:AGRITUNE_ENCODER_API_KEY,null}` in
   `encoder/remote.yaml` resolves from it. Exported shell variables still take precedence, and
   `AGRITUNE_ENV_FILE` selects a file outside the working directory.
@@ -141,12 +249,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The PyPI distribution is now named `precisionai-agritune` (it was `pai-agritune`, which was never
+  published), matching `precisionai-agrieval`. Install with `pip install precisionai-agritune`; the
+  import package (`precisionai.agritune`) and the `agritune` command are unchanged. `release.yml`,
+  the README (including its PyPI and Python-version badges), `SECURITY.md`, the bug-report
+  template, install hints in error messages and tracking configs, and the tests that assert them
+  now use the new name.
+- README: primary header is now "Precision AI AgriTune"; badges moved below the description; the
+  stale "Status" section (internal build-phase notes) was removed; `Installation` no longer opens
+  the document — a runnable `Quick Start` does, followed by `Project layout`, with a new
+  "FastAPI server" subsection under `Installation` covering the `[api]` extra and `uvicorn`.
+  `Quick Start` walks the packaged CWFID example end-to-end (dataset prep, validate, feature
+  build, train, evaluate) instead of a synthetic placeholder manifest, with a `fake-encoder`
+  fallback for anyone without hosted-encoder access yet.
+- `pyproject.toml`'s `api` extra now also installs `uvicorn`, so `pip install "precisionai-agritune[api]"`
+  is sufficient to run the FastAPI server (previously required a separate manual `pip install
+  uvicorn`).
 - The image augmentation pipeline (`augmentations.image`) now composes
   [albumentations](https://albumentations.ai/) transforms instead of hand-rolled PIL/numpy code,
   using `Compose.set_random_seed` for the same exact-reproducibility guarantee as before.
 
 ### Fixed
 
+- `requirements.txt` no longer hard-pins a CUDA build of `torch` (`torch==2.14.0+cu130` via
+  `--extra-index-url .../cu130`) — that install fails outright on CPU-only/non-Linux machines,
+  contradicting this repo's own CPU-only CI. Now a plain `torch>=2.2`, matching `pyproject.toml`;
+  a comment (and a matching README note) shows the two-step CPU-only install
+  (`pip install torch --index-url https://download.pytorch.org/whl/cpu`, same as
+  `unit-test.yml`) needed on Linux, where PyPI's default wheel still bundles the full CUDA
+  runtime even on a machine with no GPU, plus how to opt into a specific CUDA build instead.
+- `CODE_OF_CONDUCT.md` was missing the "Enforcement Guidelines" section (Correction/Warning/
+  Temporary Ban/Permanent Ban) from the official Contributor Covenant v2.1 text — restored
+  verbatim.
+- `LICENSE.md` had several small wording drifts from the canonical Apache 2.0 text — replaced with
+  the exact upstream text.
+- `.github/dependabot.yml` was missing the `groups: python-dependencies: patterns: ["*"]` block on
+  its `pip` update, so routine dependency bumps opened one PR per package instead of one grouped
+  weekly PR.
+- `examples/SANITY_CHECK.md` and `examples/FEATURE_TEST_COMMANDS.md` pointed evaluate/predict at
+  `runs/cwfid-sanity/checkpoints/...`, a run_id `examples/segmentation/cwfid.yaml` never actually
+  produces (it sets `run_id: cwfid-sanity-mlp_probe-feature_aug`) — the checkpoint path in both
+  docs never existed. Corrected to the run_id the config actually writes.
 - Flush partial gradient-accumulation windows instead of silently dropping their gradients.
 - Execute gateway-split encoder batches concurrently while preserving response order.
 - Preserve augmentation fingerprints through training batches so hybrid cache keys cannot reuse
@@ -163,7 +306,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   imported; since `tracking_selection.py` imports every tracker module up front, selecting any
   *other* backend (e.g. `mlflow`) silently created an uninvited offline Comet experiment whenever
   `comet_ml` happened to be installed alongside it — which it always is, since both ship in the
-  `pai-agritune[tracking]` extra.
+  `precisionai-agritune[tracking]` extra.
 - Derive a training run's decoder `output_size` from the actually-augmented probe sample instead
   of the raw pre-augmentation one, so `augmentation.geometric.resize`/`random_crop` (which change
   spatial size) no longer builds a decoder upsampling to the wrong resolution.

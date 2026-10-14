@@ -12,20 +12,29 @@ only exercises the default (cached, no augmentation, jsonl) path.
 import asyncio
 from enum import Enum
 from pathlib import Path
+from typing import Any
 
+import numpy as np
 import pytest
 import torch
 import yaml
 from PIL import Image
 
 from precisionai.agritune.augmentations.feature.pipeline import FeatureAugmentationConfig, FeatureAugmentationPipeline
-from precisionai.agritune.augmentations.image.pipeline import AugmentationMode, GeometricConfig
+from precisionai.agritune.augmentations.image.pipeline import (
+    AugmentationMode,
+    AugmentationPipelineConfig,
+    GeometricConfig,
+    ImageAugmentationPipeline,
+)
+from precisionai.agritune.data.dataset import ManifestDataset
 from precisionai.agritune.data.manifest import load_manifest
 from precisionai.agritune.data.split import random_split
 from precisionai.agritune.encoder.fake import FakeEncoderBackend
 from precisionai.agritune.features.keys import EncoderFingerprint
 from precisionai.agritune.features.store import DirectoryFeatureStore, ShardedFeatureStore
 from precisionai.agritune.optimization.optimizers import OptimizerConfig
+from precisionai.agritune.schemas.samples import Sample
 from precisionai.agritune.services import training_service
 from precisionai.agritune.services.feature_service import build_features
 from precisionai.agritune.services.tracking_selection import TrackingSelection
@@ -74,7 +83,7 @@ def test_jsonable_serializes_tensors_paths_and_enums() -> None:
     assert _jsonable(_Kind.OFFLINE) == "offline"
 
 
-def _precompute(manifest_path: Path, store: DirectoryFeatureStore) -> None:
+def _precompute(manifest_path: Path, store: DirectoryFeatureStore | ShardedFeatureStore) -> None:
     asyncio.run(
         build_features(str(manifest_path), store=store, encoder=FakeEncoderBackend(), encoder_fingerprint=_FINGERPRINT)
     )
@@ -125,6 +134,32 @@ def test_run_training_default_config_is_backward_compatible(tmp_path: Path) -> N
     assert run_info["split_fingerprint"]
     assert run_info["encoder_fingerprint"]
     assert run_info["feature_cache_fingerprint"]
+
+
+def test_run_training_cached_provider_does_not_load_images_per_batch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The image-loading path (``ManifestDataset.__getitem__``) must not scale with dataset size x
+    epochs for feature_provider=cached — only the one-time output-size probe may call it."""
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    store = DirectoryFeatureStore(tmp_path / "features")
+    _precompute(manifest_path, store)
+
+    calls = 0
+    original_getitem = ManifestDataset.__getitem__
+
+    def counting_getitem(self: ManifestDataset, index: int) -> Sample:
+        nonlocal calls
+        calls += 1
+        return original_getitem(self, index)
+
+    monkeypatch.setattr(ManifestDataset, "__getitem__", counting_getitem)
+
+    config = _base_config(tmp_path, manifest_path, run_id="cached-no-image-run", trainer=TrainerConfig(max_epochs=2))
+    result = run_training(config, store=store)
+
+    assert result.final_train_state["epoch"] == 2
+    assert calls == 1  # only the one-time output-size probe — never per-batch, per-epoch
 
 
 def test_run_training_with_online_feature_provider_needs_no_precomputed_store(tmp_path: Path) -> None:
@@ -395,6 +430,82 @@ def test_resume_rejects_critical_decoder_config_change(tmp_path: Path) -> None:
         run_training(changed, store=store)
 
 
+def test_strict_resume_false_allows_resume_despite_critical_config_change(tmp_path: Path) -> None:
+    """strict_resume=False only bypasses the fingerprint *check* — it still loads the checkpoint's
+    decoder/optimizer state as-is, so this uses a benign config change (optimizer lr, no effect on
+    parameter shapes) rather than a decoder_kwargs change, which would still fail (correctly) with
+    a state_dict shape mismatch regardless of strict_resume."""
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    store = DirectoryFeatureStore(tmp_path / "features")
+    _precompute(manifest_path, store)
+    run_training(_base_config(tmp_path, manifest_path, run_id="strict-resume-off-run"), store=store)
+    changed = _base_config(
+        tmp_path,
+        manifest_path,
+        run_id="strict-resume-off-run",
+        optimizer=OptimizerConfig(name="adamw", lr=0.01),
+        trainer=TrainerConfig(max_epochs=2, strict_resume=False),
+    )
+
+    result = run_training(changed, store=store)
+
+    assert result.final_train_state["epoch"] == 2
+
+
+def test_strict_resume_flag_is_excluded_from_the_config_fingerprint(tmp_path: Path) -> None:
+    """Flipping strict_resume between runs must never itself register as a "config" mismatch —
+    it controls resume behavior, not what produced the checkpoint, mirroring why max_epochs is
+    excluded too."""
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    store = DirectoryFeatureStore(tmp_path / "features")
+    _precompute(manifest_path, store)
+    run_training(
+        _base_config(tmp_path, manifest_path, run_id="strict-resume-toggle-run", trainer=TrainerConfig(max_epochs=1)),
+        store=store,
+    )
+
+    result = run_training(
+        _base_config(
+            tmp_path,
+            manifest_path,
+            run_id="strict-resume-toggle-run",
+            trainer=TrainerConfig(max_epochs=2, strict_resume=False),
+        ),
+        store=store,
+    )
+
+    assert result.final_train_state["epoch"] == 2
+
+
+def test_run_training_writes_provenance_before_fit_so_a_crash_still_leaves_a_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test: config.resolved.yaml/run.json must exist even when trainer.fit() crashes —
+    previously write_provenance only ran after a successful fit(), so a run killed mid-training left
+    no record of what config produced its checkpoints, violating the run-directory reproducibility
+    requirement and making a later CheckpointMismatchError on resume undiagnosable."""
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    store = DirectoryFeatureStore(tmp_path / "features")
+    _precompute(manifest_path, store)
+
+    def _failing_fit(self: object, *args: object, **kwargs: object) -> None:
+        raise RuntimeError("trainer fit failed")
+
+    monkeypatch.setattr(training_service.Trainer, "fit", _failing_fit)
+
+    config = _base_config(tmp_path, manifest_path, run_id="crash-before-provenance-run")
+    with pytest.raises(RuntimeError, match="trainer fit failed"):
+        run_training(config, store=store)
+
+    run_dir = Path(config.run_root) / config.run_id
+    assert (run_dir / "config.resolved.yaml").is_file()
+    resolved = yaml.safe_load((run_dir / "config.resolved.yaml").read_text(encoding="utf-8"))
+    assert resolved["decoder_name"] == "mlp_probe"
+    run_info = yaml.safe_load((run_dir / "run.json").read_text(encoding="utf-8"))
+    assert run_info["config_fingerprint"]
+    assert run_info["epoch"] == 0
+
+
 def test_resume_rejects_dataset_content_drift(tmp_path: Path) -> None:
     manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
     store = DirectoryFeatureStore(tmp_path / "features")
@@ -469,6 +580,13 @@ def test_run_training_rejects_unknown_feature_provider(tmp_path: Path) -> None:
     [
         ({"num_classes": 0}, "num_classes must be positive"),
         ({"batch_size": 0}, "batch_size must be positive"),
+        ({"num_workers": -1}, "num_workers must be non-negative"),
+        ({"prefetch_factor": 1}, "prefetch_factor=1 requires num_workers > 0"),
+        ({"num_workers": 2, "prefetch_factor": 0}, "prefetch_factor must be positive"),
+        ({"store_type": "bogus"}, "unsupported store_type"),
+        ({"entries_per_shard": 0}, "entries_per_shard must be positive"),
+        ({"feature_read_workers": 0}, "feature_read_workers must be positive"),
+        ({"device": "not-a-real-device"}, "invalid device"),
         ({"trainer": TrainerConfig(max_epochs=0)}, "trainer.max_epochs must be positive"),
         ({"checkpoint_top_k": -1}, "checkpoint_top_k must be non-negative"),
     ],
@@ -482,6 +600,44 @@ def test_run_training_rejects_invalid_numeric_config(
 
     with pytest.raises(ValueError, match=message):
         run_training(config, store=store)
+
+
+@pytest.mark.skipif(torch.cuda.is_available(), reason="requires a CPU-only machine")
+def test_run_training_rejects_cuda_device_when_cuda_is_unavailable(tmp_path: Path) -> None:
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    store = DirectoryFeatureStore(tmp_path / "features")
+    config = _base_config(tmp_path, manifest_path, run_id="no-cuda-run", device="cuda:0")
+
+    with pytest.raises(ValueError, match="requests CUDA"):
+        run_training(config, store=store)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA-enabled machine")
+def test_run_training_rejects_out_of_range_cuda_index(tmp_path: Path) -> None:
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    store = DirectoryFeatureStore(tmp_path / "features")
+    out_of_range = torch.cuda.device_count()
+    config = _base_config(tmp_path, manifest_path, run_id="oor-cuda-run", device=f"cuda:{out_of_range}")
+
+    with pytest.raises(ValueError, match="only has"):
+        run_training(config, store=store)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA-enabled machine")
+def test_run_training_moves_the_decoder_to_the_configured_cuda_device(tmp_path: Path) -> None:
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    store = DirectoryFeatureStore(tmp_path / "features")
+    _precompute(manifest_path, store)
+    config = _base_config(
+        tmp_path,
+        manifest_path,
+        run_id="cuda-run",
+        feature_provider="cached",
+        device="cuda:0",
+        trainer=TrainerConfig(max_epochs=1),
+    )
+
+    run_training(config, store=store)
 
 
 def test_run_training_rejects_an_empty_training_split(tmp_path: Path) -> None:
@@ -508,6 +664,49 @@ def test_tracker_close_failure_does_not_invalidate_completed_training(
     assert (result.run_directory.path / "run.json").is_file()
 
 
+def test_run_training_fit_failure_is_not_masked_by_a_flush_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test: trainer.fit() failing must surface as the run's own exception even if
+    store.flush() (called unconditionally in the finally block) also fails — previously the flush
+    error, not fit()'s original one, was what the caller ended up seeing."""
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    store = DirectoryFeatureStore(tmp_path / "features")
+    _precompute(manifest_path, store)
+
+    def _failing_fit(self: object, *args: object, **kwargs: object) -> None:
+        raise RuntimeError("trainer fit failed")
+
+    def _failing_flush() -> None:
+        raise OSError("store flush failed")
+
+    monkeypatch.setattr(training_service.Trainer, "fit", _failing_fit)
+    monkeypatch.setattr(store, "flush", _failing_flush)
+
+    config = _base_config(tmp_path, manifest_path, run_id="fit-and-flush-fail-run")
+    with pytest.raises(RuntimeError, match="trainer fit failed"):
+        run_training(config, store=store)
+
+
+def test_run_training_flush_failure_propagates_when_fit_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A store.flush() failure is still a real error the caller must see when nothing else went
+    wrong — only a failure already propagating from trainer.fit() should suppress it."""
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    store = DirectoryFeatureStore(tmp_path / "features")
+    _precompute(manifest_path, store)
+
+    def _failing_flush() -> None:
+        raise OSError("store flush failed")
+
+    monkeypatch.setattr(store, "flush", _failing_flush)
+
+    config = _base_config(tmp_path, manifest_path, run_id="flush-fail-only-run")
+    with pytest.raises(OSError, match="store flush failed"):
+        run_training(config, store=store)
+
+
 def test_run_training_with_no_tracking_backends(tmp_path: Path) -> None:
     manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
     store = DirectoryFeatureStore(tmp_path / "features")
@@ -517,3 +716,285 @@ def test_run_training_with_no_tracking_backends(tmp_path: Path) -> None:
     result = run_training(config, store=store)
 
     assert result.final_train_state["epoch"] == 1
+
+
+def _build_manifest_with_varying_native_sizes(tmp_path: Path) -> Path:
+    """Write a manifest where each sample's own image/mask match, but sizes vary across samples.
+
+    ``build_manifest`` only supports one uniform ``image_size`` for every row (or a single sample
+    whose *mask alone* mismatches its own image — a shape albumentations rejects outright, even
+    before any resize runs, since it requires an image and its own mask to already agree). Neither
+    shape reproduces the real failure mode: different samples natively sized differently, each
+    internally consistent — the actual shape a raw agricultural dataset can have.
+    """
+    lines = ["sample_id,image_path,mask_path,field_id"]
+    for index, size in enumerate([(8, 8), (8, 8), (8, 8), (8, 8), (10, 9), (8, 8)]):
+        sample_id = f"sample-{index}"
+        image_path, mask_path = f"{sample_id}_image.png", f"{sample_id}_mask.png"
+        lines.append(f"{sample_id},{image_path},{mask_path},field-a")
+        Image.fromarray(np.zeros((size[1], size[0], 3), dtype=np.uint8)).save(tmp_path / image_path)
+        Image.fromarray(np.zeros((size[1], size[0]), dtype=np.uint8)).save(tmp_path / mask_path)
+    manifest_path = tmp_path / "manifest.csv"
+    manifest_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return manifest_path
+
+
+def test_run_training_mode_none_with_non_uniform_native_sizes_requires_resize(tmp_path: Path) -> None:
+    """Without geometric.resize, augmentation.mode: none collates a non-uniform-size dataset's
+    training batches straight from disk and fails — see
+    test_run_training_mode_none_applies_configured_resize for confirmation that setting one now
+    fixes this without switching mode."""
+    manifest_path = _build_manifest_with_varying_native_sizes(tmp_path)
+    store = DirectoryFeatureStore(tmp_path / "features")
+
+    config = _base_config(tmp_path, manifest_path, run_id="nonuniform-none-run", feature_provider="online")
+    assert config.augmentation.mode is AugmentationMode.NONE
+    assert config.augmentation.geometric.resize is None
+
+    with pytest.raises(RuntimeError, match="stack expects each tensor to be equal size"):
+        run_training(config, store=store)
+
+
+def test_run_training_mode_none_applies_configured_resize(tmp_path: Path) -> None:
+    """geometric.resize now applies even under augmentation.mode: none (dimensional normalization,
+    not real augmentation — see _build_train_batches), fixing the collate crash above without
+    switching mode. Critically, this must not disturb the "none" augmentation fingerprint a feature
+    cache built with no --augmentation-config is keyed under, or every cached lookup would miss —
+    this exercises exactly that: a feature_provider: cached run against a store precomputed under
+    the default (mode: none) fingerprint, on a dataset with non-uniform native mask sizes."""
+    manifest_path = _build_manifest_with_varying_native_sizes(tmp_path)
+    store = DirectoryFeatureStore(tmp_path / "features")
+    _precompute(manifest_path, store)
+
+    config = _base_config(
+        tmp_path,
+        manifest_path,
+        run_id="mode-none-with-resize-run",
+        augmentation=AugmentationSelection(mode=AugmentationMode.NONE, geometric=GeometricConfig(resize=(8, 8))),
+    )
+    result = run_training(config, store=store)
+
+    assert result.final_train_state["epoch"] == 1
+
+
+# --- feature_preload / feature_preload_dtype / shuffle ------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"feature_preload": "gpu"}, "unsupported feature_preload: 'gpu'"),
+        ({"feature_preload": "host", "feature_preload_dtype": "int8"}, "unsupported feature_preload_dtype: 'int8'"),
+        ({"feature_preload_dtype": "float16"}, "has no effect with feature_preload='none'"),
+        ({"shuffle": True}, "shuffle=true requires feature_preload"),
+        ({"feature_preload": "host", "feature_provider": "online"}, "requires feature_provider 'cached'"),
+        ({"feature_preload": "host", "feature_provider": "hybrid"}, "requires feature_provider 'cached'"),
+        ({"feature_preload": "device", "device": "cpu"}, "feature_preload='device' requires a CUDA device"),
+    ],
+)
+def test_run_training_rejects_invalid_preload_config(
+    tmp_path: Path, overrides: dict[str, object], message: str
+) -> None:
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    config = _base_config(tmp_path, manifest_path, run_id="invalid-preload-run", **overrides)
+
+    with pytest.raises(ValueError, match=message):
+        run_training(config, store=DirectoryFeatureStore(tmp_path / "features"))
+
+
+def _decoder_state(result: training_service.TrainingRunResult) -> dict[str, torch.Tensor]:
+    payload = torch.load(result.run_directory.checkpoints_dir / "last.ckpt", map_location="cpu", weights_only=False)
+    return payload["decoder_state"]
+
+
+def _assert_same_training(
+    first: training_service.TrainingRunResult, second: training_service.TrainingRunResult
+) -> None:
+    assert first.final_train_state == second.final_train_state
+    assert first.val_metrics == pytest.approx(second.val_metrics)
+    assert first.train_metrics == pytest.approx(second.train_metrics)
+    first_state, second_state = _decoder_state(first), _decoder_state(second)
+    assert first_state.keys() == second_state.keys()
+    for name in first_state:
+        torch.testing.assert_close(first_state[name], second_state[name])
+
+
+@pytest.mark.parametrize("store_type", ["directory", "sharded"])
+def test_host_preload_trains_identically_to_reading_the_store_every_epoch(tmp_path: Path, store_type: str) -> None:
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    store = (
+        DirectoryFeatureStore(tmp_path / "features")
+        if store_type == "directory"
+        else ShardedFeatureStore(tmp_path / "features", entries_per_shard=2)
+    )
+    _precompute(manifest_path, store)
+    store.flush()
+    common = {"store_type": store_type, "entries_per_shard": 2, "trainer": TrainerConfig(max_epochs=3)}
+
+    streamed = run_training(_base_config(tmp_path, manifest_path, run_id="streamed", **common), store=store)
+    preloaded = run_training(
+        _base_config(tmp_path, manifest_path, run_id="preloaded", feature_preload="host", **common),
+        store=store,
+        show_progress=True,
+    )
+
+    _assert_same_training(streamed, preloaded)
+
+
+def test_host_preload_with_offline_augmentation_reads_the_augmented_cache(tmp_path: Path) -> None:
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    store = DirectoryFeatureStore(tmp_path / "features")
+    geometric = GeometricConfig(horizontal_flip_probability=0.5)
+    augmentation = AugmentationSelection(mode=AugmentationMode.OFFLINE, geometric=geometric)
+    asyncio.run(
+        build_features(
+            str(manifest_path),
+            store=store,
+            encoder=FakeEncoderBackend(),
+            encoder_fingerprint=_FINGERPRINT,
+            augmentation_mode=AugmentationMode.OFFLINE,
+            augmentation_pipeline=ImageAugmentationPipeline(AugmentationPipelineConfig(geometric=geometric)),
+        )
+    )
+    common = {"augmentation": augmentation, "trainer": TrainerConfig(max_epochs=2)}
+
+    streamed = run_training(_base_config(tmp_path, manifest_path, run_id="offline-streamed", **common), store=store)
+    preloaded = run_training(
+        _base_config(tmp_path, manifest_path, run_id="offline-preloaded", feature_preload="host", **common),
+        store=store,
+    )
+
+    _assert_same_training(streamed, preloaded)
+
+
+def test_float16_preload_trains_and_is_recorded_in_the_config_fingerprint(tmp_path: Path) -> None:
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    store = DirectoryFeatureStore(tmp_path / "features")
+    _precompute(manifest_path, store)
+
+    result = run_training(
+        _base_config(
+            tmp_path, manifest_path, run_id="fp16-preload", feature_preload="host", feature_preload_dtype="float16"
+        ),
+        store=store,
+    )
+
+    assert result.final_train_state["epoch"] == 1
+    assert "mean_iou" in result.val_metrics
+    fp16_fingerprint = training_service._critical_config(
+        _base_config(tmp_path, manifest_path, run_id="x", feature_preload="host", feature_preload_dtype="float16")
+    )
+    assert fp16_fingerprint["feature_preload_dtype"] == "float16"
+
+
+def test_preload_defaults_leave_the_critical_config_unchanged(tmp_path: Path) -> None:
+    """Runs that predate feature_preload/shuffle must keep their config fingerprint, or strict resume breaks."""
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    default = training_service._critical_config(_base_config(tmp_path, manifest_path, run_id="x"))
+    host_preload = training_service._critical_config(
+        _base_config(tmp_path, manifest_path, run_id="x", feature_preload="host")
+    )
+
+    assert "feature_preload_dtype" not in default
+    assert "shuffle" not in default
+    assert "feature_preload" not in default
+    # Where features live is a performance choice; it must not change the fingerprint either.
+    assert host_preload == default
+
+
+def test_shuffle_is_recorded_in_the_config_fingerprint(tmp_path: Path) -> None:
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+
+    critical = training_service._critical_config(
+        _base_config(tmp_path, manifest_path, run_id="x", feature_preload="host", shuffle=True)
+    )
+
+    assert critical["shuffle"] is True
+
+
+def test_shuffled_run_resumed_mid_training_matches_an_uninterrupted_run(tmp_path: Path) -> None:
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    store = DirectoryFeatureStore(tmp_path / "features")
+    _precompute(manifest_path, store)
+    common = {"feature_preload": "host", "shuffle": True, "batch_size": 1}
+
+    uninterrupted = run_training(
+        _base_config(tmp_path, manifest_path, run_id="shuffle-straight", trainer=TrainerConfig(max_epochs=3), **common),
+        store=store,
+    )
+    run_training(
+        _base_config(tmp_path, manifest_path, run_id="shuffle-resumed", trainer=TrainerConfig(max_epochs=1), **common),
+        store=store,
+    )
+    resumed = run_training(
+        _base_config(tmp_path, manifest_path, run_id="shuffle-resumed", trainer=TrainerConfig(max_epochs=3), **common),
+        store=store,
+    )
+
+    _assert_same_training(uninterrupted, resumed)
+
+
+def test_shuffle_changes_the_training_trajectory(tmp_path: Path) -> None:
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    store = DirectoryFeatureStore(tmp_path / "features")
+    _precompute(manifest_path, store)
+    common = {"feature_preload": "host", "batch_size": 1, "trainer": TrainerConfig(max_epochs=2)}
+
+    ordered = run_training(_base_config(tmp_path, manifest_path, run_id="ordered", **common), store=store)
+    shuffled = run_training(
+        _base_config(tmp_path, manifest_path, run_id="shuffled", shuffle=True, **common), store=store
+    )
+
+    ordered_state, shuffled_state = _decoder_state(ordered), _decoder_state(shuffled)
+    assert any(not torch.equal(ordered_state[name], shuffled_state[name]) for name in ordered_state)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA-enabled machine")
+@pytest.mark.parametrize("preload", ["host", "device"])
+def test_cuda_preload_matches_cpu_streamed_training(tmp_path: Path, preload: str) -> None:
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    store = DirectoryFeatureStore(tmp_path / "features")
+    _precompute(manifest_path, store)
+    common = {"trainer": TrainerConfig(max_epochs=2)}
+
+    on_cpu = run_training(_base_config(tmp_path, manifest_path, run_id="cpu-streamed", **common), store=store)
+    on_gpu = run_training(
+        _base_config(
+            tmp_path, manifest_path, run_id=f"gpu-{preload}", device="cuda", feature_preload=preload, **common
+        ),
+        store=store,
+    )
+
+    assert on_gpu.final_train_state == on_cpu.final_train_state
+    assert on_gpu.val_metrics["mean_iou"] == pytest.approx(on_cpu.val_metrics["mean_iou"], abs=1e-4)
+    cpu_state, gpu_state = _decoder_state(on_cpu), _decoder_state(on_gpu)
+    for name in cpu_state:
+        torch.testing.assert_close(gpu_state[name], cpu_state[name], rtol=1e-4, atol=1e-5)
+
+
+def test_mode_none_with_resize_builds_the_decoder_at_the_resized_target_size(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: under mode none the decoder was built at the native mask size (so it upsampled
+    to it, and the loss/metric resized every batch back down to the resized targets)."""
+    manifest_path = _build_manifest_with_varying_native_sizes(tmp_path)
+    store = DirectoryFeatureStore(tmp_path / "features")
+    _precompute(manifest_path, store)
+    built_sizes: list[tuple[int, int]] = []
+    original_build = training_service.build_decoder
+
+    def recording_build(name: str, **kwargs: Any) -> torch.nn.Module:
+        built_sizes.append(kwargs["output_size"])
+        return original_build(name, **kwargs)
+
+    monkeypatch.setattr(training_service, "build_decoder", recording_build)
+    config = _base_config(
+        tmp_path,
+        manifest_path,
+        run_id="mode-none-output-size-run",
+        augmentation=AugmentationSelection(mode=AugmentationMode.NONE, geometric=GeometricConfig(resize=(10, 6))),
+    )
+
+    run_training(config, store=store)
+
+    assert built_sizes == [(6, 10)]  # (height, width) of a (width=10, height=6) resize

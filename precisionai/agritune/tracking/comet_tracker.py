@@ -3,7 +3,7 @@
 
 """``CometTracker`` — an optional Comet ML tracking backend.
 
-Requires the ``comet_ml`` package (``pip install pai-agritune[tracking]``); never required to run
+Requires the ``comet_ml`` package (``pip install precisionai-agritune[tracking]``); never required to run
 AgriTune otherwise.
 
 Unlike the other optional trackers, ``comet_ml`` is deliberately **not** imported at module level
@@ -16,7 +16,7 @@ experiment, regardless of whether any code ever constructs a Comet ``Experiment`
 build its backend registry, an eager top-level import here would inject an uninvited Comet
 experiment into every run that selects a *different* backend (e.g. ``"mlflow"``) whenever
 ``comet_ml`` merely happens to be installed alongside it — which it always is, since both ship in
-the same ``pai-agritune[tracking]`` extra. The import is therefore deferred to the first
+the same ``precisionai-agritune[tracking]`` extra. The import is therefore deferred to the first
 :class:`CometTracker` construction, so it only happens when a caller actually asks for Comet.
 """
 
@@ -67,7 +67,9 @@ class CometTracker:
     def __init__(self, *, project_name: str, api_key: str | None = None, workspace: str | None = None) -> None:
         _ensure_comet_imported()
         if not _COMET_AVAILABLE:
-            raise ImportError("comet_ml is required for CometTracker: pip install pai-agritune[tracking]") from None
+            raise ImportError(
+                "comet_ml is required for CometTracker: pip install precisionai-agritune[tracking]"
+            ) from None
         self._experiment = comet_ml.Experiment(project_name=project_name, api_key=api_key, workspace=workspace)
 
     def log_metrics(self, metrics: dict[str, float], *, step: int) -> None:

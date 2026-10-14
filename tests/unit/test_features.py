@@ -4,6 +4,7 @@
 """Unit tests for precisionai.agritune.schemas.features.EncoderFeatures."""
 
 from dataclasses import replace
+from typing import Any
 
 import pytest
 import torch
@@ -462,3 +463,122 @@ def test_select_one_handles_no_cls_tokens() -> None:
     batch = _make_features(batch_size=2, cls_dim=None)
     selected = select_one(batch, 0)
     assert selected.cls_tokens is None
+
+
+def test_to_moves_patch_tokens_patch_grid_and_cls_tokens() -> None:
+    features = _make_features(cls_dim=5)
+    moved = features.to("cpu")
+    assert moved.patch_tokens.device == torch.device("cpu")
+    assert moved.patch_grid.device == torch.device("cpu")
+    assert moved.cls_tokens is not None
+    assert moved.cls_tokens.device == torch.device("cpu")
+
+
+def test_to_leaves_cls_tokens_none_when_absent() -> None:
+    features = _make_features(cls_dim=None)
+    moved = features.to("cpu")
+    assert moved.cls_tokens is None
+
+
+def test_to_moves_valid_patch_mask_when_present() -> None:
+    mask = torch.tensor([[True, True, True, True, True, True], [True, True, True, True, False, False]])
+    features = _make_features(num_patches=6, patch_grid=[(2, 3), (2, 2)], valid_patch_mask=mask)
+    moved = features.to("cpu")
+    assert moved.valid_patch_mask is not None
+    assert moved.valid_patch_mask.device == torch.device("cpu")
+
+
+def test_to_leaves_valid_patch_mask_none_when_absent() -> None:
+    features = _make_features(valid_patch_mask=None)
+    moved = features.to("cpu")
+    assert moved.valid_patch_mask is None
+
+
+def test_to_preserves_values_and_non_tensor_fields() -> None:
+    features = _make_features()
+    moved = features.to("cpu")
+    assert torch.equal(moved.patch_tokens, features.patch_tokens)
+    assert moved.image_sizes == features.image_sizes
+    assert moved.encoder_model == features.encoder_model
+    assert moved.encoder_revision == features.encoder_revision
+    assert moved.metadata == features.metadata
+
+
+def test_to_accepts_a_torch_device_object() -> None:
+    features = _make_features()
+    moved = features.to(torch.device("cpu"))
+    assert moved.patch_tokens.device == torch.device("cpu")
+
+
+def _trusted_kwargs(**overrides: Any) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "patch_tokens": torch.randn(2, 4, 3),
+        "cls_tokens": torch.randn(2, 5),
+        "patch_grid": torch.tensor([[2, 2], [2, 2]]),
+        "valid_patch_mask": None,
+        "image_sizes": [(28, 28), (28, 28)],
+        "encoder_model": "pai-embedding",
+        "encoder_revision": "r1",
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
+def _assert_same_features(actual: EncoderFeatures, expected: EncoderFeatures) -> None:
+    # The dataclass-generated __eq__ cannot compare tensor fields: before Python 3.13 it only passed
+    # when both sides held the very same tensor objects (tuple comparison short-circuits on identity),
+    # and 3.13 compares field by field and raises on the first multi-element tensor.
+    assert torch.equal(actual.patch_tokens, expected.patch_tokens)
+    assert actual.cls_tokens is not None
+    assert expected.cls_tokens is not None
+    assert torch.equal(actual.cls_tokens, expected.cls_tokens)
+    assert torch.equal(actual.patch_grid, expected.patch_grid)
+    assert actual.valid_patch_mask is None
+    assert expected.valid_patch_mask is None
+    assert actual.image_sizes == expected.image_sizes
+    assert actual.encoder_model == expected.encoder_model
+    assert actual.encoder_revision == expected.encoder_revision
+    assert actual.metadata == expected.metadata
+
+
+def test_trusted_builds_an_equivalent_instance_to_the_validating_constructor() -> None:
+    kwargs = _trusted_kwargs()
+
+    trusted = EncoderFeatures.trusted(**kwargs)
+    checked = EncoderFeatures(**kwargs)
+
+    _assert_same_features(trusted, checked)
+    assert trusted.metadata == {}
+
+
+def test_trusted_keeps_given_metadata() -> None:
+    trusted = EncoderFeatures.trusted(**_trusted_kwargs(), metadata={"farm": "f1"})
+
+    assert trusted.metadata == {"farm": "f1"}
+
+
+def test_trusted_skips_validation_that_the_constructor_enforces() -> None:
+    kwargs = _trusted_kwargs(patch_tokens=torch.full((2, 4, 3), float("nan")))
+
+    with pytest.raises(ValueError, match="finite"):
+        EncoderFeatures(**kwargs)
+    assert torch.isnan(EncoderFeatures.trusted(**kwargs).patch_tokens).all()
+
+
+def test_to_does_not_rerun_validation(monkeypatch: pytest.MonkeyPatch) -> None:
+    features = EncoderFeatures(**_trusted_kwargs(metadata={"k": "v"}))
+    calls: list[int] = []
+    monkeypatch.setattr(EncoderFeatures, "__post_init__", lambda self: calls.append(1))
+
+    moved = features.to("cpu")
+
+    assert calls == []
+    _assert_same_features(moved, features)
+    assert moved.metadata == {"k": "v"}
+
+
+def test_uniform_patch_grid_reads_the_grid_in_one_transfer(monkeypatch: pytest.MonkeyPatch) -> None:
+    features = EncoderFeatures(**_trusted_kwargs(patch_grid=torch.tensor([[2, 2], [2, 2]])))
+    monkeypatch.setattr(EncoderFeatures, "patch_grid_hw", lambda self, index: pytest.fail("per-sample read"))
+
+    assert features.uniform_patch_grid() == (2, 2)

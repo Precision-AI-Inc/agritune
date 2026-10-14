@@ -58,6 +58,23 @@ def _add_encoder_selection_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_store_type_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--store-type",
+        default="directory",
+        choices=["directory", "sharded"],
+        help="Feature store implementation --store holds: 'directory' (development scale, one file "
+        "per sample) or 'sharded' (production scale, many samples packed per shard file). Must "
+        "match whatever the store was actually built as (default: directory).",
+    )
+    parser.add_argument(
+        "--entries-per-shard",
+        type=int,
+        default=1000,
+        help="Samples packed per shard file; only consulted when --store-type=sharded (default: 1000).",
+    )
+
+
 def _build_config_parser(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser("config", help="Generate and inspect training run config files.")
     config_subparsers = parser.add_subparsers(dest="subcommand", required=True)
@@ -111,20 +128,45 @@ def _build_features_parser(subparsers: argparse._SubParsersAction) -> None:
         help="Global seed offline augmentation derives each sample's seed from — must match the "
         "training config's top-level seed (only consulted when --augmentation-config sets mode: offline).",
     )
+    _add_store_type_arguments(build)
     _add_encoder_selection_arguments(build)
     build.set_defaults(handler=handlers.features_build)
 
     verify = features_subparsers.add_parser("verify", help="Verify feature store integrity.")
     verify.add_argument("--store", required=True, help="Directory the feature store was built in.")
+    _add_store_type_arguments(verify)
     verify.set_defaults(handler=handlers.features_verify)
 
     inspect = features_subparsers.add_parser("inspect", help="Report feature store statistics.")
     inspect.add_argument("--store", required=True, help="Directory the feature store was built in.")
+    _add_store_type_arguments(inspect)
     inspect.set_defaults(handler=handlers.features_inspect)
 
     clean = features_subparsers.add_parser("clean", help="Remove stale or orphaned feature shards.")
     clean.add_argument("--store", required=True, help="Directory the feature store was built in.")
+    _add_store_type_arguments(clean)
     clean.set_defaults(handler=handlers.features_clean)
+
+    migrate = features_subparsers.add_parser(
+        "migrate", help="Copy every entry from one feature store into another (e.g. directory -> sharded)."
+    )
+    migrate.add_argument("--source", required=True, help="Directory the source feature store was built in.")
+    migrate.add_argument(
+        "--source-type", default="directory", choices=["directory", "sharded"], help="Source store implementation."
+    )
+    migrate.add_argument(
+        "--dest", required=True, help="Directory the destination feature store is (or will be) built in."
+    )
+    migrate.add_argument(
+        "--dest-type", default="sharded", choices=["directory", "sharded"], help="Destination store implementation."
+    )
+    migrate.add_argument(
+        "--dest-entries-per-shard",
+        type=int,
+        default=1000,
+        help="Samples packed per shard file; only consulted when --dest-type=sharded (default: 1000).",
+    )
+    migrate.set_defaults(handler=handlers.features_migrate)
 
 
 def _build_train_parser(subparsers: argparse._SubParsersAction) -> None:
@@ -137,6 +179,7 @@ def _build_train_parser(subparsers: argparse._SubParsersAction) -> None:
 def _add_scored_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--manifest", required=True, help="Path to the dataset manifest file.")
     parser.add_argument("--store", required=True, help="Directory the feature store was built in.")
+    _add_store_type_arguments(parser)
     parser.add_argument("--checkpoint", required=True, help="Path to a checkpoint (e.g. last.ckpt/best.ckpt).")
     parser.add_argument("--num-classes", type=int, required=True, help="Number of segmentation classes.")
     parser.add_argument(
@@ -144,6 +187,13 @@ def _add_scored_run_arguments(parser: argparse.ArgumentParser) -> None:
         default="mlp_probe",
         choices=["mlp_probe", "token_fpn", "aspp", "ppm", "segmenter", "mask_former"],
         help="Decoder architecture.",
+    )
+    parser.add_argument(
+        "--decoder-kwargs",
+        default="{}",
+        help="JSON object of extra decoder constructor kwargs — must match the training run's "
+        'decoder_kwargs exactly (see its config.resolved.yaml), e.g. \'{"cls_fusion": "film"}\' '
+        "for token_fpn, or the checkpoint's state dict will not load.",
     )
     parser.add_argument("--batch-size", type=int, default=4, help="Batch size.")
     parser.add_argument(
@@ -160,6 +210,23 @@ def _add_scored_run_arguments(parser: argparse.ArgumentParser) -> None:
         help="Encoder revision the feature store was built with (default: the fake encoder's).",
     )
     parser.add_argument("--preprocessing", default="", help="Preprocessing label used when the store was built.")
+    parser.add_argument(
+        "--resize",
+        type=int,
+        nargs=2,
+        default=None,
+        metavar=("WIDTH", "HEIGHT"),
+        help="Deterministically resize every image/mask to this size before batching — must match "
+        "the checkpoint's training run (its augmentation.geometric.resize). Required whenever the "
+        "dataset's images/masks do not already share one native size.",
+    )
+    parser.add_argument(
+        "--device",
+        default="cpu",
+        help="Where the decoder and every batch's features/targets are moved before running — "
+        "'cpu' (default), 'cuda', or a specific GPU like 'cuda:3'. Independent of whatever device "
+        "the checkpoint was trained under.",
+    )
 
 
 def _build_evaluate_parser(subparsers: argparse._SubParsersAction) -> None:
@@ -181,6 +248,24 @@ def _build_evaluate_parser(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument(
         "--loss-dice-weight", type=float, default=1.0, help="Weight of the Dice term in a combined loss."
     )
+    parser.add_argument(
+        "--augmentation-config",
+        default=None,
+        help="Path to a YAML file shaped like configs/augmentation/{none,offline}.yaml; omit to evaluate "
+        "on each sample's native, unaugmented (optionally --resize'd) image (the default). Set this — "
+        "pointed at the exact same file the training run's augmentation: block used — whenever that run "
+        "used 'augmentation.mode: offline' with a random_crop: a decoder trained only on small fixed-size "
+        "crops has no spatial context beyond a single patch and generalizes poorly to a much larger, "
+        "differently-shaped native patch grid it never saw in training, which shows up as "
+        "content-independent prediction artifacts, not just lower accuracy.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="Global seed offline augmentation derives each sample's seed from — must match the "
+        "training run's top-level seed (only consulted when --augmentation-config sets mode: offline).",
+    )
     parser.set_defaults(handler=handlers.evaluate)
 
 
@@ -192,6 +277,24 @@ def _build_predict_parser(subparsers: argparse._SubParsersAction) -> None:
         "--overlays", action="store_true", help="Also write a {sample_id}_overlay.png visualization per sample."
     )
     parser.add_argument("--overlay-alpha", type=float, default=0.5, help="Overlay opacity in [0, 1] (default: 0.5).")
+    parser.add_argument(
+        "--augmentation-config",
+        default=None,
+        help="Path to a YAML file shaped like configs/augmentation/{none,offline}.yaml; omit to predict "
+        "on each sample's native, unaugmented (optionally --resize'd) image (the default). Set this — "
+        "pointed at the exact same file the training run's augmentation: block used — whenever that run "
+        "used 'augmentation.mode: offline' with a random_crop: a decoder trained only on small fixed-size "
+        "crops has no spatial context beyond a single patch and generalizes poorly to a much larger, "
+        "differently-shaped native patch grid it never saw in training, which shows up as "
+        "content-independent prediction artifacts, not just lower accuracy.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="Global seed offline augmentation derives each sample's seed from — must match the "
+        "training run's top-level seed (only consulted when --augmentation-config sets mode: offline).",
+    )
     parser.set_defaults(handler=handlers.predict)
 
 

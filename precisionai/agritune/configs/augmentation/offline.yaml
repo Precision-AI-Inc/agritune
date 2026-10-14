@@ -4,6 +4,7 @@
 mode: offline
 variant: 0
 geometric:
+  resize: [798, 532]
   horizontal_flip_probability: 0.5
   rotation_max_degrees: 10.0
 photometric:

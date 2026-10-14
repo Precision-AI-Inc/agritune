@@ -6,17 +6,17 @@
 patch tokens -> stack of per-patch linear (+ ReLU) layers -> per-patch class logits -> reshape via
 patch_grid -> upsample. With ``hidden_dims=()`` (the default) this is architecturally identical to
 the former ``LinearProbeDecoder`` — a single linear projection and nothing else — so it still
-serves as the diagnostic baseline described in ``agritune_implementation_plan.md`` §11: if a more
-complex decoder does not beat it, something upstream is wrong.
+serves as the diagnostic baseline: if a more complex decoder does not beat it, something upstream
+is wrong.
 """
 
 from collections.abc import Sequence
 
 import torch
 from torch import nn
-from torch.nn import functional
 
 from precisionai.agritune.schemas.features import EncoderFeatures
+from precisionai.agritune.tasks.segmentation.upsample import bilinear_resize
 
 
 class MLPProbeDecoder(nn.Module):
@@ -71,4 +71,4 @@ class MLPProbeDecoder(nn.Module):
         height, width = features.uniform_patch_grid()
         logits = self.mlp(features.patch_tokens)  # (B, N, num_classes)
         logits = logits.reshape(features.batch_size, height, width, -1).permute(0, 3, 1, 2)
-        return functional.interpolate(logits, size=self.output_size, mode="bilinear", align_corners=False)
+        return bilinear_resize(logits, self.output_size)

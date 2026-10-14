@@ -7,15 +7,23 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
 from PIL import Image
 
+from precisionai.agritune.augmentations.image.pipeline import (
+    AugmentationMode,
+    AugmentationPipelineConfig,
+    GeometricConfig,
+    ImageAugmentationPipeline,
+)
 from precisionai.agritune.encoder.fake import FakeEncoderBackend, FakeEncoderConfig
+from precisionai.agritune.features.errors import FeatureNotCachedError
 from precisionai.agritune.features.keys import EncoderFingerprint
 from precisionai.agritune.features.store import DirectoryFeatureStore
 from precisionai.agritune.optimization.optimizers import OptimizerConfig
 from precisionai.agritune.services.feature_service import build_features
 from precisionai.agritune.services.prediction_service import PredictionRunConfig, run_prediction
-from precisionai.agritune.services.training_service import TrainingRunConfig, run_training
+from precisionai.agritune.services.training_service import AugmentationSelection, TrainingRunConfig, run_training
 from precisionai.agritune.training.trainer import TrainerConfig
 from tests.fixtures.manifest_factory import build_manifest
 
@@ -50,6 +58,73 @@ async def _train_a_checkpoint(tmp_path: Path) -> tuple[Path, Path]:
     )
     result = run_training(config, store=store)
     return manifest_path, result.run_directory.checkpoints_dir / "last.ckpt"
+
+
+async def _train_a_checkpoint_with_resize(tmp_path: Path, *, resize: tuple[int, int]) -> tuple[Path, Path]:
+    """Like ``_train_a_checkpoint``, but trained under ``augmentation.mode: none`` with
+    ``geometric.resize`` set — so the checkpoint's decoder is sized for ``resize``, not the
+    dataset's native 8x8 image/mask size."""
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    store = DirectoryFeatureStore(tmp_path / "features")
+    encoder = FakeEncoderBackend(FakeEncoderConfig(patch_dim=8, cls_dim=None, patch_grid=(2, 2)))
+    await build_features(str(manifest_path), store=store, encoder=encoder, encoder_fingerprint=_FINGERPRINT)
+
+    config = TrainingRunConfig(
+        manifest_path=str(manifest_path),
+        feature_store_dir=str(tmp_path / "features"),
+        run_root=str(tmp_path / "runs"),
+        run_id="predict-resize-fixture-run",
+        num_classes=2,
+        encoder_fingerprint=_FINGERPRINT,
+        batch_size=2,
+        val_fraction=0.34,
+        optimizer=OptimizerConfig(name="adamw", lr=0.05),
+        trainer=TrainerConfig(max_epochs=1),
+        augmentation=AugmentationSelection(mode=AugmentationMode.NONE, geometric=GeometricConfig(resize=resize)),
+    )
+    result = run_training(config, store=store)
+    return manifest_path, result.run_directory.checkpoints_dir / "last.ckpt"
+
+
+async def test_run_prediction_without_resize_mismatches_a_checkpoint_trained_with_one(tmp_path: Path) -> None:
+    """Regression test: PredictionRunConfig previously had no resize field at all, so predicting
+    against a checkpoint trained with augmentation.geometric.resize (dimensional normalization
+    under mode: none) probed output_size from the dataset's native mask shape instead — silently
+    building a decoder that upsamples to the wrong resolution, with no error at all."""
+    manifest_path, checkpoint_path = await _train_a_checkpoint_with_resize(tmp_path, resize=(4, 4))
+    store = DirectoryFeatureStore(tmp_path / "features")
+    output_dir = tmp_path / "predictions"
+
+    config = PredictionRunConfig(
+        manifest_path=str(manifest_path),
+        checkpoint_path=str(checkpoint_path),
+        output_dir=str(output_dir),
+        num_classes=2,
+        encoder_fingerprint=_FINGERPRINT,
+    )
+    written = run_prediction(config, store=store)
+
+    array = np.array(Image.open(written[0]))
+    assert array.shape == (8, 8)  # wrong: the dataset's native size, not the trained (4, 4) one
+
+
+async def test_run_prediction_resize_matches_the_checkpoints_trained_resolution(tmp_path: Path) -> None:
+    manifest_path, checkpoint_path = await _train_a_checkpoint_with_resize(tmp_path, resize=(4, 4))
+    store = DirectoryFeatureStore(tmp_path / "features")
+    output_dir = tmp_path / "predictions"
+
+    config = PredictionRunConfig(
+        manifest_path=str(manifest_path),
+        checkpoint_path=str(checkpoint_path),
+        output_dir=str(output_dir),
+        num_classes=2,
+        encoder_fingerprint=_FINGERPRINT,
+        resize=(4, 4),
+    )
+    written = run_prediction(config, store=store)
+
+    array = np.array(Image.open(written[0]))
+    assert array.shape == (4, 4)  # matches the trained resolution
 
 
 async def test_run_prediction_writes_one_png_per_sample(tmp_path: Path) -> None:
@@ -147,6 +222,69 @@ async def test_run_prediction_omits_overlays_by_default(tmp_path: Path) -> None:
     assert not (output_dir / "sample-0_overlay.png").exists()
 
 
+async def test_run_prediction_offline_mode_requires_matching_augmented_cache(tmp_path: Path) -> None:
+    """A checkpoint trained on offline-augmented features must not silently fall back to native
+    (unaugmented) cached features at predict time — see prediction_service's augmentation_mode."""
+    manifest_path, checkpoint_path = await _train_a_checkpoint(tmp_path)
+    store = DirectoryFeatureStore(tmp_path / "features")
+    pipeline = ImageAugmentationPipeline(AugmentationPipelineConfig(geometric=GeometricConfig(resize=(4, 4))))
+
+    config = PredictionRunConfig(
+        manifest_path=str(manifest_path),
+        checkpoint_path=str(checkpoint_path),
+        output_dir=str(tmp_path / "predictions"),
+        num_classes=2,
+        encoder_fingerprint=_FINGERPRINT,
+        sample_ids=["sample-0"],
+        augmentation_mode=AugmentationMode.OFFLINE,
+        augmentation_pipeline=pipeline,
+    )
+    with pytest.raises(FeatureNotCachedError):
+        run_prediction(config, store=store)
+
+
+async def test_run_prediction_offline_mode_reads_matching_augmented_cache(tmp_path: Path) -> None:
+    manifest_path, checkpoint_path = await _train_a_checkpoint(tmp_path)
+    store = DirectoryFeatureStore(tmp_path / "features")
+    encoder = FakeEncoderBackend(FakeEncoderConfig(patch_dim=8, cls_dim=None, patch_grid=(2, 2)))
+    pipeline = ImageAugmentationPipeline(AugmentationPipelineConfig(geometric=GeometricConfig(resize=(4, 4))))
+    await build_features(
+        str(manifest_path),
+        store=store,
+        encoder=encoder,
+        encoder_fingerprint=_FINGERPRINT,
+        augmentation_mode=AugmentationMode.OFFLINE,
+        augmentation_pipeline=pipeline,
+    )
+
+    config = PredictionRunConfig(
+        manifest_path=str(manifest_path),
+        checkpoint_path=str(checkpoint_path),
+        output_dir=str(tmp_path / "predictions"),
+        num_classes=2,
+        encoder_fingerprint=_FINGERPRINT,
+        sample_ids=["sample-0"],
+        augmentation_mode=AugmentationMode.OFFLINE,
+        augmentation_pipeline=pipeline,
+    )
+    written = run_prediction(config, store=store)
+
+    array = np.array(Image.open(written[0]))
+    assert array.shape == (4, 4)  # the resized (offline) shape, not the 8x8 native one
+
+
+async def test_run_prediction_rejects_online_augmentation_mode(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="augmentation_mode"):
+        PredictionRunConfig(
+            manifest_path=str(tmp_path / "manifest.csv"),
+            checkpoint_path=str(tmp_path / "last.ckpt"),
+            output_dir=str(tmp_path / "predictions"),
+            num_classes=2,
+            encoder_fingerprint=_FINGERPRINT,
+            augmentation_mode=AugmentationMode.ONLINE,
+        )
+
+
 async def test_run_prediction_empty_sample_set_raises(tmp_path: Path) -> None:
     manifest_path, checkpoint_path = await _train_a_checkpoint(tmp_path)
     store = DirectoryFeatureStore(tmp_path / "features")
@@ -161,3 +299,51 @@ async def test_run_prediction_empty_sample_set_raises(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="no samples to predict"):
         run_prediction(config, store=store)
+
+
+def test_prediction_run_config_rejects_invalid_device() -> None:
+    with pytest.raises(ValueError, match="invalid device"):
+        PredictionRunConfig(
+            manifest_path="manifest.csv",
+            checkpoint_path="last.ckpt",
+            output_dir="predictions",
+            num_classes=2,
+            encoder_fingerprint=_FINGERPRINT,
+            device="not-a-real-device",
+        )
+
+
+@pytest.mark.skipif(torch.cuda.is_available(), reason="requires a CPU-only machine")
+def test_prediction_run_config_rejects_cuda_when_unavailable() -> None:
+    with pytest.raises(ValueError, match="requests CUDA"):
+        PredictionRunConfig(
+            manifest_path="manifest.csv",
+            checkpoint_path="last.ckpt",
+            output_dir="predictions",
+            num_classes=2,
+            encoder_fingerprint=_FINGERPRINT,
+            device="cuda:0",
+        )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA-enabled machine")
+async def test_run_prediction_moves_the_decoder_to_the_configured_cuda_device(tmp_path: Path) -> None:
+    """Regression test: prediction previously had no device field at all and always ran on CPU,
+    even when the checkpoint was trained on CUDA."""
+    manifest_path, checkpoint_path = await _train_a_checkpoint(tmp_path)
+    store = DirectoryFeatureStore(tmp_path / "features")
+    output_dir = tmp_path / "predictions"
+
+    config = PredictionRunConfig(
+        manifest_path=str(manifest_path),
+        checkpoint_path=str(checkpoint_path),
+        output_dir=str(output_dir),
+        num_classes=2,
+        encoder_fingerprint=_FINGERPRINT,
+        device="cuda:0",
+    )
+    written = run_prediction(config, store=store)
+
+    assert len(written) == 6
+    for path in written:
+        assert Path(path).is_file()

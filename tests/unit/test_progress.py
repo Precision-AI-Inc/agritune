@@ -82,9 +82,11 @@ def test_cli_train_enables_progress(monkeypatch: pytest.MonkeyPatch, tmp_path: P
     monkeypatch.setattr(
         handlers,
         "load_training_run_config",
-        lambda _config, _overrides: SimpleNamespace(feature_store_dir=str(tmp_path)),
+        lambda _config, _overrides: SimpleNamespace(
+            feature_store_dir=str(tmp_path), store_type="directory", entries_per_shard=1000
+        ),
     )
-    monkeypatch.setattr(handlers, "DirectoryFeatureStore", lambda _path: object())
+    monkeypatch.setattr(handlers, "build_feature_store", lambda *_args, **_kwargs: object())
     monkeypatch.setattr(handlers, "run_training", fake_run_training)
     exit_code = handlers.train(argparse.Namespace(config="train.yaml", overrides=[]))
     assert exit_code == 0
@@ -92,6 +94,7 @@ def test_cli_train_enables_progress(monkeypatch: pytest.MonkeyPatch, tmp_path: P
 
 
 def test_api_train_evaluate_and_predict_stay_headless(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("AGRITUNE_API_ROOT", str(tmp_path))
     seen: dict[str, bool] = {}
 
     def fake_run_training(_config: object, *, store: object, show_progress: bool = False) -> SimpleNamespace:
@@ -113,13 +116,19 @@ def test_api_train_evaluate_and_predict_stay_headless(monkeypatch: pytest.Monkey
 
     monkeypatch.setattr(
         "precisionai.agritune.api.routes.train.load_training_run_config",
-        lambda _path, _overrides: SimpleNamespace(feature_store_dir=str(tmp_path)),
+        lambda _path, _overrides: SimpleNamespace(
+            feature_store_dir=str(tmp_path), store_type="directory", entries_per_shard=1000
+        ),
     )
-    monkeypatch.setattr("precisionai.agritune.api.routes.train.DirectoryFeatureStore", lambda _path: object())
+    monkeypatch.setattr("precisionai.agritune.api.routes.train.build_feature_store", lambda *_args, **_kwargs: object())
     monkeypatch.setattr("precisionai.agritune.api.routes.train.run_training", fake_run_training)
-    monkeypatch.setattr("precisionai.agritune.api.routes.evaluate.DirectoryFeatureStore", lambda _path: object())
+    monkeypatch.setattr(
+        "precisionai.agritune.api.routes.evaluate.build_feature_store", lambda *_args, **_kwargs: object()
+    )
     monkeypatch.setattr("precisionai.agritune.api.routes.evaluate.run_evaluation", fake_run_evaluation)
-    monkeypatch.setattr("precisionai.agritune.api.routes.predict.DirectoryFeatureStore", lambda _path: object())
+    monkeypatch.setattr(
+        "precisionai.agritune.api.routes.predict.build_feature_store", lambda *_args, **_kwargs: object()
+    )
     monkeypatch.setattr("precisionai.agritune.api.routes.predict.run_prediction", fake_run_prediction)
 
     client = TestClient(create_app())

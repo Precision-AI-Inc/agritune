@@ -5,6 +5,8 @@
 
 from fastapi import APIRouter
 
+from precisionai.agritune.api.config import get_api_root
+from precisionai.agritune.api.paths import resolve_under_root
 from precisionai.agritune.api.schemas import (
     FeaturesBuildRequest,
     FeaturesBuildResponse,
@@ -17,7 +19,7 @@ from precisionai.agritune.augmentations.image.pipeline import AugmentationPipeli
 from precisionai.agritune.cli.config import load_augmentation_selection
 from precisionai.agritune.features.integrity import verify_store
 from precisionai.agritune.features.manifest import FeatureManifest
-from precisionai.agritune.features.store import DirectoryFeatureStore
+from precisionai.agritune.features.store import build_feature_store
 from precisionai.agritune.services.encoder_selection import build_encoder
 from precisionai.agritune.services.feature_service import build_features
 
@@ -27,19 +29,29 @@ router = APIRouter(prefix="/features", tags=["features"])
 @router.post("/build", response_model=FeaturesBuildResponse)
 async def build(request: FeaturesBuildRequest) -> FeaturesBuildResponse:
     """Resumable offline feature precomputation for every sample in a manifest."""
-    store = DirectoryFeatureStore(request.store)
+    root = get_api_root()
+    manifest_path = resolve_under_root(root, request.manifest_path, field_name="manifest_path")
+    store_path = resolve_under_root(root, request.store, field_name="store")
+    augmentation_config_path = (
+        resolve_under_root(root, request.augmentation_config_path, field_name="augmentation_config_path")
+        if request.augmentation_config_path is not None
+        else None
+    )
+    store = build_feature_store(request.store_type, store_path, entries_per_shard=request.entries_per_shard)
     encoder, fingerprint = build_encoder(
         base_url=request.encoder.base_url,
         api_key=request.encoder.api_key,
         model=request.encoder.model,
         preprocessing=request.encoder.preprocessing,
     )
-    augmentation = load_augmentation_selection(request.augmentation_config_path)
+    augmentation = load_augmentation_selection(
+        str(augmentation_config_path) if augmentation_config_path is not None else None
+    )
     pipeline = ImageAugmentationPipeline(
         AugmentationPipelineConfig(geometric=augmentation.geometric, photometric=augmentation.photometric)
     )
     stats = await build_features(
-        request.manifest_path,
+        str(manifest_path),
         store=store,
         encoder=encoder,
         encoder_fingerprint=fingerprint,
@@ -60,14 +72,19 @@ async def build(request: FeaturesBuildRequest) -> FeaturesBuildResponse:
 @router.post("/verify", response_model=FeaturesVerifyResponse)
 def verify(request: FeaturesStoreRequest) -> FeaturesVerifyResponse:
     """Verify every entry in a feature store's checksum against its actual file contents."""
-    report = verify_store(DirectoryFeatureStore(request.store))
+    store_path = resolve_under_root(get_api_root(), request.store, field_name="store")
+    store = build_feature_store(request.store_type, store_path, entries_per_shard=request.entries_per_shard)
+    report = verify_store(store)
     return FeaturesVerifyResponse(is_valid=report.is_valid, total=report.total, corrupted_keys=report.corrupted_keys)
 
 
 @router.get("/inspect", response_model=FeaturesInspectResponse)
-def inspect(store: str) -> FeaturesInspectResponse:
+def inspect(store: str, store_type: str = "directory", entries_per_shard: int = 1000) -> FeaturesInspectResponse:
     """Report feature store statistics: entry count, encoder models seen, patch dimensions seen."""
-    manifest = FeatureManifest.from_store(DirectoryFeatureStore(store))
+    store_path = resolve_under_root(get_api_root(), store, field_name="store")
+    manifest = FeatureManifest.from_store(
+        build_feature_store(store_type, store_path, entries_per_shard=entries_per_shard)
+    )
     return FeaturesInspectResponse(
         total_entries=len(manifest),
         encoder_models=dict(manifest.encoder_models()),
@@ -78,5 +95,7 @@ def inspect(store: str) -> FeaturesInspectResponse:
 @router.post("/clean", response_model=FeaturesCleanResponse)
 def clean(request: FeaturesStoreRequest) -> FeaturesCleanResponse:
     """Remove any tensor/meta file in a feature store whose pair is missing."""
-    removed = DirectoryFeatureStore(request.store).clean()
+    store_path = resolve_under_root(get_api_root(), request.store, field_name="store")
+    store = build_feature_store(request.store_type, store_path, entries_per_shard=request.entries_per_shard)
+    removed = store.clean()
     return FeaturesCleanResponse(removed=removed)

@@ -5,10 +5,17 @@
 
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from precisionai.agritune.api import create_app
 from tests.fixtures.manifest_factory import build_manifest
+
+
+@pytest.fixture(autouse=True)
+def _api_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Scope the API's path-containment root to this test's ``tmp_path``."""
+    monkeypatch.setenv("AGRITUNE_API_ROOT", str(tmp_path))
 
 
 def _client() -> TestClient:
@@ -44,3 +51,17 @@ def test_inspect_reports_dataset_statistics(tmp_path: Path) -> None:
     body = response.json()
     assert body["num_samples"] == 4
     assert body["metadata_columns"] == ["field_id"]
+
+
+def test_validate_rejects_a_manifest_path_outside_the_api_root(tmp_path_factory: pytest.TempPathFactory) -> None:
+    outside = tmp_path_factory.mktemp("outside")
+    manifest_path = build_manifest(outside)
+    response = _client().post("/dataset/validate", json={"manifest_path": str(manifest_path)})
+    assert response.status_code == 400
+    assert "manifest_path" in response.json()["detail"]
+
+
+def test_validate_rejects_a_relative_path_that_escapes_the_api_root() -> None:
+    response = _client().post("/dataset/validate", json={"manifest_path": "../escaped.csv"})
+    assert response.status_code == 400
+    assert "manifest_path" in response.json()["detail"]

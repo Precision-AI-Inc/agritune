@@ -18,6 +18,5 @@ Package structure
 - ``precisionai.agritune.cli``           — the ``agritune`` command-line entry point
 - ``precisionai.agritune.api``           — thin FastAPI layer over ``services``
 
-See ``agritune_implementation_plan.md`` at the repository root for the phased build-out this
-package follows, and ``docs/architecture.md`` for the runtime data flow.
+See ``docs/architecture.md`` for the runtime data flow.
 """

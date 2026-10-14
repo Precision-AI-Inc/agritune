@@ -1,5 +1,12 @@
---extra-index-url https://download.pytorch.org/whl/cu130
-torch==2.14.0+cu130
+# torch's default PyPI wheel is CPU-only on Windows/macOS, but on Linux it bundles the full CUDA
+# runtime (several GB of nvidia-*/triton packages) even on a machine with no GPU — CI and most
+# contributor machines have no CUDA. For a CPU-only install on Linux, install torch from the
+# CPU-only index first, then this file:
+#   pip install torch>=2.2 --index-url https://download.pytorch.org/whl/cpu
+#   pip install -r requirements.txt
+# For a specific CUDA build instead:
+#   pip install torch>=2.2 --index-url https://download.pytorch.org/whl/cu130
+torch>=2.2
 numpy>=1.26
 pillow>=10.0
 pydantic>=2.0

@@ -21,7 +21,7 @@ actually fired (e.g. a flip whose probability didn't trigger is omitted, not rec
 Supported modes: ``none`` (pass the sample through unchanged), ``offline`` (a fixed number of
 precomputed variants per sample, seeded by sample + variant), ``online`` (re-augmented every
 epoch, seeded by sample + epoch + occurrence), and ``hybrid`` (mostly reuses an offline variant,
-occasionally derives a fresh online seed — see ``agritune_implementation_plan.md`` §6 and
+occasionally derives a fresh online seed — see
 :func:`~precisionai.agritune.augmentations.image.seeding.derive_hybrid_seed`).
 """
 
@@ -259,7 +259,17 @@ class ImageAugmentationPipeline:
 
     def __init__(self, config: AugmentationPipelineConfig | None = None) -> None:
         self._config = config or AugmentationPipelineConfig()
-        self._compose = alb.Compose(_build_transforms(self._config), seed=0, save_applied_params=True, strict=True)
+        # Split so `apply_to_mask` can replay the geometric half alone (the mask never needs
+        # photometric transforms) and independently reproduce the photometric half's resolved
+        # parameters (needed only to reconstruct a matching AugmentationRecord/cache key) without
+        # ever touching the real image. Each half is seeded independently in both `apply` and
+        # `apply_to_mask`, so this must be the only place either Compose is constructed.
+        # List literals (not the helpers' own list[BasicTransform] return value) so pyright infers
+        # each as TransformsSeqType contextually — see _build_transforms below for the same trick.
+        geometric_transforms: TransformsSeqType = [*_geometric_transforms(self._config.geometric)]
+        photometric_transforms: TransformsSeqType = [*_photometric_transforms(self._config.photometric)]
+        self._geometric_compose = alb.Compose(geometric_transforms, seed=0, save_applied_params=True, strict=True)
+        self._photometric_compose = alb.Compose(photometric_transforms, seed=0, save_applied_params=True, strict=True)
 
     def apply(self, sample: Sample, *, seed: int) -> PreparedSample:
         """Apply this pipeline's configured transforms to one sample, deterministically.
@@ -278,20 +288,70 @@ class ImageAugmentationPipeline:
             The augmented sample, with an :class:`AugmentationRecord` capturing exactly what was
             applied.
         """
-        self._compose.set_random_seed(seed)
-        result = self._compose(image=np.array(sample.image), mask=np.array(sample.target))
+        self._geometric_compose.set_random_seed(seed)
+        geometric_result = self._geometric_compose(image=np.array(sample.image), mask=np.array(sample.target))
 
-        records = [
-            TransformRecord(name=name, params=_sanitize_params(params))
-            for name, params in result.get("applied_transforms", [])
-        ]
+        self._photometric_compose.set_random_seed(seed)
+        photometric_result = self._photometric_compose(image=geometric_result["image"])
+
+        records = self._records(geometric_result) + self._records(photometric_result)
 
         return PreparedSample(
             sample_id=sample.sample_id,
-            image=Image.fromarray(result["image"]),
-            target=Image.fromarray(result["mask"]),
+            image=Image.fromarray(photometric_result["image"]),
+            target=Image.fromarray(geometric_result["mask"]),
             augmentation_metadata=AugmentationRecord(seed=seed, transforms=records),
         )
+
+    def apply_to_mask(self, mask: Image.Image, *, seed: int) -> tuple[Image.Image, AugmentationRecord]:
+        """Like :meth:`apply`, but for a mask alone — never reads or requires the paired image.
+
+        Reproduces the exact same :class:`AugmentationRecord` (seed, and every transform's
+        resolved parameters — including photometric ones, which never touch a mask) that
+        :meth:`apply` would have produced from the real image under the same seed, so a cache key
+        computed from this record matches one computed from the full image+mask pipeline. Suitable
+        for ``feature_provider: cached``, where the encoder features are already computed and the
+        mask is the only thing training still needs to decode from disk.
+
+        Geometric transforms are replayed directly on the mask (a same-shaped-but-3-channel dummy
+        array stands in for ``image``, since e.g. ``RandomCrop`` needs a shape to bound against,
+        but no transform's *random* parameters depend on pixel content). Photometric transforms
+        never receive a mask at all, so are replayed against a same-shaped dummy of their own —
+        only to resolve what they *would* have applied, never to produce real output — since their
+        random draws are likewise independent of pixel content.
+
+        Parameters
+        ----------
+        mask : PIL.Image.Image
+            The source mask, at its native (pre-augmentation) size.
+        seed : int
+            Must be the same seed :meth:`apply` would be (or was) called with for the paired
+            image, or the replayed transforms will not match what was actually cached.
+
+        Returns
+        -------
+        tuple[PIL.Image.Image, AugmentationRecord]
+            The augmented mask, and the record matching what :meth:`apply` would have produced.
+        """
+        mask_array = np.array(mask)
+        dummy_pre = np.zeros((*mask_array.shape[:2], 3), dtype=np.uint8)
+
+        self._geometric_compose.set_random_seed(seed)
+        geometric_result = self._geometric_compose(image=dummy_pre, mask=mask_array)
+
+        dummy_post = np.zeros((*geometric_result["mask"].shape[:2], 3), dtype=np.uint8)
+        self._photometric_compose.set_random_seed(seed)
+        photometric_result = self._photometric_compose(image=dummy_post)
+
+        records = self._records(geometric_result) + self._records(photometric_result)
+        return Image.fromarray(geometric_result["mask"]), AugmentationRecord(seed=seed, transforms=records)
+
+    @staticmethod
+    def _records(result: dict[str, Any]) -> list[TransformRecord]:
+        return [
+            TransformRecord(name=name, params=_sanitize_params(params))
+            for name, params in result.get("applied_transforms", [])
+        ]
 
 
 def prepare_sample(
@@ -359,3 +419,61 @@ def prepare_sample(
         raise ValueError(f"unsupported augmentation mode: {mode}")
 
     return pipeline.apply(sample, seed=seed)
+
+
+def prepare_target_only(
+    mask: Image.Image,
+    *,
+    sample_id: str,
+    mode: AugmentationMode,
+    pipeline: ImageAugmentationPipeline,
+    global_seed: int,
+    variant: int = 0,
+) -> tuple[Image.Image, AugmentationRecord | None]:
+    """Like :func:`prepare_sample`, but for a mask alone — never reads or requires the real image.
+
+    Only ``NONE`` and ``OFFLINE`` are supported: both derive a seed independent of anything that
+    changes epoch to epoch, so the exact transform the paired image received under
+    :func:`prepare_sample` can be replayed from the mask and this same seed derivation alone (see
+    :meth:`ImageAugmentationPipeline.apply_to_mask`) — this is what lets
+    ``feature_provider: cached`` batch-building skip decoding the image entirely. ``ONLINE``/
+    ``HYBRID`` batches always need the real image regardless (to encode fresh on a cache miss, or
+    every epoch), so are never routed through this function.
+
+    Parameters
+    ----------
+    mask : PIL.Image.Image
+        The source mask, at its native (pre-augmentation) size.
+    sample_id : str
+        The paired sample's id, for seed derivation — must match what :func:`prepare_sample` was
+        (or will be) called with for the same sample.
+    mode : AugmentationMode
+        Must be ``NONE`` or ``OFFLINE``.
+    pipeline : ImageAugmentationPipeline
+        The configured pipeline to replay (ignored when ``mode is AugmentationMode.NONE``).
+    global_seed : int
+        The run-level seed.
+    variant : int, optional
+        Offline variant index; ignored under ``NONE``.
+
+    Returns
+    -------
+    tuple[PIL.Image.Image, AugmentationRecord | None]
+        The (possibly unaugmented) mask, and the record matching what :func:`prepare_sample` would
+        have produced for the paired image — ``None`` under ``NONE``, matching ``prepare_sample``.
+
+    Raises
+    ------
+    ValueError
+        If ``mode`` is ``ONLINE`` or ``HYBRID``.
+    """
+    if mode is AugmentationMode.NONE:
+        return mask, None
+    if mode is not AugmentationMode.OFFLINE:
+        raise ValueError(
+            f"prepare_target_only supports mode 'none' or 'offline' only; got {mode.value!r} — "
+            "online/hybrid batches always need the real image"
+        )
+
+    seed = derive_offline_seed(global_seed=global_seed, sample_id=sample_id, variant=variant)
+    return pipeline.apply_to_mask(mask, seed=seed)
