@@ -220,23 +220,26 @@ class _EpochPublisher:
         batches = build_training_batches(dataset, batch_size=self.runtime.config.batch_size)
         rows: list[ScoreRow] = []
         predictions: list[tuple[float, str, np.ndarray]] = []
-        self.runtime.task.decoder.eval()
+        decoder = self.runtime.task.decoder
+        decoder.eval()
+        device = next(decoder.parameters()).device
         with torch.no_grad():
             for batch in batches:
-                features = self.runtime.feature_provider.get_features(batch.samples)
+                features = self.runtime.feature_provider.get_features(batch.samples).to(device)
+                targets = batch.targets.to(device)
                 logits = self.runtime.task.forward(features)
                 losses = segmentation_losses_per_sample(
                     logits,
-                    batch.targets,
+                    targets,
                     self.runtime.config.loss,
                     num_classes=self.runtime.config.num_classes,
                 )
-                ious = _per_sample_iou(logits, batch.targets, self.runtime.config.loss.ignore_index)
-                confidences = _confidence(logits, batch.targets, self.runtime.config.loss.ignore_index)
+                ious = _per_sample_iou(logits, targets, self.runtime.config.loss.ignore_index)
+                confidences = _confidence(logits, targets, self.runtime.config.loss.ignore_index)
                 resized = logits
-                if logits.shape[-2:] != batch.targets.shape[-2:]:
+                if logits.shape[-2:] != targets.shape[-2:]:
                     resized = functional.interpolate(
-                        logits, size=batch.targets.shape[-2:], mode="bilinear", align_corners=False
+                        logits, size=targets.shape[-2:], mode="bilinear", align_corners=False
                     )
                 masks = resized.argmax(1).cpu().numpy()
                 for index, sample in enumerate(batch.samples):
@@ -302,6 +305,15 @@ class _EpochPublisher:
         self.scratch.cleanup()
 
 
+def _describe_device(name: str) -> str:
+    """Return ``cuda:0 (GPU name)`` for a CUDA device, else the device name, as MagniData shows it."""
+    device = torch.device(name)
+    if device.type != "cuda" or not torch.cuda.is_available():
+        return str(device)
+    index = device.index if device.index is not None else torch.cuda.current_device()
+    return f"cuda:{index} ({torch.cuda.get_device_name(index)})"
+
+
 def run_magnidata_training(
     config: TrainingRunConfig,
     *,
@@ -323,7 +335,7 @@ def run_magnidata_training(
     client = mlflow.MlflowClient(tracking_uri=tracking_uri)
     client.update_run(run_id, status="RUNNING")
     client.set_tag(run_id, "magnidata.engine", "agritune")
-    client.set_tag(run_id, "magnidata.device", "cpu (AgriTune decoder)")
+    client.set_tag(run_id, "magnidata.device", _describe_device(config.device))
     tracker = MagniDataTracker(client, run_id)
     publisher: _EpochPublisher | None = None
 

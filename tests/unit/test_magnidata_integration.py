@@ -8,6 +8,7 @@ from typing import Any
 
 import mlflow
 import pytest
+import torch
 
 from precisionai.agritune.features.keys import EncoderFingerprint
 from precisionai.agritune.features.store import DirectoryFeatureStore
@@ -106,7 +107,14 @@ def test_options_reject_invalid_prediction_count() -> None:
         MagniDataOptions(top_k_predictions=-1)
 
 
-def test_real_mlflow_run_receives_magnidata_metrics_and_artifacts(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA GPU")),
+    ],
+)
+def test_real_mlflow_run_receives_magnidata_metrics_and_artifacts(tmp_path: Path, device: str) -> None:
     tracking_uri = f"sqlite:///{tmp_path / 'mlflow.db'}"
     client = mlflow.MlflowClient(tracking_uri=tracking_uri)
     experiment_id = client.create_experiment("magnidata/test", artifact_location=str(tmp_path / "artifacts"))
@@ -127,6 +135,7 @@ def test_real_mlflow_run_receives_magnidata_metrics_and_artifacts(tmp_path: Path
         num_classes=3,
         encoder_fingerprint=EncoderFingerprint(model="fake-encoder", revision="fake-v1", preprocessing=""),
         feature_provider="online",
+        device=device,
         batch_size=2,
         val_fraction=0.25,
         trainer=TrainerConfig(max_epochs=2),
@@ -146,6 +155,7 @@ def test_real_mlflow_run_receives_magnidata_metrics_and_artifacts(tmp_path: Path
     run = client.get_run(run_id)
     assert run.info.status == "FINISHED"
     assert run.data.tags["magnidata.engine"] == "agritune"
+    assert run.data.tags["magnidata.device"].startswith(device)
     assert run.data.tags["magnidata.scored_epochs"] == "1,2"
     assert "train_loss/loss" in run.data.metrics
     assert "val_loss/loss" in run.data.metrics

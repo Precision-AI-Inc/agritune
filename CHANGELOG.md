@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- MagniData per-epoch scoring moves features and targets to the decoder's device, so runs on a GPU no longer fail with
+  "Expected all tensors to be on the same device", and the run's `magnidata.device` tag reports the real device
+  instead of always `cpu (AgriTune decoder)`.
 - `OnlineFeatureProvider` and `HybridFeatureProvider` drive the encoder gateway on one persistent event
   loop instead of a new `asyncio.run` per batch. With a hosted encoder the second batch failed with
   "Event loop is closed" because the HTTP client stayed bound to the first, closed loop.
