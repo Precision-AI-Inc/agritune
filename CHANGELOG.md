@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance
 
+- `agritune features build` (`precompute_features`) encodes uncached samples 128 at a time through the encoder
+  gateway instead of one per call, so its 16-image batches and 8 concurrent requests are actually used, and the
+  hosted backend PNG-encodes request images in a worker thread instead of on the event loop. Measured against
+  the hosted `pai-embedding` encoder on 256 px images: 565 images/min before, 2,800 images/min after. A group the
+  encoder rejects is retried one sample at a time, so one bad image still fails alone.
 - `feature_preload: host | device` (new `TrainingRunConfig` field, default `none`): reads the
   training and validation splits' cached features once, before training, into one contiguous
   buffer in RAM or GPU memory (new `precisionai.agritune.features.memory.InMemoryFeatureProvider`),
