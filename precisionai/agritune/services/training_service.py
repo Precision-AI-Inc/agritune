@@ -14,7 +14,7 @@ evaluate.
 import hashlib
 import json
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from enum import Enum
 from pathlib import Path
@@ -580,6 +580,25 @@ def _build_feature_provider(
     return provider, rows
 
 
+def _test_samples(config: TrainingRunConfig, split: SplitAssignment) -> list[PreparedSample]:
+    """Return the samples ``random_split`` reserved for "test", ready for feature lookup.
+
+    Training never uses them, but the split's tiny test reservation still catches a sample now and
+    then on large manifests (one in ~150,000 at the default fractions), and per-sample scoring of the
+    whole manifest (e.g. the MagniData integration) requests its features; a preloaded provider must
+    hold it, since it serves only the samples it was built with.
+    """
+    if not split.test:
+        return []
+    batches = build_training_batches(
+        ManifestDataset(config.manifest_path, sample_ids=split.test),
+        batch_size=config.batch_size,
+        resize=config.augmentation.geometric.resize,
+        load_images=False,
+    )
+    return [sample for batch in batches for sample in batch.samples]
+
+
 def _preload(
     config: TrainingRunConfig,
     *,
@@ -588,8 +607,12 @@ def _preload(
     train_batches: Any,
     val_batches: Any,
     show_progress: bool,
+    extra_samples: Sequence[PreparedSample] = (),
 ) -> tuple[FeatureProvider, Any, Any]:
     """Swap in memory-resident batches and features when ``feature_preload`` asks for them.
+
+    ``extra_samples`` are preloaded into the feature provider too, without batches: samples outside
+    train/val that callers such as per-sample scoring still request.
 
     Returns ``(provider, train_batches, val_batches)`` unchanged under ``feature_preload: none``.
     """
@@ -626,7 +649,7 @@ def _preload(
     memory_provider = InMemoryFeatureProvider(
         store,
         key_fn=provider.key_for,
-        samples=preloaded_train.samples + preloaded_val.samples,
+        samples=[*preloaded_train.samples, *preloaded_val.samples, *extra_samples],
         storage_device=storage_device,
         output_device=compute_device,
         storage_dtype=FEATURE_PRELOAD_DTYPES[config.feature_preload_dtype] if config.feature_preload_dtype else None,
@@ -853,6 +876,7 @@ def run_training(
         train_batches=train_batches,
         val_batches=val_batches,
         show_progress=show_progress,
+        extra_samples=_test_samples(config, split) if config.feature_preload != "none" else (),
     )
 
     first_train_sample = train_dataset[0]

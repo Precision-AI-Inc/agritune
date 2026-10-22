@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- With `feature_preload: host | device`, the samples `random_split` reserves for "test" (a ~1e-6 fraction, so
+  about one in 150,000) are preloaded too. Per-sample scoring of the whole manifest, as the MagniData integration
+  does after every scored epoch, failed on such a sample with "was not preloaded — InMemoryFeatureProvider only
+  serves the samples it was constructed with".
 - MagniData per-epoch scoring moves features and targets to the decoder's device, so runs on a GPU no longer fail with
   "Expected all tensors to be on the same device", and the run's `magnidata.device` tag reports the real device
   instead of always `cpu (AgriTune decoder)`.
