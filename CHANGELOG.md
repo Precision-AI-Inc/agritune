@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `MagniDataOptions.image_names` maps manifest sample IDs to the image names MagniData joins on, for manifests
+  whose IDs differ (for example one reused together with an existing feature store); split, per-sample rows and
+  prediction files use the mapped names.
+
 ### Fixed
 
 - With `feature_preload: host | device`, the samples `random_split` reserves for "test" (a ~1e-6 fraction, so

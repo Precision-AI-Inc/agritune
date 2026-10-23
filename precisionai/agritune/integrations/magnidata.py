@@ -7,7 +7,8 @@ import csv
 import tempfile
 import time
 import traceback
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -58,11 +59,16 @@ class MagniDataOptions:
         Persist this many highest-loss prediction masks per scored epoch.
     palette : tuple[tuple[int, int, int], ...]
         Class-index to RGB mapping used for prediction PNGs.
+    image_names : Mapping[str, str]
+        MagniData image name per manifest ``sample_id``, for manifests whose sample IDs are not the
+        image names MagniData joins on (e.g. one reused with an existing feature store). Samples
+        missing from the mapping are named by their ``sample_id``.
     """
 
     score_every: int = 1
     top_k_predictions: int = 50
     palette: tuple[tuple[int, int, int], ...] = _DEFAULT_PALETTE
+    image_names: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Validate scoring intervals and prediction counts."""
@@ -188,6 +194,9 @@ class _EpochPublisher:
         self.root = Path(self.scratch.name)
         self._publish_split()
 
+    def _image_name(self, sample_id: str) -> str:
+        return self.options.image_names.get(sample_id, sample_id)
+
     def _tag(self, key: str, value: object) -> None:
         self.client.set_tag(self.run_id, key, str(value))
 
@@ -196,7 +205,7 @@ class _EpochPublisher:
         with path.open("w", newline="", encoding="utf-8") as handle:
             writer = csv.writer(handle)
             writer.writerow(["image_name", "split"])
-            writer.writerows(self.splits.items())
+            writer.writerows((self._image_name(sample_id), split) for sample_id, split in self.splits.items())
         self.client.log_artifact(self.run_id, str(path), artifact_path=_ARTIFACT_ROOT)
         self._tag("magnidata.has_split", "true")
 
@@ -244,7 +253,7 @@ class _EpochPublisher:
                 masks = resized.argmax(1).cpu().numpy()
                 for index, sample in enumerate(batch.samples):
                     row: ScoreRow = {
-                        "image_name": sample.sample_id,
+                        "image_name": self._image_name(sample.sample_id),
                         "split": self.splits.get(sample.sample_id, "test"),
                         "loss_total": float(losses["total"][index]),
                         "iou": float(ious[index]),
@@ -254,7 +263,9 @@ class _EpochPublisher:
                         if term != "total":
                             row[f"loss_{term}"] = float(values[index])
                     rows.append(row)
-                    predictions.append((float(losses["total"][index]), sample.sample_id, masks[index]))
+                    predictions.append(
+                        (float(losses["total"][index]), self._image_name(sample.sample_id), masks[index])
+                    )
         self._write_losses(epoch, rows)
         self._write_predictions(epoch, predictions)
         self._log_loss_metrics(epoch, rows)
@@ -273,9 +284,9 @@ class _EpochPublisher:
 
     def _write_predictions(self, epoch: int, predictions: list[tuple[float, str, np.ndarray]]) -> None:
         palette = np.asarray(self.options.palette, dtype=np.uint8)
-        for _, sample_id, mask in sorted(predictions, reverse=True)[: self.options.top_k_predictions]:
+        for _, image_name, mask in sorted(predictions, reverse=True)[: self.options.top_k_predictions]:
             rgb = palette[np.clip(mask, 0, len(palette) - 1)]
-            path = self.root / f"{Path(sample_id).stem}.png"
+            path = self.root / f"{Path(image_name).stem}.png"
             Image.fromarray(rgb, mode="RGB").save(path)
             self.client.log_artifact(
                 self.run_id, str(path), artifact_path=f"{_ARTIFACT_ROOT}/predictions/epoch_{epoch:04d}"

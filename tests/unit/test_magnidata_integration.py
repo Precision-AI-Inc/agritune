@@ -3,6 +3,7 @@
 
 """Unit tests for the MagniData training adapter."""
 
+import csv
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,7 @@ import mlflow
 import pytest
 import torch
 
+from precisionai.agritune.data.manifest import load_manifest
 from precisionai.agritune.features.keys import EncoderFingerprint
 from precisionai.agritune.features.store import DirectoryFeatureStore
 from precisionai.agritune.integrations.magnidata import (
@@ -170,3 +172,45 @@ def test_real_mlflow_run_receives_magnidata_metrics_and_artifacts(tmp_path: Path
         "magnidata/per_sample/epoch_0001.csv",
         "magnidata/per_sample/epoch_0002.csv",
     ]
+
+
+def test_image_names_rename_per_sample_rows_split_and_predictions(tmp_path: Path) -> None:
+    tracking_uri = f"sqlite:///{tmp_path / 'mlflow.db'}"
+    client = mlflow.MlflowClient(tracking_uri=tracking_uri)
+    experiment_id = client.create_experiment("magnidata/names", artifact_location=str(tmp_path / "artifacts"))
+    run_id = client.create_run(experiment_id, tags={"magnidata.origin": "ui"}).info.run_id
+    client.update_run(run_id, status="SCHEDULED")
+    dataset_root = tmp_path / "dataset"
+    dataset_root.mkdir()
+    manifest = build_manifest(dataset_root, image_size=(8, 8))
+    names = {row.sample_id: f"tile-{index}.png" for index, row in enumerate(load_manifest(str(manifest)))}
+    config = TrainingRunConfig(
+        manifest_path=str(manifest),
+        feature_store_dir=str(tmp_path / "features"),
+        run_root=str(tmp_path / "runs"),
+        run_id=run_id,
+        num_classes=3,
+        encoder_fingerprint=EncoderFingerprint(model="fake-encoder", revision="fake-v1", preprocessing=""),
+        feature_provider="online",
+        batch_size=2,
+        val_fraction=0.25,
+        trainer=TrainerConfig(max_epochs=1),
+    )
+
+    run_magnidata_training(
+        config,
+        store=DirectoryFeatureStore(tmp_path / "features"),
+        run_id=run_id,
+        tracking_uri=tracking_uri,
+        options=MagniDataOptions(top_k_predictions=1, image_names=names),
+        show_progress=False,
+    )
+
+    local = Path(client.download_artifacts(run_id, "magnidata", str(tmp_path / "out")))
+    with (local / "split.csv").open() as handle:
+        assert {row["image_name"] for row in csv.DictReader(handle)} == set(names.values())
+    with (local / "per_sample" / "epoch_0001.csv").open() as handle:
+        assert {row["image_name"] for row in csv.DictReader(handle)} == set(names.values())
+    predictions = {path.stem for path in (local / "predictions" / "epoch_0001").iterdir()}
+    assert predictions
+    assert predictions <= {Path(name).stem for name in names.values()}
