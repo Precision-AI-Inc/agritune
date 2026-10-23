@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import mlflow
+import numpy as np
 import pytest
 import torch
 
@@ -17,6 +18,7 @@ from precisionai.agritune.features.store import DirectoryFeatureStore
 from precisionai.agritune.integrations.magnidata import (
     MagniDataOptions,
     MagniDataTracker,
+    _HardestPredictions,
     run_magnidata_training,
 )
 from precisionai.agritune.services.training_service import TrainingRunConfig
@@ -214,3 +216,22 @@ def test_image_names_rename_per_sample_rows_split_and_predictions(tmp_path: Path
     predictions = {path.stem for path in (local / "predictions" / "epoch_0001").iterdir()}
     assert predictions
     assert predictions <= {Path(name).stem for name in names.values()}
+
+
+def test_hardest_predictions_keep_only_the_top_losses_as_uint8() -> None:
+    hardest = _HardestPredictions(2)
+    for index, loss in enumerate([0.1, 0.9, 0.5, 0.9, 0.2]):
+        hardest.offer(loss, f"image-{index}.png", np.full((3, 4), index, dtype=np.int64))
+
+    ranked = hardest.ranked()
+
+    assert len(hardest) == 2
+    assert [(loss, name) for loss, name, _ in ranked] == [(0.9, "image-1.png"), (0.9, "image-3.png")]
+    assert all(mask.dtype == np.uint8 for _, _, mask in ranked)
+
+
+def test_hardest_predictions_keep_nothing_when_none_are_wanted() -> None:
+    hardest = _HardestPredictions(0)
+    hardest.offer(1.0, "image.png", np.zeros((2, 2), dtype=np.int64))
+
+    assert hardest.ranked() == []

@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- MagniData per-epoch scoring keeps only the `top_k_predictions` highest-loss masks (as `uint8`) instead of every
+  sample's int64 mask until the end of the pass, and skips decoding images under `feature_provider: cached`. On
+  151,291 tiles with 798×532 masks the old pass grew past 700 GB of RAM within 20 minutes of the first scored epoch.
 - With `feature_preload: host | device`, the samples `random_split` reserves for "test" (a ~1e-6 fraction, so
   about one in 150,000) are preloaded too. Per-sample scoring of the whole manifest, as the MagniData integration
   does after every scored epoch, failed on such a sample with "was not preloaded — InMemoryFeatureProvider only

@@ -4,6 +4,8 @@
 """Run AgriTune inside MagniData's MLflow queue and artifact contract."""
 
 import csv
+import heapq
+import itertools
 import tempfile
 import time
 import traceback
@@ -179,6 +181,38 @@ def _confidence(logits: torch.Tensor, targets: torch.Tensor, ignore_index: int) 
     return (values * valid).sum((1, 2)) / valid.sum((1, 2)).clamp(min=1)
 
 
+class _HardestPredictions:
+    """Keep the ``k`` highest-loss predicted masks seen so far, as ``uint8``.
+
+    Scoring visits every sample but saves only the top ``k`` predictions; holding every mask until the end
+    (int64, ~3.4 MB each at 798x532) needed hundreds of GB on large datasets.
+    """
+
+    def __init__(self, k: int) -> None:
+        self.k = k
+        self._heap: list[tuple[float, int, str, np.ndarray]] = []
+        self._order = itertools.count()
+
+    def __len__(self) -> int:
+        return len(self._heap)
+
+    def offer(self, loss: float, image_name: str, mask: np.ndarray) -> None:
+        """Keep this prediction if it is among the ``k`` highest losses so far."""
+        if self.k <= 0:
+            return
+        if len(self._heap) >= self.k and loss <= self._heap[0][0]:
+            return
+        item = (loss, next(self._order), image_name, mask.astype(np.uint8))
+        if len(self._heap) < self.k:
+            heapq.heappush(self._heap, item)
+        else:
+            heapq.heapreplace(self._heap, item)
+
+    def ranked(self) -> list[tuple[float, str, np.ndarray]]:
+        """Return the kept predictions, highest loss first."""
+        return [(loss, name, mask) for loss, _, name, mask in sorted(self._heap, key=lambda item: (-item[0], item[1]))]
+
+
 class _EpochPublisher:
     def __init__(
         self, client: Any, tracker: MagniDataTracker, run_id: str, runtime: TrainingRuntime, options: MagniDataOptions
@@ -226,9 +260,14 @@ class _EpochPublisher:
     def _score(self, epoch: int) -> None:
         self._tag("magnidata.progress_stage", f"AgriTune epoch {epoch} scoring")
         dataset = ManifestDataset(self.runtime.config.manifest_path)
-        batches = build_training_batches(dataset, batch_size=self.runtime.config.batch_size)
+        # Cached features never need the images; decoding them anyway dominated scoring time on large datasets.
+        batches = build_training_batches(
+            dataset,
+            batch_size=self.runtime.config.batch_size,
+            load_images=self.runtime.config.feature_provider != "cached",
+        )
         rows: list[ScoreRow] = []
-        predictions: list[tuple[float, str, np.ndarray]] = []
+        hardest = _HardestPredictions(self.options.top_k_predictions)
         decoder = self.runtime.task.decoder
         decoder.eval()
         device = next(decoder.parameters()).device
@@ -263,11 +302,9 @@ class _EpochPublisher:
                         if term != "total":
                             row[f"loss_{term}"] = float(values[index])
                     rows.append(row)
-                    predictions.append(
-                        (float(losses["total"][index]), self._image_name(sample.sample_id), masks[index])
-                    )
+                    hardest.offer(float(losses["total"][index]), self._image_name(sample.sample_id), masks[index])
         self._write_losses(epoch, rows)
-        self._write_predictions(epoch, predictions)
+        self._write_predictions(epoch, hardest.ranked())
         self._log_loss_metrics(epoch, rows)
         self.scored_epochs.append(epoch)
         self._tag("magnidata.scored_epochs", ",".join(str(item) for item in self.scored_epochs))
@@ -284,7 +321,7 @@ class _EpochPublisher:
 
     def _write_predictions(self, epoch: int, predictions: list[tuple[float, str, np.ndarray]]) -> None:
         palette = np.asarray(self.options.palette, dtype=np.uint8)
-        for _, image_name, mask in sorted(predictions, reverse=True)[: self.options.top_k_predictions]:
+        for _, image_name, mask in predictions:
             rgb = palette[np.clip(mask, 0, len(palette) - 1)]
             path = self.root / f"{Path(image_name).stem}.png"
             Image.fromarray(rgb, mode="RGB").save(path)
