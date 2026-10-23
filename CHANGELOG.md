@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `mlflow` is part of the `test` and `dev` extras: the MagniData integration tests use a real (SQLite) MLflow
+  store, and without it CI failed while collecting tests.
+- CI installs CPU torch with PyPI as an extra index. The CPU index offers `typing-extensions` 4.16 for Python 3.10
+  only as source, whose build needs `flit_core` from the same index, so the 3.10 unit-test and pre-commit jobs
+  failed while installing dependencies.
+
 ### Added
 
 - `MagniDataOptions.image_names` maps manifest sample IDs to the image names MagniData joins on, for manifests
