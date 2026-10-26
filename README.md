@@ -80,6 +80,7 @@ precisionai/agritune/
   data/           # dataset adapters, manifests, split strategies
   encoder/        # EncoderBackend protocol, FakeEncoderBackend, RemoteEncoderBackend, gateway, rate limiter
   features/       # FeatureProvider (cached/online/hybrid/prefetching), FeatureStore, cache keys, resumable precomputation
+  integrations/   # product adapters, including MagniData's MLflow/artifact contract
   logging/        # configure_logging (stderr), secret redaction, progress bars, run provenance
   metrics/        # pure computation (segmentation metrics, etc.)
   optimization/   # optimizer/scheduler registries
@@ -177,6 +178,23 @@ The CLI, the FastAPI layer (`precisionai.agritune.api.create_app()`, one route p
 AgriTune's remote encoder backend integrates with an OpenAI-SDK-compatible embeddings API (see `precisionai.agritune.encoder`): the CLS token is returned as the embedding vector, and patch tokens are returned via the `patch_embeddings` (channels-first `[D, H, W]`, base64 float32) and `patch_shape` fields of the response — enabled per-request with `extra_body={"return_patch_tokens": True}`. The API does not expose a queryable encoder revision, so AgriTune fingerprints the encoder from the configured model alias plus the dimensions actually observed at runtime — see [docs/encoder.md](https://github.com/Precision-AI-Inc/agritune/blob/main/docs/encoder.md).
 
 Nothing in the training path depends on this specific API being reachable: CI, and any offline development, run entirely against `FakeEncoderBackend`.
+
+---
+
+## MagniData integration
+
+MagniData can use AgriTune as a training engine while keeping MLflow as its queue and system of
+record. The adapter in `precisionai.agritune.integrations.magnidata` attaches to the run MagniData
+already scheduled; it does not create a second experiment. It translates aggregate metrics and
+publishes the split, per-image component losses, hard-sample predictions, checkpoints and
+provenance in MagniData's artifact layout. Cancellation is checked between epochs.
+
+Use the MagniData portal for this workflow. Its User Guide documents the required sibling checkout,
+Compose build context, encoder environment variables, controls and expected loss views. AgriTune's
+CLI and FastAPI behavior are unchanged; the integration uses the same `run_training` service through
+its optional tracker and epoch-callback extension points.
+
+---
 
 ---
 

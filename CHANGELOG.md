@@ -7,8 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `mlflow` is part of the `test` and `dev` extras: the MagniData integration tests use a real (SQLite) MLflow
+  store, and without it CI failed while collecting tests.
+- CI installs CPU torch with PyPI as an extra index. The CPU index offers `typing-extensions` 4.16 for Python 3.10
+  only as source, whose build needs `flit_core` from the same index, so the 3.10 unit-test and pre-commit jobs
+  failed while installing dependencies.
+
+### Added
+
+- `MagniDataOptions.image_names` maps manifest sample IDs to the image names MagniData joins on, for manifests
+  whose IDs differ (for example one reused together with an existing feature store); split, per-sample rows and
+  prediction files use the mapped names.
+
+### Fixed
+
+- MagniData per-epoch scoring keeps only the `top_k_predictions` highest-loss masks (as `uint8`) instead of every
+  sample's int64 mask until the end of the pass, and skips decoding images under `feature_provider: cached`. On
+  151,291 tiles with 798×532 masks the old pass grew past 700 GB of RAM within 20 minutes of the first scored epoch.
+- With `feature_preload: host | device`, the samples `random_split` reserves for "test" (a ~1e-6 fraction, so
+  about one in 150,000) are preloaded too. Per-sample scoring of the whole manifest, as the MagniData integration
+  does after every scored epoch, failed on such a sample with "was not preloaded — InMemoryFeatureProvider only
+  serves the samples it was constructed with".
+- MagniData per-epoch scoring moves features and targets to the decoder's device, so runs on a GPU no longer fail with
+  "Expected all tensors to be on the same device", and the run's `magnidata.device` tag reports the real device
+  instead of always `cpu (AgriTune decoder)`.
+- `OnlineFeatureProvider` and `HybridFeatureProvider` drive the encoder gateway on one persistent event
+  loop instead of a new `asyncio.run` per batch. With a hosted encoder the second batch failed with
+  "Event loop is closed" because the HTTP client stayed bound to the first, closed loop.
+
 ### Performance
 
+- `agritune features build` (`precompute_features`) encodes uncached samples 128 at a time through the encoder
+  gateway instead of one per call, so its 16-image batches and 8 concurrent requests are actually used, and the
+  hosted backend PNG-encodes request images in a worker thread instead of on the event loop. Measured against
+  the hosted `pai-embedding` encoder on 256 px images: 565 images/min before, 2,800 images/min after. A group the
+  encoder rejects is retried one sample at a time, so one bad image still fails alone.
 - `feature_preload: host | device` (new `TrainingRunConfig` field, default `none`): reads the
   training and validation splits' cached features once, before training, into one contiguous
   buffer in RAM or GPU memory (new `precisionai.agritune.features.memory.InMemoryFeatureProvider`),
@@ -114,6 +149,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A native MagniData integration which attaches AgriTune to a queued MLflow run, translates
+  training metrics, publishes split and per-image component-loss artifacts, saves hard-sample
+  predictions and checkpoints, reports progress, and honours cancellation between epochs.
+- Optional tracker injection and epoch callbacks in the training service, plus reusable
+  per-sample segmentation loss computation for product integrations.
 - `TrainingRunConfig.device` (`"cpu"`, `"cuda"`, or `"cuda:N"`): the decoder and every batch's
   features/targets now actually move to the configured device before `forward`/`compute_loss`
   (previously nothing in the training pipeline ever called `.to()`, so `trainer.precision: fp16`

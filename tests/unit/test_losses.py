@@ -8,11 +8,13 @@ import torch
 
 from precisionai.agritune.tasks.segmentation.losses import (
     DiceLoss,
+    LossName,
     SegmentationLoss,
     SegmentationLossConfig,
     as_class_indices,
     bce_with_logits_loss,
     cross_entropy_loss,
+    segmentation_losses_per_sample,
 )
 
 _NUM_CLASSES = 3
@@ -181,6 +183,33 @@ def test_segmentation_loss_gradients_flow() -> None:
     loss_fn = SegmentationLoss(SegmentationLossConfig(name="ce_dice"), num_classes=_NUM_CLASSES)
     loss_fn(logits, targets).backward()
     assert logits.grad is not None
+
+
+@pytest.mark.parametrize(
+    ("name", "terms"),
+    [("ce", {"cce", "total"}), ("bce", {"bce", "total"}), ("ce_dice", {"cce", "dice", "total"})],
+)
+def test_per_sample_losses_have_one_value_per_image(name: LossName, terms: set[str]) -> None:
+    targets = torch.randint(0, _NUM_CLASSES, (3, 4, 4))
+    logits = torch.randn(3, _NUM_CLASSES, 4, 4)
+
+    values = segmentation_losses_per_sample(
+        logits, targets, SegmentationLossConfig(name=name), num_classes=_NUM_CLASSES
+    )
+
+    assert set(values) == terms
+    assert all(value.shape == (3,) for value in values.values())
+    assert all(torch.isfinite(value).all() for value in values.values())
+
+
+def test_per_sample_combined_total_applies_component_weights() -> None:
+    targets = torch.randint(0, _NUM_CLASSES, (2, 4, 4))
+    logits = torch.randn(2, _NUM_CLASSES, 4, 4)
+    config = SegmentationLossConfig(name="ce_dice", ce_weight=0.25, dice_weight=2.0)
+
+    values = segmentation_losses_per_sample(logits, targets, config, num_classes=_NUM_CLASSES)
+
+    assert torch.allclose(values["total"], 0.25 * values["cce"] + 2.0 * values["dice"])
 
 
 @pytest.mark.parametrize("dtype", [torch.uint8, torch.int16, torch.int32])

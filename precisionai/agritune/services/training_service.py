@@ -14,6 +14,7 @@ evaluate.
 import hashlib
 import json
 import sys
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from enum import Enum
 from pathlib import Path
@@ -443,6 +444,30 @@ class TrainingRunResult:
     val_metrics: dict[str, float]
 
 
+@dataclass
+class TrainingRuntime:
+    """Expose a completed training setup to an optional product integration.
+
+    Attributes
+    ----------
+    config : TrainingRunConfig
+    task : SegmentationTask
+    feature_provider : FeatureProvider
+    split : SplitAssignment
+    run_directory : RunDirectory
+    """
+
+    config: TrainingRunConfig
+    task: SegmentationTask
+    feature_provider: FeatureProvider
+    split: SplitAssignment
+    run_directory: RunDirectory
+
+
+EpochCallback = Callable[[int, dict[str, float], dict[str, float]], bool]
+EpochCallbackFactory = Callable[[TrainingRuntime], EpochCallback]
+
+
 def _validate_dataloader_config(config: TrainingRunConfig) -> None:
     if config.num_workers < 0:
         raise ValueError(f"num_workers must be non-negative; got {config.num_workers}")
@@ -555,6 +580,25 @@ def _build_feature_provider(
     return provider, rows
 
 
+def _test_samples(config: TrainingRunConfig, split: SplitAssignment) -> list[PreparedSample]:
+    """Return the samples ``random_split`` reserved for "test", ready for feature lookup.
+
+    Training never uses them, but the split's tiny test reservation still catches a sample now and
+    then on large manifests (one in ~150,000 at the default fractions), and per-sample scoring of the
+    whole manifest (e.g. the MagniData integration) requests its features; a preloaded provider must
+    hold it, since it serves only the samples it was built with.
+    """
+    if not split.test:
+        return []
+    batches = build_training_batches(
+        ManifestDataset(config.manifest_path, sample_ids=split.test),
+        batch_size=config.batch_size,
+        resize=config.augmentation.geometric.resize,
+        load_images=False,
+    )
+    return [sample for batch in batches for sample in batch.samples]
+
+
 def _preload(
     config: TrainingRunConfig,
     *,
@@ -563,8 +607,12 @@ def _preload(
     train_batches: Any,
     val_batches: Any,
     show_progress: bool,
+    extra_samples: Sequence[PreparedSample] = (),
 ) -> tuple[FeatureProvider, Any, Any]:
     """Swap in memory-resident batches and features when ``feature_preload`` asks for them.
+
+    ``extra_samples`` are preloaded into the feature provider too, without batches: samples outside
+    train/val that callers such as per-sample scoring still request.
 
     Returns ``(provider, train_batches, val_batches)`` unchanged under ``feature_preload: none``.
     """
@@ -601,7 +649,7 @@ def _preload(
     memory_provider = InMemoryFeatureProvider(
         store,
         key_fn=provider.key_for,
-        samples=preloaded_train.samples + preloaded_val.samples,
+        samples=[*preloaded_train.samples, *preloaded_val.samples, *extra_samples],
         storage_device=storage_device,
         output_device=compute_device,
         storage_dtype=FEATURE_PRELOAD_DTYPES[config.feature_preload_dtype] if config.feature_preload_dtype else None,
@@ -714,7 +762,12 @@ def _close_tracker_and_flush_store(tracker: Tracker, store: DirectoryFeatureStor
 
 
 def run_training(
-    config: TrainingRunConfig, *, store: DirectoryFeatureStore | ShardedFeatureStore, show_progress: bool = False
+    config: TrainingRunConfig,
+    *,
+    store: DirectoryFeatureStore | ShardedFeatureStore,
+    show_progress: bool = False,
+    tracker_override: Tracker | None = None,
+    epoch_callback_factory: EpochCallbackFactory | None = None,
 ) -> TrainingRunResult:
     """Run one full training job: split -> features -> (optional augmentation) -> task -> trainer.
 
@@ -728,6 +781,11 @@ def run_training(
     show_progress : bool, optional
         Render ``tqdm`` bars over training/validation batches — see :class:`Trainer`. Defaults to
         ``False`` so headless callers (e.g. the API) see no terminal output.
+    tracker_override : Tracker | None, optional
+        Product-supplied tracker. When omitted, build the backends selected by ``config.tracking``.
+    epoch_callback_factory : EpochCallbackFactory | None, optional
+        Build a callback after the task, provider and split exist. This keeps product adapters out
+        of the core trainer while allowing per-epoch scoring and cancellation.
 
     Returns
     -------
@@ -771,7 +829,7 @@ def run_training(
 
     run_dir = RunDirectory(config.run_root, config.run_id)
     checkpoint_manager = CheckpointManager(run_dir.checkpoints_dir, top_k=config.checkpoint_top_k)
-    tracker = build_trackers(config.tracking, run_dir=run_dir, run_id=config.run_id)
+    tracker = tracker_override or build_trackers(config.tracking, run_dir=run_dir, run_id=config.run_id)
 
     # Written before trainer.fit() ever runs, not only after it succeeds: a run this crashes or is
     # killed mid-training must still be reconstructable from runs/<run_id>/ alone (see CLAUDE.md's
@@ -818,6 +876,7 @@ def run_training(
         train_batches=train_batches,
         val_batches=val_batches,
         show_progress=show_progress,
+        extra_samples=_test_samples(config, split) if config.feature_preload != "none" else (),
     )
 
     first_train_sample = train_dataset[0]
@@ -856,6 +915,20 @@ def run_training(
     optimizer = build_optimizer(decoder.parameters(), config.optimizer)
     scheduler = build_scheduler(optimizer, config.scheduler) if config.scheduler is not None else None
 
+    epoch_callback = (
+        epoch_callback_factory(
+            TrainingRuntime(
+                config=config,
+                task=task,
+                feature_provider=provider,
+                split=split,
+                run_directory=run_dir,
+            )
+        )
+        if epoch_callback_factory is not None
+        else None
+    )
+
     trainer_config = replace(
         config.trainer,
         fingerprints={**config.trainer.fingerprints, **critical_fingerprints},
@@ -871,13 +944,14 @@ def run_training(
         tracker=tracker,
         feature_augmentation=FeatureAugmentationPipeline(config.feature_augmentation),
         show_progress=show_progress,
+        epoch_callback=epoch_callback,
     )
 
     if isinstance(train_batches, OnlineAugmentedBatches | PreloadedBatches):
         train_batches.set_epoch(trainer.state.epoch)
 
-    train_metric = SegmentationMetric(num_classes=config.num_classes)
-    val_metric = SegmentationMetric(num_classes=config.num_classes)
+    train_metric = SegmentationMetric(num_classes=config.num_classes, ignore_index=config.loss.ignore_index)
+    val_metric = SegmentationMetric(num_classes=config.num_classes, ignore_index=config.loss.ignore_index)
     try:
         trainer.fit(
             train_batches,

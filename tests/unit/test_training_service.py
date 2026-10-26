@@ -29,7 +29,7 @@ from precisionai.agritune.augmentations.image.pipeline import (
 )
 from precisionai.agritune.data.dataset import ManifestDataset
 from precisionai.agritune.data.manifest import load_manifest
-from precisionai.agritune.data.split import random_split
+from precisionai.agritune.data.split import SplitAssignment, random_split
 from precisionai.agritune.encoder.fake import FakeEncoderBackend
 from precisionai.agritune.features.keys import EncoderFingerprint
 from precisionai.agritune.features.store import DirectoryFeatureStore, ShardedFeatureStore
@@ -37,6 +37,7 @@ from precisionai.agritune.optimization.optimizers import OptimizerConfig
 from precisionai.agritune.schemas.samples import Sample
 from precisionai.agritune.services import training_service
 from precisionai.agritune.services.feature_service import build_features
+from precisionai.agritune.services.segmentation_common import build_training_batches
 from precisionai.agritune.services.tracking_selection import TrackingSelection
 from precisionai.agritune.services.training_service import (
     AugmentationSelection,
@@ -839,6 +840,41 @@ def test_host_preload_trains_identically_to_reading_the_store_every_epoch(tmp_pa
     )
 
     _assert_same_training(streamed, preloaded)
+
+
+def test_host_preload_serves_samples_the_split_reserved_for_test(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest_path = build_manifest(tmp_path, rows=_ROWS, image_size=(8, 8))
+    store = DirectoryFeatureStore(tmp_path / "features")
+    _precompute(manifest_path, store)
+    store.flush()
+
+    # The real split reserves only a ~1e-6 test fraction, which a small manifest never hits; move one sample there.
+    def split_with_a_test_sample(rows: Any, **kwargs: Any) -> SplitAssignment:
+        split = random_split(rows, **kwargs)
+        return SplitAssignment(train=split.train[:-1], val=split.val, test=[*split.test, split.train[-1]])
+
+    monkeypatch.setattr(training_service, "random_split", split_with_a_test_sample)
+    served: list[int] = []
+
+    def score_every_sample(runtime: training_service.TrainingRuntime) -> training_service.EpochCallback:
+        def callback(epoch: int, train_metrics: dict[str, float], val_metrics: dict[str, float]) -> bool:
+            batches = build_training_batches(ManifestDataset(str(manifest_path)), batch_size=2, load_images=False)
+            served.extend(runtime.feature_provider.get_features(batch.samples).batch_size for batch in batches)
+            return False
+
+        return callback
+
+    run_training(
+        _base_config(
+            tmp_path, manifest_path, run_id="scored", feature_preload="host", trainer=TrainerConfig(max_epochs=1)
+        ),
+        store=store,
+        epoch_callback_factory=score_every_sample,
+    )
+
+    assert sum(served) == len(_ROWS)
 
 
 def test_host_preload_with_offline_augmentation_reads_the_augmented_cache(tmp_path: Path) -> None:

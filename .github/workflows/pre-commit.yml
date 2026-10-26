@@ -25,7 +25,7 @@ jobs:
         # See unit-test.yml: force the CPU-only torch wheel so this doesn't pull several GB of
         # CUDA runtime packages it will never use.
         run: |
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
           pip install -e ".[dev]"
 
       - name: Run pre-commit (all hooks)

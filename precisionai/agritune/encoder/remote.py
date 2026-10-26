@@ -14,6 +14,7 @@ This backend has no training-specific retry/backoff behavior — that belongs to
 the ``precisionai.agritune.encoder.errors`` hierarchy.
 """
 
+import asyncio
 import base64
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -70,6 +71,10 @@ def _image_to_data_uri(image: Image.Image) -> str:
     image.convert("RGB").save(buffer, format="PNG")
     encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
     return f"data:image/png;base64,{encoded}"
+
+
+def _images_to_data_uris(images: Sequence[Image.Image]) -> list[str]:
+    return [_image_to_data_uri(image) for image in images]
 
 
 def _decode_cls_embedding(embedding: Any) -> torch.Tensor:
@@ -148,7 +153,9 @@ class RemoteEncoderBackend:
             When the response is missing expected fields or cannot be decoded.
         """
         image_sizes = [(image.height, image.width) for image in images]
-        payload = [_image_to_data_uri(image) for image in images]
+        # PNG encoding is CPU-bound and Pillow releases the GIL while doing it: run it in a worker thread so the
+        # gateway's concurrent requests encode in parallel instead of queueing on the event loop.
+        payload = await asyncio.to_thread(_images_to_data_uris, images)
 
         extra_body: dict[str, Any] = {"return_patch_tokens": True}
         if self._config.native_resolution is not None:
